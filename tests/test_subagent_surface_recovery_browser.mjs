@@ -20,7 +20,10 @@ const chatA = { id: "surface-A", sessionId: "surface-session-A", title: "Surface
 const chatB = { ...chatA, id: "surface-B", sessionId: "surface-session-B", title: "Surface B" };
 const chatC = { ...chatB, id: "surface-C", sessionId: "surface-session-C", title: "Surface C", projectPath: "E:/fixtures/other-project", projectType: "unity" };
 if (issue === "composer-notification") {
-  chatA.items = [{ id: "copy-source", type: "user", text: "Review the draft before sending.", createdAt: date }];
+  chatA.items = [
+    { id: "copy-source", type: "user", text: "Review the draft before sending.", createdAt: date },
+    { id: "copy-other", type: "user", text: "Keep this other message separate.", createdAt: date },
+  ];
 }
 if (issue === "sidebar") {
   chatA.projectPath = "E:/fixtures/sidebar-workbench";
@@ -187,7 +190,7 @@ const baselineModules = new Set([
   "src/App.tsx", "src/components/subagents/sub-agent-sidebar.tsx", "src/hooks/use-composer-draft.ts",
   "src/lib/api/sub-agents.ts", "src/lib/subagent-delegate.ts", "src/lib/subagent-state.ts",
   ...(["chat-links", "external-chat-link"].includes(issue) ? ["src/components/chat/chat-markdown.tsx", "src/components/sidebar/sidebar-menus.tsx", "src/hooks/use-chat-deep-links.ts"] : []),
-  ...(issue === "composer-notification" ? ["src/components/ui/transient-failure-toast.tsx"] : []),
+  ...(issue === "composer-notification" ? ["src/components/chat/conversation-card.tsx", "src/components/ui/transient-failure-toast.tsx"] : []),
 ]);
 const scratch = await mkdtemp(resolve(tmpdir(), "vrcforge-subagent-surface-"));
 const frontend = resolve(scratch, "frontend");
@@ -328,6 +331,13 @@ try {
   };
 
   if (issue === "composer-notification") {
+    async function assertCopyFeedback(button, copied) {
+      await button.locator(copied ? "svg.lucide-check" : "svg.lucide-copy").waitFor();
+      const label = copied ? "Copied" : "Copy";
+      assert.equal(await button.getAttribute("title"), label);
+      assert.equal(await button.getAttribute("aria-label"), label);
+    }
+
     for (const [width, height, theme] of [[1600, 1000, "light"], [900, 640, "dark"]]) {
       const page = await open(true, "", { viewport: { width, height }, theme });
       await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
@@ -335,7 +345,8 @@ try {
       const composer = dock.locator("textarea");
       const permission = dock.getByRole("button", { name: "Restricted", exact: true });
       const reasoning = dock.getByRole("button", { name: "Reasoning effort" });
-      const copy = page.getByRole("button", { name: "Copy", exact: true });
+      const copy = page.locator('[data-conversation-item-id="copy-source"]').getByRole("button", { name: /^(Copy|Copied)$/ });
+      const otherCopy = page.locator('[data-conversation-item-id="copy-other"]').getByRole("button", { name: /^(Copy|Copied)$/ });
       const notice = page.locator(".transient-failure-toast");
       const dismiss = notice.getByRole("button", { name: "Dismiss notification" });
       await reasoning.waitFor();
@@ -357,21 +368,33 @@ try {
       }
 
       await composer.fill("Draft preserved while copying");
+      await page.clock.install();
+      await page.evaluate(() => {
+        const writeText = navigator.clipboard.writeText.bind(navigator.clipboard);
+        window.completedClipboardWrites = 0;
+        navigator.clipboard.writeText = async (text) => {
+          await writeText(text);
+          window.completedClipboardWrites += 1;
+        };
+      });
       await copy.click();
-      await notice.getByText("Message copied", { exact: true }).waitFor();
-      await assertComposerClear();
-      await notice.getByRole("status").getByText("Message copied", { exact: true }).waitFor();
+      await assertCopyFeedback(copy, true);
+      assert.equal(await notice.count(), 0, "copy success must not create a workspace notification");
+      await assertCopyFeedback(otherCopy, false);
       assert.equal(await page.evaluate(() => navigator.clipboard.readText()), chatA.items[0].text);
-      await permission.click();
-      const autoApprove = dock.getByRole("button", { name: /Auto Approve/ });
-      await autoApprove.waitFor();
-      await dock.getByRole("button", { name: /Restricted Approve writes/ }).click();
-      await autoApprove.waitFor({ state: "hidden" });
-      await reasoning.click();
-      await page.getByRole("menu", { name: "Reasoning effort" }).waitFor();
-      await page.keyboard.press("Escape");
-      await dismiss.click();
-      await notice.waitFor({ state: "hidden" });
+      await page.clock.fastForward(1100);
+      await copy.click();
+      await page.waitForFunction(() => window.completedClipboardWrites === 2);
+      await page.clock.fastForward(1000);
+      await assertCopyFeedback(copy, true);
+
+      await otherCopy.click();
+      await assertCopyFeedback(otherCopy, true);
+      await assertCopyFeedback(copy, true);
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), chatA.items[1].text);
+      await page.clock.fastForward(2000);
+      await assertCopyFeedback(copy, false);
+      await assertCopyFeedback(otherCopy, false);
 
       await page.evaluate(() => {
         navigator.clipboard.writeText = async () => { throw new Error("Fixture clipboard rejected"); };
@@ -380,6 +403,15 @@ try {
       await notice.getByRole("alert").getByText("Copy failed", { exact: true }).waitFor();
       await notice.getByRole("alert").getByText("The clipboard rejected the copy request.", { exact: true }).waitFor();
       await assertComposerClear();
+      await assertCopyFeedback(copy, false);
+      await permission.click();
+      const autoApprove = dock.getByRole("button", { name: /Auto Approve/ });
+      await autoApprove.waitFor();
+      await dock.getByRole("button", { name: /Restricted Approve writes/ }).click();
+      await autoApprove.waitFor({ state: "hidden" });
+      await reasoning.click();
+      await page.getByRole("menu", { name: "Reasoning effort" }).waitFor();
+      await page.keyboard.press("Escape");
       await composer.click();
       await composer.press("End");
       await page.keyboard.type("!");
@@ -388,6 +420,23 @@ try {
       await notice.waitFor({ state: "hidden" });
       await page.close();
     }
+
+    tasks = [done];
+    detail = done;
+    const page = await open(true);
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const panel = await openThread(page);
+    const headerCopy = panel.locator("[data-subagent-copy-reply]");
+    const childCopy = panel.locator("[data-subagent-user-message]").getByRole("button", { name: /^(Copy|Copied)$/ });
+    await headerCopy.click();
+    await assertCopyFeedback(headerCopy, true);
+    await assertCopyFeedback(childCopy, false);
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), done.result.summaryText);
+    await childCopy.click();
+    await assertCopyFeedback(childCopy, true);
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), done.task);
+    assert.equal(await page.locator(".transient-failure-toast").count(), 0);
+    await page.close();
   }
 
   if (issue === "sidebar") {

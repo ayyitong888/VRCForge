@@ -83,7 +83,7 @@ export function MarkdownCodeBlock({ code, language, inverted = false }: Markdown
       <div className="flex items-center justify-between border-b border-inherit px-3 py-1.5 text-[11px] opacity-80" data-chat-selection-excluded>
         <span>{normalizedLanguage || "code"}</span>
         <button type="button" className={`rounded border px-2 py-0.5 ${button}`} onClick={copy} aria-label={t("chat.markdown.copy", { defaultValue: "复制代码" })}>
-          {copyState === "copied" ? t("chat.markdown.copied", { defaultValue: "已复制" }) : copyState === "failed" ? t("chat.markdown.copyFailed", { defaultValue: "复制失败" }) : t("chat.markdown.copy", { defaultValue: "复制代码" })}
+          {copyState === "copied" ? t("chat.copied", { defaultValue: "已复制" }) : copyState === "failed" ? t("chat.markdown.copyFailed", { defaultValue: "复制失败" }) : t("chat.markdown.copy", { defaultValue: "复制代码" })}
         </button>
       </div>
       {isMermaid ? <div ref={mermaidRef} className={mermaidState === "ready" ? "overflow-auto bg-white p-3 text-slate-900" : "hidden"} aria-label="Mermaid diagram" /> : null}

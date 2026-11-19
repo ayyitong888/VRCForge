@@ -330,7 +330,7 @@ export function ChatWorkspace({
   editingAttachments: ChatAttachment[];
   onEditItemChangeText: (value: string) => void;
   onEditItemRemoveAttachment: (attachmentId: string) => void;
-  onCopyItem: (item: ConversationItem) => void;
+  onCopyItem: (item: ConversationItem) => Promise<boolean>;
   onRetryItem: (itemId: string) => void;
   onEditItem: (itemId: string) => void;
   onEditItemSave: () => void;

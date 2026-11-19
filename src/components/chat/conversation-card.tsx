@@ -3,7 +3,6 @@ import {
   Brain,
   Check,
   ChevronRight,
-  Copy,
   ExternalLink,
   FilePlus2,
   Loader2,
@@ -30,6 +29,7 @@ import { cn, formatCount } from "../../lib/utils";
 import { assistantReplyTimestamp, formatLocalMessageTime, formatMessageDateSeparator, parseMessageTimestamp } from "../../lib/message-time";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { MessageCopyButton } from "./message-copy-button";
 import { ChatImagePreview } from "./chat-image-preview";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
@@ -104,7 +104,7 @@ export function ConversationCard({
   onEditItemCancel?: () => void;
   canRetry?: boolean;
   canEdit?: boolean;
-  onCopyItem?: (item: ConversationItem) => void;
+  onCopyItem?: (item: ConversationItem) => Promise<boolean>;
   onRetryItem?: (itemId: string) => void;
   onEditItem?: (itemId: string) => void;
   onApprove?: (approvalId: string) => void;
@@ -278,7 +278,7 @@ export function ConversationCard({
             align="right"
             createdAt={item.createdAt}
             metadata={deliveryMetadata}
-            onCopy={() => onCopyItem?.({ ...item, text })}
+            onCopy={onCopyItem ? () => onCopyItem({ ...item, text }) : undefined}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
           />
@@ -554,7 +554,7 @@ export function ConversationCard({
           {!compactAgentReply ? <MessageActions
             createdAt={showReplyActions ? assistantReplyTimestamp(item) : undefined}
             memoryUsage={response.memoryUsage}
-            onCopy={showReplyActions && copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
+            onCopy={showReplyActions && copyableReply && onCopyItem ? () => onCopyItem({ ...item, response }) : undefined}
             onRetry={showReplyActions && canRetry && !isInterruptedRuntimeTurn(response) ? () => onRetryItem?.(item.id) : undefined}
             onEdit={showReplyActions && canEdit ? () => onEditItem?.(item.id) : undefined}
             onSaveAsSkill={saveOperationSummary ? () => onSaveOperationAsSkill?.(saveOperationSummary) : undefined}
@@ -600,7 +600,7 @@ function InterleavedUserMessage({ message, attachmentPayloads, navigationAnchor,
   message: Extract<ConversationItem, { type: "user" }>;
   attachmentPayloads?: AttachmentPayloadVault;
   navigationAnchor?: string;
-  onCopyItem?: (item: ConversationItem) => void;
+  onCopyItem?: (item: ConversationItem) => Promise<boolean>;
 } & Omit<RelayAttributionProps, "sourceChatId">) {
   const sourceChatId = agentRelaySource(message);
   const text = displayedUserMessageText(message);
@@ -817,7 +817,7 @@ function MessageActions({
   createdAt?: string | number;
   metadata?: ReactNode;
   memoryUsage?: AgentRuntimeResponse["memoryUsage"];
-  onCopy?: () => void;
+  onCopy?: () => Promise<boolean>;
   onRetry?: () => void;
   onEdit?: () => void;
   onSaveAsSkill?: () => void;
@@ -849,15 +849,7 @@ function MessageActions({
       {align === "right" ? time : null}
       {metadata}
       {onCopy ? (
-        <button
-          type="button"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-          onClick={onCopy}
-          title={t("chat.copyMessage")}
-          aria-label={t("chat.copyMessage")}
-        >
-          <Copy className="h-3.5 w-3.5" />
-        </button>
+        <MessageCopyButton onCopy={onCopy} className="text-muted-foreground hover:text-foreground" />
       ) : null}
       {onSaveAsSkill ? (
         <button

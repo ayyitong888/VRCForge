@@ -3078,29 +3078,28 @@ export default function App() {
     }
   }
 
-  function copyConversationItem(item: ConversationItem) {
+  async function copyConversationItem(item: ConversationItem): Promise<boolean> {
     const text = item.type === "user" && agentRelaySource(item) !== undefined
       ? item.text : conversationItemText(item, t).trim();
     if (!text.trim()) {
       showTransientNotice("error", "copy", t("chat.copyNoText"));
-      return;
+      return false;
     }
-    copyChatText(text, t("chat.copiedMessage"));
+    return copyChatText(text);
   }
 
-  function copyChatText(text: string, successMessage: string) {
+  async function copyChatText(text: string): Promise<boolean> {
     if (!navigator.clipboard?.writeText) {
       showTransientNotice("error", "copy", t("chat.copyClipboardUnavailable"));
-      return;
+      return false;
     }
-    void navigator.clipboard.writeText(text).then(
-      () => {
-        showTransientNotice("success", "copy", successMessage);
-      },
-      () => {
-        showTransientNotice("error", "copy", t("chat.copyUnknownReason"));
-      },
-    );
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      showTransientNotice("error", "copy", t("chat.copyUnknownReason"));
+      return false;
+    }
   }
 
   messageEditSnapshotRef.current = {
@@ -5063,7 +5062,11 @@ export default function App() {
         onTogglePinChat={togglePinChat}
         onToggleTestChat={toggleTestChat}
         onStartRenameChat={startRenameChat}
-        onCopyChatLink={(chatId) => copyChatText(chatDeepLink(chatId), t("chat.copiedChatLink"))}
+        onCopyChatLink={async (chatId) => {
+          if (await copyChatText(chatDeepLink(chatId))) {
+            showTransientNotice("success", "copy", t("chat.copiedChatLink"));
+          }
+        }}
         onDeleteChat={setDeleteTargetId}
         onCancelDeleteChat={() => setDeleteTargetId("")}
         onConfirmDeleteChat={deleteChatPermanently}

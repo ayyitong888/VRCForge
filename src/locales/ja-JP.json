@@ -839,7 +839,6 @@
     "transportInterrupted": "接続が切れました。どこまで進んだか確認してください。",
     "markdown": {
       "copy": "コードをコピー",
-      "copied": "コピーしました",
       "copyFailed": "コピーできませんでした",
       "mermaidLoading": "図を描画中…",
       "mermaidUnavailable": "図を表示できません。ソースは引き続き表示・コピーできます。"
@@ -1002,7 +1001,7 @@
     "editMessage": "編集",
     "retryMessage": "再試行",
     "regenerateMessage": "再生成",
-    "copiedMessage": "メッセージをコピーしました",
+    "copied": "コピーしました",
     "copiedChatLink": "チャットのリンクをコピーしました",
     "linkTargetMissing": "チャットが見つかりません。",
     "externalLinkOpenFailed": "Codex のチャットを開けませんでした。",

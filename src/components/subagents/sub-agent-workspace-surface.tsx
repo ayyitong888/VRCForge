@@ -1,4 +1,4 @@
-import { Ban, BellOff, Check, Copy, Loader2, ArrowLeft, ArrowUp, X } from "lucide-react";
+import { Ban, BellOff, Check, Loader2, ArrowLeft, ArrowUp, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { SubAgentTask } from "../../lib/api";
@@ -9,6 +9,7 @@ import { canAdoptSubAgentResult, canCancelSubAgentTask, canDismissSubAgentResult
 import { displaySubAgentStatus, isActiveSubAgentStatus, subAgentStatusTone } from "../../lib/subagent-ui";
 import { groupSubAgentThreads } from "../../lib/subagent-threads";
 import { Badge } from "../ui/badge";
+import { MessageCopyButton } from "../chat/message-copy-button";
 import { Button } from "../ui/button";
 import { SubAgentConversation, subAgentConversationCopyItem, subAgentConversationModel } from "./sub-agent-conversation";
 import { subAgentInspectionConclusion } from "./sub-agent-inspection-report";
@@ -28,7 +29,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
   busyTaskIds: ReadonlySet<string>;
   onClose: () => void;
   onCloseSidebar?: () => void;
-  onCopyItem?: (item: ConversationItem) => void;
+  onCopyItem?: (item: ConversationItem) => Promise<boolean>;
   onOpenChatById?: (chatId: string) => void;
 }) {
   const { t } = useTranslation();
@@ -81,10 +82,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
             {t("agent.elapsed", { time: `${elapsed}s` })}
           </span> : null}
           {activeTask ? <Badge tone={subAgentStatusTone(activeTask.status)}>{displaySubAgentStatus(activeTask.status)}</Badge> : null}
-          {copyItem ? <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0"
-            title={t("chat.copyMessage")} aria-label={t("chat.copyMessage")} onClick={() => onCopyItem?.(copyItem)} data-subagent-copy-reply>
-            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-          </Button> : null}
+          {copyItem && onCopyItem ? <MessageCopyButton key={copyItem.id} onCopy={() => onCopyItem(copyItem)} data-subagent-copy-reply /> : null}
           {onCloseSidebar ? <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0" onClick={onCloseSidebar}
             aria-label={t("common.close")} title={t("common.close")} data-vrcforge-close-subagent-sidebar>
             <X className="h-3.5 w-3.5" />

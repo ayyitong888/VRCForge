@@ -841,7 +841,6 @@
     "transportInterrupted": "The connection dropped. Check the progress so far to see where the task stopped.",
     "markdown": {
       "copy": "Copy code",
-      "copied": "Copied",
       "copyFailed": "Copy failed",
       "mermaidLoading": "Rendering diagram…",
       "mermaidUnavailable": "Diagram preview is unavailable. You can still view and copy the source."
@@ -1009,7 +1008,7 @@
     "editMessage": "Edit",
     "retryMessage": "Retry",
     "regenerateMessage": "Regenerate",
-    "copiedMessage": "Message copied",
+    "copied": "Copied",
     "copiedChatLink": "Chat link copied",
     "linkTargetMissing": "Chat not found.",
     "externalLinkOpenFailed": "Could not open this Codex chat.",

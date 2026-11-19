@@ -839,7 +839,6 @@
     "transportInterrupted": "连接中断，暂时无法确认执行到了哪一步。请先查看已有进度。",
     "markdown": {
       "copy": "复制代码",
-      "copied": "已复制",
       "copyFailed": "复制失败",
       "mermaidLoading": "正在生成图表…",
       "mermaidUnavailable": "暂时无法显示图表，源码仍可查看和复制。"
@@ -1007,7 +1006,7 @@
     "editMessage": "编辑",
     "retryMessage": "重试",
     "regenerateMessage": "重生成",
-    "copiedMessage": "已复制消息",
+    "copied": "已复制",
     "copiedChatLink": "已复制对话链接",
     "linkTargetMissing": "找不到此对话。",
     "externalLinkOpenFailed": "无法打开这条 Codex 会话链接。",

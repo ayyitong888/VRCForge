@@ -143,7 +143,7 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
   endpoint: string;
   turns: SubAgentTask[];
   developerOptionsEnabled?: boolean;
-  onCopyItem?: (item: ConversationItem) => void;
+  onCopyItem?: (item: ConversationItem) => Promise<boolean>;
   onOpenChatById?: (chatId: string) => void;
   modelTaskId?: string;
   onModelChange?: (taskId: string, model: string) => void;
