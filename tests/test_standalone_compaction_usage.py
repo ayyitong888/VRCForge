@@ -4,11 +4,29 @@ import pytest
 
 import dashboard_server as dashboard
 from dashboard_api_models import AgentCompactRequest
+from context_compaction import MODEL_HANDOFF_PREFIX
 from runtime_planner_service import PlannerModelResult
 
 
 def _request() -> AgentCompactRequest:
     return AgentCompactRequest(history=[{"role": "user", "text": "fixture history"}])
+
+
+def test_standalone_compact_routes_prior_handoff_as_state_and_keeps_archive(monkeypatch):
+    settings = SimpleNamespace(llm_provider="openai", llm_api_key="test", llm_model="model")
+    monkeypatch.setattr(dashboard, "load_dashboard_settings", lambda _request: settings)
+    prior = {"role": "agent", "text": MODEL_HANDOFF_PREFIX + "Previous handoff"}
+    recent = {"role": "user", "text": "New information"}
+
+    def compact(history, **kwargs):
+        assert history == [recent]
+        assert kwargs["prior_handoff"] == "Previous handoff"
+        assert kwargs["recovery_history"] == [prior, recent]
+        assert kwargs["handoff_archive_indices"] == [1]
+        return {"ok": True, "summary": "fixture"}
+
+    monkeypatch.setattr(dashboard, "compact_context", compact)
+    assert dashboard.app_agent_compact(AgentCompactRequest(history=[prior, recent]))["ok"] is True
 
 
 def test_standalone_compact_preserves_provider_usage_and_uses_metadata_route(monkeypatch):

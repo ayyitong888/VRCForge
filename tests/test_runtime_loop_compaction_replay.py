@@ -2,6 +2,7 @@ import json
 import re
 from unittest.mock import patch
 
+from context_compaction import MODEL_HANDOFF_PREFIX
 from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata, estimate_runtime_context_tokens
 from test_agent_loop_p0 import AgentLoopP0Tests
 from test_runtime_planner_service import FakeDesktop, FakeTurn
@@ -80,6 +81,7 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
         {"ok": True, "exitCode": 0, "stdout": "APPENDED_AFTER_OFFSET_MARKER " + "c" * 200},
     ]
     history = [{"role": "user", "text": "VERBATIM_ORIGINAL_REQUEST"},
+               {"role": "agent", "text": MODEL_HANDOFF_PREFIX + "PREVIOUS_LEGACY_HANDOFF"},
                {"role": "agent", "text": "LONG_PRIOR_HISTORY_MARKER " * 2200},
                {"role": "user", "text": "VERBATIM_RECENT_TURN_1"}, {"role": "agent", "text": "retained response 1"},
                {"role": "user", "text": "VERBATIM_RECENT_TURN_2"}, {"role": "agent", "text": "retained response 2"}]
@@ -109,6 +111,9 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
         }
         compaction_input, compaction_request = compactor.calls[0]
         assert compaction_request["phase"] == "mid_turn"
+        assert compaction_request["_priorHandoff"] == "PREVIOUS_LEGACY_HANDOFF"
+        assert compaction_request["_recoveryHistory"][0]["text"] == MODEL_HANDOFF_PREFIX + "PREVIOUS_LEGACY_HANDOFF"
+        assert compaction_request["_handoffArchiveIndices"] == [1, 2]
         assert len(compaction_input) == 2, [
             [(step.get("status"), step.get("tool")) for step in state]
             for state in compaction_inputs
@@ -125,6 +130,7 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
         assert "COMPACTED_LEGACY_PREFIX_SUMMARY" in third_prompt
         assert "LATEST_OBSERVATION_MARKER" in third_prompt
         assert "FIRST_OBSERVATION_MARKER" not in third_prompt
+        assert "PREVIOUS_LEGACY_HANDOFF" not in third_prompt
         assert "COMPACTED_LEGACY_PREFIX_SUMMARY" in fourth_prompt
         assert "LATEST_OBSERVATION_MARKER" in fourth_prompt
         assert "APPENDED_AFTER_OFFSET_MARKER" in fourth_prompt

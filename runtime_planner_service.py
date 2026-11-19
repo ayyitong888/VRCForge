@@ -21,7 +21,7 @@ import re
 import time
 import time
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Callable, Mapping, Protocol
+from typing import TYPE_CHECKING, Callable, Mapping, Protocol, Sequence
 
 from jsonschema import Draft202012Validator, ValidationError, validators
 from jsonschema.exceptions import best_match
@@ -46,7 +46,7 @@ from agent_scan_result_policy import is_scan_result_policy_message, restored_sca
 from agent_runtime_input import RuntimeInputSource
 from agent_runtime_session_state import (
     NATIVE_RUNTIME_CONTEXT_PREFIX, NATIVE_RUNTIME_STATE_PREFIX,
-    inject_native_handoff_context, native_model_history, native_runtime_state_content,
+    inject_native_handoff_context, model_handoff_payload, native_model_history, native_runtime_state_content,
 )
 from native_request_composition import (
     attach_native_request_composition,
@@ -107,7 +107,9 @@ RUNTIME_AUTHORITY_INSTRUCTION = (
     "Follow the tool receipt for actual approval and execution status. "
 )
 RUNTIME_CONTEXT_INSTRUCTION = (
-    "Use earlier summaries and memory as context; fresh observations and the current user request take precedence. "
+    "Use earlier handoffs and memory as context. Resume the earliest unfinished phase and choose an action whose prerequisites are met. "
+    "Current user decisions and newer evidence about the same work can change its status or order. "
+    "A recent tool suggestion or successful read alone does not replace an established phase order or authorize a write. "
     "For explicit remember or forget requests, use remember_memory or delete_memory in execution; list_memory is read-only. "
     "Save exact user wording in the active project or user scope, and report the returned memoryId. "
     "Use create_goal only for an explicit durable goal. "
@@ -1282,6 +1284,19 @@ def _handoff_excludes_tool(name: object) -> bool:
     return str(name or "").removeprefix("vrcforge_").removeprefix("unity_") in {"progress_list", "progress_replace", "progress_update"}
 
 
+def runtime_handoff_source(history: Sequence[Mapping[str, object]]) -> tuple[list[Mapping[str, object]], list[int], str | None]:
+    entries = []
+    archive_indices = []
+    prior_handoff = None
+    for index, entry in enumerate(history):
+        if (payload := model_handoff_payload(entry)) is not None:
+            prior_handoff = payload
+        else:
+            entries.append(entry)
+            archive_indices.append(index)
+    return entries, archive_indices, prior_handoff
+
+
 def _handoff_tool_group(group: list[dict[str, object]]) -> list[dict[str, object]]:
     """The authoritative TODO list is supplied verbatim outside the handoff."""
     calls = group[0]["tool_calls"]
@@ -2448,6 +2463,7 @@ class RuntimePlannerService:
             entries: list[dict[str, str]] = []
             recovery_entries: list[dict[str, str]] = []
             handoff_archive_indices: list[int] = []
+            prior_handoff = None
             group: list[dict[str, object]] = []
             pending: set[str] = set()
             for item in source_messages:
@@ -2475,8 +2491,11 @@ class RuntimePlannerService:
                         "agent" if safe["role"] == "assistant" else "runtime"
                     )
                     entry = {"role": role, "text": safe["content"]}
-                    handoff_archive_indices.append(len(recovery_entries))
-                    entries.append(entry)
+                    if (payload := model_handoff_payload(entry)) is not None:
+                        prior_handoff = payload
+                    else:
+                        handoff_archive_indices.append(len(recovery_entries))
+                        entries.append(entry)
                     recovery_entries.append(entry)
             if pending:
                 raise ValueError("native completed prefix contains pending calls")
@@ -2500,6 +2519,7 @@ class RuntimePlannerService:
                 "trigger": metadata["trigger"], "phase": metadata["phase"], "targetTokens": summary_target,
                 "inputMode": "native",
                 "handoff": True,
+                "_priorHandoff": prior_handoff,
                 "hasTodo": has_todo or bool(ensure_dict(request.get("_diagnosticOrigin")).get("hasTodo")),
                 "_recoveryHistory": recovery_entries if recovery_entries != entries else None,
                 "_handoffArchiveIndices": handoff_archive_indices,
@@ -2513,6 +2533,7 @@ class RuntimePlannerService:
                 if not (coverage.get("selectedInputComplete") is True
                         and ensure_dict(result.get("completeness")).get("sourceRecoveryComplete") is True
                         and result.get("fidelity") != "fallback"):
+                    metadata["failureClass"] = result.get("fallbackReason")
                     raise ValueError("incomplete_summarizer_input")
             summary = str(result.get("summary") or "").strip()
             if not summary or result.get("ok") is False:
@@ -2546,7 +2567,8 @@ class RuntimePlannerService:
             if context_usage is not None:
                 _reset_compacted_context_usage(context_usage, str(result.get("summaryDigest") or summary))
         except Exception as exc:  # noqa: BLE001 - keep the existing transcript on provider/CAS failure.
-            metadata["failureClass"] = "cancelled" if native_turn.cancelled() else classify_runtime_compaction_failure(exc)
+            metadata["failureClass"] = "cancelled" if native_turn.cancelled() else (
+                metadata.get("failureClass") or classify_runtime_compaction_failure(exc))
         if metadata.get("attempts") is None:
             metadata["attempts"] = 1
         metadata["latencyMs"] = bounded_runtime_compaction_integer((time.perf_counter() - started) * 1000, 86_400_000)
@@ -4073,8 +4095,11 @@ class RuntimePlannerService:
                 human_turns = [index for index, entry in enumerate(history) if entry.get("role") == "user"]
                 tail_start = human_turns[-2] if len(human_turns) >= 2 else (human_turns[0] if human_turns else len(history))
                 pinned = {human_turns[0]} if human_turns else set()
-                retained_history = [entry for index, entry in enumerate(history) if index in pinned or index >= tail_start]
-                older_history = [entry for index, entry in enumerate(history) if index not in pinned and index < tail_start]
+                retained_history = [entry for index, entry in enumerate(history) if (index in pinned or index >= tail_start)
+                                    and model_handoff_payload(entry) is None]
+                older_history = [entry for index, entry in enumerate(history) if (index not in pinned and index < tail_start)
+                                 or model_handoff_payload(entry) is not None]
+                older_entries, handoff_archive_indices, prior_handoff = runtime_handoff_source(older_history)
                 compacted_loop_steps = max(0, completed_prefix - 3)
                 compacted_loop_state = (loop_state or [])[:compacted_loop_steps]
                 retained_loop_state = (loop_state or [])[compacted_loop_steps:]
@@ -4095,7 +4120,6 @@ class RuntimePlannerService:
                     raise ValueError("insufficient_summary_budget")
                 loop_entries = []
                 recovery_loop_entries = []
-                handoff_archive_indices = list(range(len(older_history)))
                 for index, step in enumerate(compacted_loop_state, start=1):
                     if not isinstance(step, dict):
                         continue
@@ -4114,9 +4138,9 @@ class RuntimePlannerService:
                     if not _handoff_excludes_tool(step.get("tool")):
                         handoff_archive_indices.append(len(older_history) + len(recovery_loop_entries) - 1)
                         loop_entries.append(entry)
-                if not loop_entries and not older_history:
+                if not loop_entries and not older_entries:
                     raise ValueError("no_compactable_history")
-                compaction_input = tuple(dict(entry) for entry in older_history) + tuple(loop_entries)
+                compaction_input = tuple(dict(entry) for entry in older_entries) + tuple(loop_entries)
                 metadata["attempts"] = 1
                 result = dict(compact_port.compact(
                     compaction_input,
@@ -4129,8 +4153,10 @@ class RuntimePlannerService:
                         "targetTokens": summary_budget,
                         "realContextLimit": context_limit,
                         "handoff": True,
+                        "_priorHandoff": prior_handoff,
                         "hasTodo": bool(ensure_list(observe.get("activeTodo"))),
-                        "_recoveryHistory": [*older_history, *recovery_loop_entries] if recovery_loop_entries != loop_entries else None,
+                        "_recoveryHistory": [*older_history, *recovery_loop_entries]
+                        if prior_handoff is not None or recovery_loop_entries != loop_entries else None,
                         "_handoffArchiveIndices": handoff_archive_indices,
                         "_recordUsage": lambda prompt, usage: self.record_context_usage(
                             context_usage, prompt, [], usage,
@@ -4139,6 +4165,7 @@ class RuntimePlannerService:
                 ))
                 metadata["attempts"] = bounded_runtime_compaction_integer(result.get("providerAttempts"), 16)
                 if ensure_dict(result.get("completeness")).get("summarizerInputComplete") is False:
+                    metadata["failureClass"] = result.get("fallbackReason")
                     raise ValueError("incomplete_summarizer_input")
                 recovery = normalize_compaction_recovery(result["recovery"]) if "recovery" in result else None
                 summary = str(ensure_dict(result).get("summary") or "").strip()
@@ -4192,7 +4219,7 @@ class RuntimePlannerService:
                 _reset_compacted_context_usage(context_usage, str(metadata.get("summaryDigest") or summary))
                 return replacement_history, metadata, False
             except Exception as exc:  # noqa: BLE001 - host/provider failures are classified and bounded.
-                metadata["failureClass"] = classify_runtime_compaction_failure(exc)
+                metadata["failureClass"] = metadata.get("failureClass") or classify_runtime_compaction_failure(exc)
                 if metadata.get("attempts") is None:
                     metadata["attempts"] = 1
                 metadata["latencyMs"] = bounded_runtime_compaction_integer(

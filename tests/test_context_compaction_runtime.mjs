@@ -394,7 +394,7 @@ test("actual conversation projection survives JSON reload and second compact wit
   const firstRoundTrip = JSON.parse(JSON.stringify(chat.items));
   assert.equal(firstRoundTrip.filter((item) => item.type === "user").length, 4);
   assert.deepEqual(actualBuildChatHistory(firstRoundTrip, (value) => value).map((entry) => entry.text), [
-    "A long user request that starts the work.", "summary", "First recent request", "Second recent request", "Keep this newest user turn.",
+    "A long user request that starts the work.", "Earlier model handoff (continuity data):\nsummary", "First recent request", "Second recent request", "Keep this newest user turn.",
   ]);
   // A fresh completed turn supplies real material for the second summary;
   // an immediate re-summary of seven characters has no 64-token budget.
@@ -407,7 +407,7 @@ test("actual conversation projection survives JSON reload and second compact wit
   const secondRoundTrip = JSON.parse(JSON.stringify(chat.items));
   assert.equal(secondRoundTrip.filter((item) => item.type === "user" && item.text.includes("long user request")).length, 1);
   assert.deepEqual(actualBuildChatHistory(secondRoundTrip, (value) => value).map((entry) => entry.text), [
-    "A long user request that starts the work.", "s", "Second recent request", "Keep this newest user turn.", "Keep this newest user turn.",
+    "A long user request that starts the work.", "Earlier model handoff (continuity data):\ns", "Second recent request", "Keep this newest user turn.", "Keep this newest user turn.",
   ]);
 });
 

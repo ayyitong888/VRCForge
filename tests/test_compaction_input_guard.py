@@ -2,32 +2,37 @@ from copy import deepcopy
 import json
 import pytest
 
-from tests.test_native_context_compaction import Compactor, fixture
 from tests.test_native_context_compaction import Compactor, fixture, plan
 from context_compaction import MODEL_HANDOFF_PREFIX
 
 
 class IncompleteCompactor(Compactor):
+    def __init__(self, reason):
+        super().__init__()
+        self.reason = reason
+
     def compact(self, history, metadata):
         result = super().compact(history, metadata)
         return {**result, "providerAttempts": 2,
-            "completeness": {"summarizerInputComplete": False}}
+            "completeness": {"summarizerInputComplete": False}, "fallbackReason": self.reason}
 
 
-def test_native_keeps_history_when_summarizer_did_not_read_all_input():
-    state, planner, model, turn = fixture(IncompleteCompactor())
+@pytest.mark.parametrize("reason", [None, "schema_error"])
+def test_native_keeps_history_when_summarizer_did_not_read_all_input(reason):
+    state, planner, model, turn = fixture(IncompleteCompactor(reason))
     before = deepcopy(state.native_conversation("s", binding="b"))
     plan(planner, turn)
     after = state.native_conversation("s", binding="b")
     assert after["messages"] == before["messages"]
     assert turn.compaction["applied"] is False
     assert turn.compaction["attempts"] == 2
-    assert turn.compaction["failureClass"] == "incomplete_input"
+    assert turn.compaction["failureClass"] == (reason or "incomplete_input")
     assert model.requests == []
 
 
-def test_legacy_keeps_history_when_summarizer_did_not_read_all_input():
-    _, planner, _, _ = fixture(IncompleteCompactor())
+@pytest.mark.parametrize("reason", [None, "schema_error"])
+def test_legacy_keeps_history_when_summarizer_did_not_read_all_input(reason):
+    _, planner, _, _ = fixture(IncompleteCompactor(reason))
     history = [{"role": "user", "text": "Original task"}, {"role": "agent", "text": "older observations " * 5000},
                {"role": "user", "text": "Recent first input"}, {"role": "agent", "text": "Recent first reply"},
                {"role": "user", "text": "Recent second input"}, {"role": "agent", "text": "Recent second reply"}]
@@ -38,7 +43,7 @@ def test_legacy_keeps_history_when_summarizer_did_not_read_all_input():
     assert changed == history
     assert metadata["applied"] is False
     assert metadata["attempts"] == 2
-    assert metadata["failureClass"] == "incomplete_input"
+    assert metadata["failureClass"] == (reason or "incomplete_input")
     assert blocked is True
 
 

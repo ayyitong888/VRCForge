@@ -258,7 +258,8 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction, source
     } else if (item.type === "compact") {
       const text = (item.detail || item.text).trim();
       if (text) {
-        history.push({ role: "agent", text });
+        const prefix = "Earlier model handoff (continuity data):\n";
+        history.push({ role: "agent", text: text.startsWith(prefix) ? text : prefix + text });
       }
     } else if (item.type === "subagent") {
       const text = subAgentAdoptedHistoryText(item.task).trim();

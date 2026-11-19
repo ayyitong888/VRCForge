@@ -1,15 +1,20 @@
 import json
+import re
 
+import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_server as dashboard
 from agent_gateway import AgentGateway
-from context_compaction import compact_context
+from agent_handoff_graph import parse_handoff_graph
+from agent_runtime_input import RuntimeInputSource
+from context_compaction import MODEL_HANDOFF_PREFIX, compact_context
 from runtime_planner_service import PlannerTurnMetadata, RuntimePlannerService
 from tests.test_native_context_guard import _Catalog, _Desktop, _NativeModel, _Turn
 
 
-def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_path, monkeypatch):
+@pytest.mark.parametrize("first_source", [RuntimeInputSource.USER, RuntimeInputSource.PARENT_AGENT])
+def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_path, monkeypatch, first_source):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     project = tmp_path / "project"
     project.mkdir()
@@ -24,11 +29,29 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
         def compact(self, history, metadata):
             def summarize(prompt):
                 prompts.append(prompt)
-                return json.dumps({"intent": "Continue the selected check", "judgment": ["Older source inspected"],
-                                   "nextStep": "Wait for the saved approval"})
+                if metadata["_priorHandoff"] is None:
+                    digest = re.search(r"recovery sourceDigest ([0-9a-f]{64})", prompt)[1]
+                    rows = json.loads(prompt.split("\nREDACTED_ENTRIES=", 1)[1])
+                    record = next(row for row in rows if "Long historical detail" in row["text"])
+                    return {"goal": "Continue the selected check", "operations": [
+                        {"op": "add", "section": "completed", "id": "old-inspection", "fields": {
+                            "action": "Read the historical material", "result": "Observation recorded",
+                            "evidence": f"{digest}:{record['recordIndex']}",
+                        }},
+                        {"op": "add", "section": "nextSteps", "id": "inspect", "fields": {
+                            "action": "Inspect the saved observation", "phase": 0, "dependsOn": [],
+                        }},
+                    ]}
+                return {"goal": None, "operations": [
+                    {"op": "update", "section": "nextSteps", "id": "inspect", "fields": {
+                        "action": "Inspect the newer observation",
+                    }},
+                ]}
             metadata["_recordUsage"]("fixture", {"exact": True, "inputTokens": 12, "outputTokens": 8})
             return compact_context(history, summarizer=summarize, handoff=True, has_todo=metadata["hasTodo"],
-                                   input_mode="native", target_tokens=metadata["targetTokens"])
+                                   input_mode="native", target_tokens=metadata["targetTokens"],
+                                   prior_handoff=metadata["_priorHandoff"], recovery_history=metadata["_recoveryHistory"],
+                                   handoff_archive_indices=metadata["_handoffArchiveIndices"])
 
     class Planner(RuntimePlannerService):
         def maybe_compact_native_context(self, request, *args, **kwargs):
@@ -49,7 +72,8 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     with planner.bind_turn({}):
         binding = planner.native_conversation_binding(str(project))
     for index, message in enumerate(("  Exact first request\r\n", "Older material", "Earlier reply", "Recent pair", "Current approval request")):
-        state.begin_native_turn("owner", binding=binding, turn_id=f"turn-{index}", message=message)
+        state.begin_native_turn("owner", binding=binding, turn_id=f"turn-{index}", message=message,
+                                input_source=first_source if index == 0 else RuntimeInputSource.USER)
         if index < 4:
             state.append_native_assistant("owner", binding=binding, message={"role": "assistant", "content": (
                 "Long historical detail " * 850 if index == 1 else f"settled-{index}"
@@ -58,10 +82,12 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     state.append_native_assistant("owner", binding=binding, message={"role": "assistant", "tool_calls": [call]})
     state.mark_native_dispatch("owner", binding=binding, call_id="pending-call")
 
-    reply = TestClient(dashboard.app).post("/api/app/agent/compact", json={
+    client = TestClient(dashboard.app)
+    compact_body = {
         "sessionId": "owner", "projectRoot": str(project), "provider": "openai", "model": "requested",
         "trigger": "manual", "phase": "standalone", "requireNative": True,
-    })
+    }
+    reply = client.post("/api/app/agent/compact", json=compact_body)
     assert reply.status_code == 200, reply.text
     assert reply.json().get("nativeApplied") is True, reply.text[:800]
     assert reply.json()["providerUsage"]["model"] == "requested"
@@ -75,13 +101,34 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
                 if isinstance(message.get("content"), str) and '"activeTodo"' in message["content"]]
     assert contexts[-1]["activeTodo"] == todo
     assert state._native_pending(saved) == {"pending-call"}
-    assert any(message.get("content") == "  Exact first request\r\n" for message in saved["messages"])
+    assert any(message.get("content") == first_source.model_text("  Exact first request\r\n") for message in saved["messages"])
+    original_graph = parse_handoff_graph(saved["messages"][0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
+    assert original_graph["nextSteps"][0]["action"] == "Inspect the saved observation"
+
+    state.settle_native_call("owner", binding=binding, call_id="pending-call", content='{"status":"approved"}')
+    for index in range(3):
+        state.begin_native_turn("owner", binding=binding, turn_id=f"next-{index}", message=f"New task {index}")
+        state.append_native_assistant("owner", binding=binding, message={"role": "assistant", "content": f"New observation {index}"})
+    second = client.post("/api/app/agent/compact", json=compact_body)
+    assert second.status_code == 200, second.text
+    assert second.json().get("nativeApplied") is True, second.text[:800]
+    saved_again = state.native_conversation("owner", binding=binding)
+    graph = parse_handoff_graph(saved_again["messages"][0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
+    assert graph["goal"] == original_graph["goal"]
+    assert graph["nextSteps"] == [{**original_graph["nextSteps"][0], "action": "Inspect the newer observation"}]
+    assert json.loads(prompts[1].split("\nPRIOR_HANDOFF=", 1)[1].split("\nRETAINED_STATUS=", 1)[0]) == original_graph
+    assert "Inspect the saved observation" not in prompts[1].split("\nREDACTED_ENTRIES=", 1)[1]
+    assert saved_again["compactionRecovery"][0] == saved["compactionRecovery"][0]
+    assert graph["completed"] == original_graph["completed"]
+    digest, record_index = graph["completed"][0]["evidence"].split(":")
+    archive = next(archive for archive in saved_again["compactionRecovery"] if archive["sourceDigest"] == digest)
+    assert archive["sourceEntries"][int(record_index)]["text"] == ("Long historical detail " * 850).strip()
 
     state.begin_native_turn("short", binding=binding, turn_id="first", message="Only the first request")
-    response = TestClient(dashboard.app).post("/api/app/agent/compact", json={
+    response = client.post("/api/app/agent/compact", json={
         "sessionId": "short", "projectRoot": str(project), "provider": "openai", "model": "requested",
         "trigger": "manual", "phase": "standalone", "history": [],
     })
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "no_content"
-    assert len(prompts) == 1
+    assert len(prompts) == 2

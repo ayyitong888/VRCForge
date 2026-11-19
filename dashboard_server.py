@@ -660,6 +660,7 @@ from runtime_planner_service import (
     RuntimePlannerService,
     planner_tool_input_contract,
     public_runtime_payload,
+    runtime_handoff_source,
     validate_planner_tool_arguments,
 )
 from shader_vision_protection_service import (
@@ -3617,7 +3618,8 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
                     return result
             if request.require_native:
                 raise AgentGatewayError("Select the provider and model that own this approval before compacting.", status_code=409)
-            if not request.history:
+            history, archive_indices, prior_handoff = runtime_handoff_source(request.history)
+            if not history:
                 return {"ok": False, "status": "no_content", "summary": ""}
             settings = load_dashboard_settings(ConnectionRequest())
             if route is not None:
@@ -3640,10 +3642,12 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
                 limit=1, project_root=request.project_root, session_id=request.session_id,
             )["items"])
             result = compact_context(
-                request.history, summarizer=summarizer, source_digest=request.source_digest,
+                history, summarizer=summarizer, source_digest=request.source_digest,
                 trigger=request.trigger, phase=request.phase, language=request.language,
                 provider=settings.llm_provider, model=settings.llm_model, target_tokens=request.target_tokens,
                 real_context_limit=request.real_context_limit, handoff=True, has_todo=has_todo,
+                prior_handoff=prior_handoff, recovery_history=request.history if prior_handoff is not None else None,
+                handoff_archive_indices=archive_indices if prior_handoff is not None else None,
             )
         result["providerUsage"] = aggregate_compact_provider_usage(
             provider_receipts, provider=settings.llm_provider, model=settings.llm_model
@@ -17489,6 +17493,7 @@ class _RuntimePlannerCompactor:
             input_mode=str(metadata.get("inputMode") or "complete"),
             input_estimate_ratio=ratio,
             handoff=metadata.get("handoff") is True,
+            prior_handoff=metadata.get("_priorHandoff"),
             has_todo=metadata.get("hasTodo") is True,
             recovery_history=metadata.get("_recoveryHistory"),
             handoff_archive_indices=metadata.get("_handoffArchiveIndices"),

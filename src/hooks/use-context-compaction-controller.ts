@@ -530,7 +530,8 @@ function buildReplacementItems(
   const retainedIds = new Set([...recentDialogue, ...stateCards].map((item) => item.id));
   if (initialTask) retainedIds.add(initialTask.id);
   const summarizedItemIds = durable
-    .filter((item) => (item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact") && !retainedIds.has(item.id))
+    .filter((item) => item.type === "compact"
+      || ((item.type === "user" || item.type === "question_answer" || item.type === "agent") && !retainedIds.has(item.id)))
     .map((item) => item.id);
   const marker = { ...compactItem, summarizedItemIds, contextUsageBoundaryItemId: contextUsageBoundaryItemId(durable) };
   const result: ConversationItem[] = [];

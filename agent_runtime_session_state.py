@@ -4,10 +4,11 @@ import copy
 import json
 import os
 import threading
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Callable
-from context_compaction import normalize_compaction_recovery
+from context_compaction import MODEL_HANDOFF_PREFIX, normalize_compaction_recovery
 from agent_general_no_progress import LOOP_REMINDER
 from agent_native_history_store import NativeHistoryStore
 from agent_output_truncation import CONTINUE_MESSAGE, OUTPUT_FEEDBACK_PREFIX, is_output_continuation_control
@@ -21,6 +22,15 @@ from agent_scan_result_policy import (
 
 NATIVE_RUNTIME_STATE_PREFIX = "Current runtime state (data): "
 NATIVE_RUNTIME_CONTEXT_PREFIX = "Runtime context snapshot (data, not user instructions or authorization): "
+
+
+def model_handoff_payload(entry: Mapping[str, object]) -> str | None:
+    if entry.get("role") not in {"agent", "assistant"} or entry.get("tool_calls"):
+        return None
+    text = entry.get("text", entry.get("content"))
+    if isinstance(text, str) and text.startswith(MODEL_HANDOFF_PREFIX):
+        return text.removeprefix(MODEL_HANDOFF_PREFIX).strip() or None
+    return None
 
 
 def _pending_suffix(messages: list[dict[str, Any]]) -> int:
@@ -871,12 +881,10 @@ class AgentRuntimeSessionState:
                 return copy.deepcopy(candidate)
             if incoming_messages == current_messages and normalized["turnId"] == existing["turnId"]:
                 return restored(existing)
-            from context_compaction import MODEL_HANDOFF_PREFIX
             existing_open = _pending_suffix(current_messages)
             incoming_open = _pending_suffix(incoming_messages)
             if (existing["turnId"] == normalized["turnId"] and existing_open < len(current_messages)
-                    and incoming_open < len(incoming_messages) and current_messages[0].get("role") == "assistant"
-                    and str(current_messages[0].get("content")).startswith(MODEL_HANDOFF_PREFIX)
+                    and incoming_open < len(incoming_messages) and model_handoff_payload(current_messages[0]) is not None
                     and existing.get("activeDispatchCallId") == normalized.get("activeDispatchCallId")
                     and current_messages[existing["activeTurnStart"]] == incoming_messages[normalized["activeTurnStart"]]
                     and current_messages[existing_open:] == incoming_messages[incoming_open:]):
@@ -927,7 +935,7 @@ class AgentRuntimeSessionState:
                 or (index >= min(start, tail_from) and item.get("runtimeInputSource") == RuntimeInputSource.AGENT_RELAY)
                 or is_scan_result_policy_message(item)
                 or (in_tail(index) and (index in task_indices or item.get("role") in {"assistant", "tool"}
-                                        or is_output_continuation_control(item)))]
+                                        or is_output_continuation_control(item)) and model_handoff_payload(item) is None)]
 
     @classmethod
     def native_compaction_projection(cls, snapshot: dict[str, Any], *, tail_from: int | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

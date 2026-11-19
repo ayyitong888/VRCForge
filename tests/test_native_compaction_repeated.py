@@ -17,6 +17,12 @@ def test_success_does_not_exhaust_compaction_for_new_history_in_same_turn():
     assert len(model.requests) == 2
     assert usage["compactionCount"] == 2
     assert turn.compaction["applied"] is True
+    second_history, metadata = compactor.calls[1]
+    assert metadata["_priorHandoff"] == compactor.summary
+    assert all(compactor.summary not in item["text"] for item in second_history)
+    recovery = metadata["_recoveryHistory"]
+    assert any(compactor.summary in item["text"] for item in recovery)
+    assert [recovery[index] for index in metadata["_handoffArchiveIndices"]] == list(second_history)
 
 
 def test_failed_compaction_is_not_retried_against_unchanged_history():
