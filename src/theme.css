@@ -436,30 +436,6 @@
 }
 
 @layer utilities {
-  .chat-current-activity__label {
-    color: hsl(var(--muted-foreground));
-    background: linear-gradient(100deg, hsl(var(--muted-foreground)) 34%, hsl(var(--foreground) / 0.9) 50%, hsl(var(--muted-foreground)) 66%);
-    background-size: 220% 100%;
-    background-clip: text;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    animation: chat-current-activity-shimmer 2.8s ease-in-out infinite;
-  }
-
-  @keyframes chat-current-activity-shimmer {
-    0%, 100% { background-position: 100% 50%; opacity: 0.72; }
-    50% { background-position: 0% 50%; opacity: 1; }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .chat-current-activity__label {
-      animation: none;
-      background: none;
-      color: hsl(var(--muted-foreground));
-      -webkit-text-fill-color: currentColor;
-    }
-  }
-
   @keyframes computer-use-breathe {
     0%, 100% {
       opacity: var(--computer-use-glow-rest-opacity);

@@ -23,6 +23,10 @@ const scenarios=[
  {name:'questions-race',chats:[withNext,other],entries:[]},
  {name:'queue-race',chats:[withNext,other],entries:[]},
  {name:'waiting-child',chats:[owner,other],entries:[pending]},
+ {name:'unseen-child-http',chats:[owner,other],entries:[]},
+ {name:'unseen-child-ipc',chats:[owner,other],entries:[]},
+ {name:'child-already-delivered',chats:[owner,other],entries:[]},
+ {name:'different-conflict',chats:[owner,other],entries:[]},
  {name:'retired-loop',chats:[owner,other],entries:[pending],questions:[retired]},
  {name:'active-question',chats:[owner,other],entries:[pending],questions:[{...oldLoop,sessionId:owner.sessionId,sourceTool:'vrcforge_ask_user'}]},
 ];
@@ -39,12 +43,18 @@ export const cancelAgentRunFollowup=async()=>({ok:true,status:'cancelled'});
 export const issueComputerUseTurnGrant=async()=>null;
 export const requestAgentRunCancel=async()=>({ok:true});
 export const requestChatTitle=async()=>({title:'Existing owner'});
-export const recordAgentRunQueued=async()=>{
+export const recordAgentRunQueued=async(_endpoint,payload)=>{
+  (window.queueWrites??=[]).push(payload);
   await holdBoundary('queue-race');
   return {ok:true,accepted:true,mode:'followup',queueId:'queued-answer'};
 };
 export const sendAgentMessage=async(_e,_m,sessionId,_h,_a,options)=>{
   window.sends.push({sessionId,clientTurnId:options.clientTurnId});
+  if((window.fixture.name.startsWith('unseen-child')||window.fixture.name==='child-already-delivered')&&window.sends.length===1){
+    window.childNowVisible=window.fixture.name!=='child-already-delivered';
+    const code='sub_agent_parent_delivery_pending';
+    throw window.fixture.name==='unseen-child-ipc'?code:new window.ApiError(code,409,code);
+  }
   if(window.fixture.name==='unknown')throw new Error('Transport response lost');
   if(window.sends.length===1&&!['waiting-child','retired-loop'].includes(window.fixture.name))throw new window.ApiError('HTTP 409',409,{code:'followup_admission_rejected',message:'not admitted'});
   return {ok:true,sessionId,clientTurnId:options.clientTurnId,turnId:'successful-retry',startedAt:new Date().toISOString(),observe:{},plan:{reply:'done',summary:'done',nextStep:'done',planner:'fixture',shellNeeded:false},timeline:[]};
@@ -53,13 +63,39 @@ const bundle=await build({stdin:{resolveDir:process.cwd(),loader:'tsx',contents:
 import {ApiError} from './src/lib/api/http';window.ApiError=ApiError;
 import React,{useRef,useState,useCallback}from'react';import{createRoot}from'react-dom/client';import{useChatRunController}from'./src/hooks/use-chat-run-controller';
 const cases=${JSON.stringify(scenarios)};window.fixture=structuredClone(cases.find(c=>c.name===new URL(location.href).searchParams.get('case')));window.ensureCalls=0;window.sends=[];window.errors=[];
-function Harness(){const[chats,setChats]=useState(window.fixture.chats);const latest=useRef(chats);latest.current=chats;const updateChat=useCallback((id,fn)=>{latest.current=latest.current.map(c=>c.id===id?fn(c):c);setChats(latest.current);window.chats=latest.current;},[]);const c=useChatRunController({endpoint:'http://isolated-fixture',runtimeConnected:true,sessionId:'runtime-other',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=>{window.ensureCalls++;return'active-other';},updateChat,appendToChat:(id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),persistChatsNow:async()=>{},chats,chatStorageReady:true,hasPendingChildDelivery:id=>id==='runtime-owner'&&window.fixture.name==='waiting-child'&&!window.childDelivered});window.controller=c;window.chats=chats;return <div id='mounted'/>;}createRoot(document.getElementById('root')).render(<Harness/>);
+function Harness(){const[chats,setChats]=useState(window.fixture.chats);const latest=useRef(chats);latest.current=chats;const updateChat=useCallback((id,fn)=>{latest.current=latest.current.map(c=>c.id===id?fn(c):c);setChats(latest.current);window.chats=latest.current;},[]);const c=useChatRunController({endpoint:'http://isolated-fixture',runtimeConnected:true,sessionId:'runtime-other',activeRuntimeProjectPath:'',getChatById:id=>latest.current.find(c=>c.id===id),ensureActiveChat:()=>{window.ensureCalls++;return'active-other';},updateChat,appendToChat:(id,item)=>updateChat(id,c=>({...c,items:[...c.items,item]})),touchChat:c=>c,startRuntime:async()=>'',refresh:async()=>{},refreshRuntimeRuns:async()=>{},refreshBackgroundGoals:()=>{},handleRuntimeSessionFailure:()=>{},setError:e=>window.errors.push(e),persistChatsNow:async()=>{},chats,chatStorageReady:true,hasPendingChildDelivery:id=>id==='runtime-owner'&&(window.childNowVisible||window.fixture.name==='waiting-child'&&!window.childDelivered)});window.controller=c;window.chats=chats;return <div id='mounted'/>;}createRoot(document.getElementById('root')).render(<Harness/>);
 `},bundle:true,write:false,format:'iife',platform:'browser',jsx:'automatic',plugins:[{name:'restore-api-stub',setup(b){b.onResolve({filter:/^react-i18next$/},()=>({path:'i18n',namespace:'fixture'}));b.onResolve({filter:/^\.\.\/lib\/api$/},a=>a.importer.endsWith('use-chat-run-controller.ts')?{path:'api',namespace:'fixture'}:undefined);b.onResolve({filter:/^\.\.\/lib\/api\/agent-runtime$/},a=>a.importer.endsWith('use-chat-run-controller.ts')?{path:'constants',namespace:'fixture'}:undefined);b.onLoad({filter:/.*/,namespace:'fixture'},a=>({loader:'js',contents:a.path==='i18n'?"export const useTranslation=()=>({t:k=>k});":a.path==='constants'?'export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS=12;':api}));}}]});
 const server=createServer((_q,r)=>{r.setHeader('Content-Type','text/html');r.end(`<div id='root'></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`);});const{chromium}=createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH||'playwright');let browser;
 try {
  await new Promise(r=>server.listen(0,'127.0.0.1',r));
  browser=await chromium.launch({headless:true,channel:'msedge'});
  const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ for(const name of ['unseen-child-http','unseen-child-ipc','different-conflict']) {
+   await page.goto(`http://127.0.0.1:${server.address().port}/?case=${name}`);
+   await page.waitForFunction(()=>window.controller);
+   const result=await page.evaluate(()=>window.controller.submitTurn({id:'fresh-input',chatId:'opaque-owner',text:'Next input',attachments:[],provider:'fixture',model:'fixture'}));
+   const view=await page.evaluate(()=>({writes:window.queueWrites||[],rows:window.chats[0].items.filter(i=>i.clientTurnId==='fresh-input')}));
+   if(name==='different-conflict'){
+     assert.equal(result,'failed');
+     assert.equal(view.writes.length,0);
+     continue;
+   }
+   assert.equal(result,'queued');
+   assert.deepEqual(view.writes.map(x=>[x.sessionId,x.clientTurnId,x.laneId,x.message]),[['runtime-owner','fresh-input','opaque-owner','Next input']]);
+   assert.equal(view.rows.length,1);
+   assert.equal(view.rows[0].composerQueued,true);
+   assert.equal(view.rows[0].queueEnvelope.sessionId,'runtime-owner');
+   await page.evaluate(()=>{window.childNowVisible=false;return window.controller.resumeQueuedTurns();});
+   await page.waitForFunction(()=>window.controller.queued.length===0&&window.chats[0].items.some(i=>i.type==='agent'));
+   assert.deepEqual(await page.evaluate(()=>window.sends.map(x=>x.clientTurnId)),['fresh-input','fresh-input']);
+ }
+ await page.goto(`http://127.0.0.1:${server.address().port}/?case=child-already-delivered`);
+ await page.waitForFunction(()=>window.controller);
+ assert.equal(await page.evaluate(()=>window.controller.submitTurn({id:'fresh-input',chatId:'opaque-owner',text:'Next input',attachments:[],provider:'fixture',model:'fixture'})),'queued');
+ await page.waitForFunction(()=>window.chats[0].items.some(i=>i.type==='agent'),undefined,{timeout:5000});
+ assert.equal(await page.evaluate(()=>window.queueWrites.length),1);
+ assert.deepEqual(await page.evaluate(()=>window.sends.map(s=>[s.sessionId,s.clientTurnId])),[['runtime-owner','fresh-input'],['runtime-owner','fresh-input']]);
+ assert.equal(await page.evaluate(()=>window.chats[1].items.length),0);
  await page.goto(`http://127.0.0.1:${server.address().port}/?case=rejection`);
  await page.waitForFunction(()=>window.controller?.queued[0]?.queueStatus==='paused');
  assert.equal(await page.evaluate(()=>window.sends.length),1);

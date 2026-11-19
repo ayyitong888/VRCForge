@@ -67,6 +67,8 @@ import type { ChatThread, ProjectType } from "./lib/chat-types";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { VskOpenDialog } from "./components/skills/vsk-open-dialog";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
+import { SubAgentSidebar } from "./components/subagents/sub-agent-sidebar";
+import type { SubAgentTimelineCache } from "./components/subagents/sub-agent-conversation";
 import { type UserAttachmentSource } from "./components/runtime/project-workbench-sections";
 import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useAppUpdate } from "./hooks/use-app-update";
@@ -139,6 +141,7 @@ import {
   findProviderModelInfo,
   formatPayload,
   isRetryableConversationItem,
+  pendingConversationRetry,
   latestAgentContextUsage,
   latestConversationItemId,
   MAX_FILES_PER_MESSAGE,
@@ -281,11 +284,6 @@ const AsyncAppSidebar = lazy(() =>
 const AsyncRightRuntimeSidebar = lazy(() =>
   import("./components/runtime/runtime-sidebar").then((module) => ({ default: module.RightRuntimeSidebar })),
 );
-const AsyncSubAgentSidebar = lazy(() =>
-  import("./components/subagents/sub-agent-sidebar").then((module) => ({
-    default: module.SubAgentSidebar,
-  })),
-);
 
 function SidebarPlaceholder({ side }: { side: "left" | "right" }) {
   return (
@@ -414,9 +412,8 @@ export default function App() {
         }
       : null,
   );
-  const [loadingSubAgents, setLoadingSubAgents] = useState(false);
   const [subAgentError, setSubAgentError] = useState("");
-  const [subAgentListError, setSubAgentListError] = useState("");
+  const [subAgentListRead, setSubAgentListRead] = useState<{ parentChatId: string; error: string } | null>(null);
   const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
   const [subAgentSidebarOpen, setSubAgentSidebarOpen] = useState(() => Boolean(initialSubAgentTask));
@@ -1007,7 +1004,6 @@ export default function App() {
   const activeRuntimeProjectPath = displayChat?.projectPath || activeProjectPath;
   const hasAgentRuntimeScope = Boolean(sessionId || activeRuntimeProjectPath);
   const latestEditableUserItemId = latestConversationItemId(conversation, (item) => item.type === "user");
-  const latestRetryableItemId = latestConversationItemId(conversation, isRetryableConversationItem);
   const runtimeScope = { sessionId, projectRoot: activeRuntimeProjectPath };
   const projectPendingApprovalItems = (agentApprovals ?? []).filter(
     (item) => item.status === "pending" && approvalBelongsToRuntimeScope(item, runtimeScope),
@@ -1170,7 +1166,15 @@ export default function App() {
   useEffect(() => {
     for (const run of runtimeRuns) applyFollowupReceiptRef.current(run);
   }, [runtimeRuns, queued]);
-  const activeRuntimeCancelTarget = runtimeActivityCancelTarget(chats, displayChat || undefined, runtimeRuns);
+  const activityOwners = !activeChat && displayChat
+    ? sidebarChats.map(owner => owner.id === displayChat.id ? displayChat : owner)
+    : sidebarChats;
+  const activeRuntimeCancelTarget = runtimeActivityCancelTarget(activityOwners, activeChat || displayChat || undefined, runtimeRuns, subAgentList?.tasks);
+  const livePageChatId = !activeChat && activeRuntimeCancelTarget ? displayChat?.id : undefined;
+  useEffect(() => {
+    // The live reader appends only to fully loaded chats. Opening paged history can reveal an ongoing turn.
+    if (livePageChatId) void loadChat(livePageChatId).catch(reportChatSaveError);
+  }, [endpoint, livePageChatId]);
   const scopedAgentQuestions = hasAgentRuntimeScope ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope) : [];
   const dismissedAgentQuestion = scopedAgentQuestions.find((question) => question.status === "pending" && dismissedQuestionIds.has(question.questionId));
   const questionReview = useMemo(
@@ -1686,9 +1690,16 @@ export default function App() {
   const activeSubAgentTasks = useMemo(() => {
     return subAgentParentChatId ? subAgentTasks.filter((task) => task.parentChatId === subAgentParentChatId) : [];
   }, [subAgentParentChatId, subAgentTasks]);
-  useEffect(() => {
-    subAgentSelectionIntentRef.current = selectedSubAgent?.id || "";
-  }, [selectedSubAgent?.id]);
+  const scopeRead = subAgentListRead?.parentChatId === subAgentParentChatId ? subAgentListRead : null;
+  const subAgentListError = scopeRead?.error || "";
+  const loadingSubAgents = runtimeConnected && Boolean(subAgentParentChatId) && !scopeRead && !activeSubAgentTasks.length;
+  const subAgentTimelineCache = useMemo<SubAgentTimelineCache>(() => new Map(), [endpoint, subAgentParentChatId]);
+  const retryCandidateId = latestConversationItemId(conversation, isRetryableConversationItem);
+  const latestRetryableItemId = displayChat && retryCandidateId
+    && !pendingConversationRetry(displayChat, retryCandidateId, activeSubAgentTasks, runtimeRuns) ? retryCandidateId : "";
+  const retryState = { chatId: activeChatId, busy: sending || compacting || visibleQueued.length > 0, runs: runtimeRuns };
+  const retryStateRef = useRef(retryState);
+  retryStateRef.current = retryState;
   const hasRunningSubAgents = subAgentTasks.some((task) =>
     ["queued", "running", "cancelling"].includes(task.status) || isParentDeliveryPending(task));
   const activeProjectName =
@@ -2401,7 +2412,7 @@ export default function App() {
   useEffect(() => {
     if (!runtimeConnected) {
       setSubAgentList(null);
-      setLoadingSubAgents(false);
+      setSubAgentListRead(null);
       return;
     }
     void loadSubAgents(false);
@@ -2409,14 +2420,12 @@ export default function App() {
   }, [runtimeConnected, endpoint, subAgentParentChatId]);
 
   useEffect(() => {
-    if (smokeMode || !selectedSubAgent) {
-      return;
-    }
-    if (!subAgentParentChatId || selectedSubAgent.parentChatId !== subAgentParentChatId) {
+    if (!smokeMode && selectedSubAgent?.parentChatId !== subAgentParentChatId) {
       setSelectedSubAgent(null);
+      subAgentSelectionIntentRef.current = "";
       setSelectedSubAgentPanelOpen(false);
     }
-  }, [subAgentParentChatId, selectedSubAgent?.id, selectedSubAgent?.parentChatId, smokeMode]);
+  }, [subAgentParentChatId, smokeMode]);
 
   useEffect(() => {
     if (!runtimeConnected || !hasRunningSubAgents) {
@@ -2585,6 +2594,14 @@ export default function App() {
         metrics.startBackendAlreadyRunning = result.already_running;
         targetEndpoint = result.endpoint;
         backendReadyEndpointRef.current = targetEndpoint;
+        if (targetEndpoint !== endpoint) {
+          setSubAgentList(null);
+          setSubAgentListRead(null);
+          setSubAgentError("");
+          setSelectedSubAgent(null);
+          setSelectedSubAgentPanelOpen(false);
+          subAgentSelectionIntentRef.current = "";
+        }
         setAppSessionToken("");
         setEndpoint(targetEndpoint);
         setBackendMessage(result.message);
@@ -3042,12 +3059,16 @@ export default function App() {
   }
 
   async function retryConversationItem(itemId: string) {
-    if (isChatRunActive(activeChatId) || compacting) {
+    if (isChatRunActive(activeChatId) || retryStateRef.current.busy) {
       setError(t("chat.cannotActionWhileRunning"));
       return;
     }
-    const chat = await loadChat(activeChatId).catch(() => undefined);
-    if (!chat) {
+    const loaded = await loadChat(activeChatId).catch(() => undefined);
+    const state = retryStateRef.current;
+    if (!loaded || state.chatId !== activeChatId) return;
+    const chat = getChatById(activeChatId) || loaded;
+    if (state.busy || isChatRunActive(chat.id) || pendingConversationRetry(chat, itemId, subAgentTasksRef.current, state.runs)) {
+      setError(t("chat.cannotActionWhileRunning"));
       return;
     }
     const index = chat.items.findIndex((item) => item.id === itemId);
@@ -3618,23 +3639,21 @@ export default function App() {
     }
     const requestId = ++subAgentListRequestRef.current;
     const parentChatId = subAgentParentChatRef.current;
-    setLoadingSubAgents(true);
+    const sameScope = () => endpoint === backendReadyEndpointRef.current && parentChatId === subAgentParentChatRef.current;
     try {
       const [global, scoped] = await Promise.all([
         fetchSubAgents(endpoint, true),
         parentChatId ? fetchSubAgents(endpoint, true, parentChatId) : null,
       ]);
-      if (requestId <= appliedSubAgentListRequestRef.current || parentChatId !== subAgentParentChatRef.current) return;
+      if (requestId <= appliedSubAgentListRequestRef.current || !sameScope()) return;
       const payload = scoped ? combineSubAgentLists(global, scoped) : global;
       appliedSubAgentListRequestRef.current = requestId;
       setSubAgentList((current) => reconcileSubAgentList(current, payload));
       setSelectedSubAgent((current) => reconcileSelectedSubAgent(current, payload.tasks));
-      setSubAgentListError("");
+      setSubAgentListRead({ parentChatId, error: "" });
     } catch (cause) {
-      if (requestId !== subAgentListRequestRef.current || parentChatId !== subAgentParentChatRef.current) return;
-      setSubAgentListError(subAgentActionMessage("list", cause));
-    } finally {
-      if (requestId === subAgentListRequestRef.current) setLoadingSubAgents(false);
+      if (requestId <= appliedSubAgentListRequestRef.current || requestId !== subAgentListRequestRef.current || !sameScope()) return;
+      setSubAgentListRead({ parentChatId, error: subAgentActionMessage("list", cause) });
     }
   }
 
@@ -3694,6 +3713,7 @@ export default function App() {
       });
       if (!payload.ok || !payload.task) throw new Error("Sub-agent creation returned no accepted task.");
       if (subAgentParentChatRef.current === parentChatId) {
+        subAgentSelectionIntentRef.current = payload.task.id;
         setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
         setSelectedSubAgentPanelOpen(true);
       }
@@ -3768,20 +3788,27 @@ export default function App() {
     if (mode === "select") {
       subAgentSelectionIntentRef.current = taskId;
     }
-    const isCurrent = () => requestId === subAgentInspectRequestRef.current
+    const parentChatId = subAgentParentChatRef.current;
+    const isCurrent = () => endpoint === backendReadyEndpointRef.current && parentChatId === subAgentParentChatRef.current
+      && requestId === subAgentInspectRequestRef.current
       && subAgentSelectionIntentRef.current === taskId;
     try {
       const payload = await fetchSubAgent(endpoint, taskId);
+      if (!isCurrent()) return;
+      if (payload.task.parentChatId !== parentChatId) {
+        setSubAgentError(t("subagent.actionErrors.taskUnavailable"));
+        return;
+      }
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
-      if (isCurrent()) setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
+      setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
     } catch (cause) {
       if (isCurrent()) reportSubAgentActionError("detail", cause, subAgentParentChatId);
     }
   }
 
   async function inspectSubAgentTask(taskId: string) {
-    const task = subAgentTasksRef.current.find((item) => item.id === taskId);
-    if (task) setSelectedSubAgent((current) => latestSubAgentTask(current, task));
+    const task = activeSubAgentTasks.find((item) => item.id === taskId);
+    setSelectedSubAgent((current) => task ? latestSubAgentTask(current, task) : null);
     setSubAgentError("");
     setSelectedSubAgentPanelOpen(true);
     await refreshSelectedSubAgentTask(taskId);
@@ -3919,7 +3946,10 @@ export default function App() {
         },
       });
       if (!payload.ok || !payload.task) throw new Error("Sub-agent creation returned no accepted task.");
-      setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
+      if (subAgentParentChatRef.current === parentChatId) {
+        subAgentSelectionIntentRef.current = payload.task.id;
+        setSelectedSubAgent((current) => latestSubAgentTask(current, payload.task));
+      }
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
       await reconcileSubAgentHandoffs([payload.task]);
       void loadSubAgents(false);
@@ -4065,11 +4095,11 @@ export default function App() {
   );
   const subAgentWorkspaceSurface = subAgentSidebarActive ? (
     <div className="h-full min-h-0 overflow-hidden bg-workspace">
-      <Suspense fallback={<div className="p-4 text-xs text-muted-foreground">{t("common.loading")}</div>}>
-        <AsyncSubAgentSidebar
+        <SubAgentSidebar
           tasks={activeSubAgentTasks}
           openThread={selectedSubAgentPanelOpen}
           loading={loadingSubAgents}
+          timelineCache={subAgentTimelineCache}
           error={subAgentError || subAgentListError}
           onBack={() => { setSubAgentSidebarOpen(true); setSelectedSubAgentPanelOpen(false); }}
           endpoint={endpoint}
@@ -4085,7 +4115,6 @@ export default function App() {
           busyTaskIds={subAgentActionBusyTaskIds}
           onClose={() => { setSubAgentSidebarOpen(false); setSelectedSubAgentPanelOpen(false); }}
         />
-      </Suspense>
     </div>
   ) : null;
 

@@ -1,3 +1,6 @@
+import type { AgentRuntimeResponse, AgentRuntimeRun } from "./api/types";
+import type { SubAgentTask } from "./api/sub-agents";
+
 /** Runtime lifecycle states shared by transcript recovery and the run ledger. */
 const ACTIVE_RUNTIME_RUN_STATUSES = new Set([
   "running", "starting", "queued", "claimed", "cancelling", "cancel_requested",
@@ -23,6 +26,32 @@ export function isWaitingForSubAgent(state: { nextStep?: string; reason?: string
 export function isAutomaticToolWait(state: { nextStep?: string; reason?: string }, shellStatus?: string): boolean {
   return isWaitingForSubAgent(state) || (state.nextStep === "waiting_for_tool"
     && (!state.reason || state.reason === "action_not_terminal") && shellStatus === "running");
+}
+
+export function matchesParentTurn(owner: { clientTurnId?: string; turnId?: string }, client?: string, turn?: string) {
+  if (client && owner.clientTurnId && client !== owner.clientTurnId) return false;
+  if (turn && owner.turnId && turn !== owner.turnId) return false;
+  return Boolean((turn && turn === owner.turnId) || (client && client === owner.clientTurnId));
+}
+
+export type AutomaticWaitStage = "waiting" | "handoff" | "shell";
+
+export function automaticTurnWaitStage(
+  response: AgentRuntimeResponse, tasks: readonly SubAgentTask[], runs: readonly AgentRuntimeRun[],
+): AutomaticWaitStage | null {
+  if (response.plan.nextStep !== "waiting_for_tool" || response.dispatchStopped) return null;
+  const owner = { clientTurnId: response.clientTurnId, turnId: response.turnId || response.turn_id };
+  const session = response.sessionId || response.session_id;
+  // Older shell receipts kept the process status only on the exact ledger run.
+  const ledger = runs.find(run => session && run.sessionId === session && matchesParentTurn(owner, run.clientTurnId, run.turnId));
+  const plan = { nextStep: response.plan.nextStep, reason: response.plan.reason || ledger?.reason };
+  if (!isAutomaticToolWait(plan, response.shell?.status || ledger?.shellStatus)) return null;
+  if (!isWaitingForSubAgent(plan)) return "shell";
+  const children = tasks.filter(task => (!task.parentSessionId || !session || task.parentSessionId === session)
+    && matchesParentTurn(owner, task.parentClientTurnId, task.parentTurnId));
+  if (!children.length || children.some(task => ["queued", "running", "cancelling"].includes(task.status))) return "waiting";
+  if (children.every(task => task.parentContinuationStatus === "interrupted")) return null;
+  return "handoff";
 }
 
 /** Resolve activity only when this session/CID identifies one ledger run. */

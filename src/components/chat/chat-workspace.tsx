@@ -37,7 +37,7 @@ import { conversationItemStart, projectProcessRounds } from "../../lib/chat-proc
 import { capturePreviewsForQuestion } from "../../lib/chat-timeline-presentation";
 import { ChatPositionRail, type ChatPositionMarker } from "./chat-position-rail";
 import { isExternalRuntimeStream } from "../../lib/runtime-stream-owner";
-import { runtimeTurnActivityStatus } from "../../lib/runtime-run-status";
+import { automaticTurnWaitStage, runtimeTurnActivityStatus } from "../../lib/runtime-run-status";
 import { chatCompactionStatusForDisplay } from "../../lib/chat-compaction-state";
 
 function formatGoalElapsed(totalSeconds: number): string {
@@ -848,8 +848,10 @@ export function ChatWorkspace({
               : runtimeActive ?? (questionRuntime && questionContinuationDisplay(questionRuntime) === "active");
             const roundLive = round?.last.type === "streaming" && runtimeTurnActivityStatus(runtimeRuns,
               round.last.sessionId || runtimeSessionId, round.last.clientTurnId) !== false;
+            const automaticWait = item.type === "agent" ? automaticTurnWaitStage(item.response, subAgentTasks || [], runtimeRuns) : null;
             const sharedProcess = round ? {
               first: round.first === item, last: round.last === item, failures: round.failures, live: roundLive,
+              waiting: round.last.type === "agent" && Boolean(automaticTurnWaitStage(round.last.response, subAgentTasks || [], runtimeRuns)),
               open: roundLive || Boolean(expandedProcesses[round.first.id]),
               elapsedSeconds: roundLive && round.liveStartedAt
                 ? (round.elapsedSeconds || 0) + Math.max(0, (activityNowMs - round.liveStartedAt) / 1000) : round.elapsedSeconds,
@@ -873,6 +875,7 @@ export function ChatWorkspace({
                 sharedProcess={sharedProcess}
                 timelineQuestions={turnId ? steeringProjection.questionMessages.get(turnId) : undefined}
                 activeSubAgentEvents={activeSubAgentEvents}
+                automaticWait={automaticWait}
                 retiredLoopPause={item.type === "agent" && Boolean(turnId) && retiredLoopPauses.has(turnId)}
                 onOpenSubAgent={onOpenSubAgent}
                 runtimeActive={itemRuntimeActive}
@@ -939,7 +942,7 @@ export function ChatWorkspace({
                 />
                 {item.type === "streaming" ? (
                   <StreamingPhaseStatus item={questionPreparing && !item.phase ? { ...item, phase: "preparing" } : item}
-                    nowMs={activityNowMs} showElapsed={false} runtimeActive={itemRuntimeActive} />
+                    nowMs={activityNowMs} runtimeActive={itemRuntimeActive} />
                 ) : null}
               </div>
             );

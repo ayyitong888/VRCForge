@@ -3413,6 +3413,9 @@ async def _execute_app_agent_runtime_message(
         if admission_rejected and followup_claim_token:
             code = "followup_queue_not_ready" if deferred_for_child else "followup_admission_rejected"
             detail = {"code": code, "message": str(exc)}
+        elif deferred_for_child:
+            # The desktop message IPC preserves a string detail across the process boundary.
+            detail = exc.cause_code
         raise HTTPException(status_code=exc.status_code, detail=detail) from exc
     except Exception as exc:
         admission_rejected = getattr(exc, "runtime_admitted", None) is False

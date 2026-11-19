@@ -37,7 +37,7 @@ import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
 import type { TimelineQuestionMessage } from "../../lib/chat-steering-projection";
 import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
 import { AttachmentStrip } from "./composer";
-import { RunRow, SharedTurnProcessHeader, ToolDiagnosticsContext, buildAgentTimelineRows, buildDurableTimelineRows, formatPayload, formatRuntimeModelLine, type SharedTurnProcess } from "./conversation-timeline";
+import { RunRow, SharedTurnProcessHeader, ToolDiagnosticsContext, buildAgentTimelineRows, buildDurableTimelineRows, formatDuration, formatPayload, formatRuntimeModelLine, type SharedTurnProcess } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
@@ -48,6 +48,7 @@ export function ConversationCard({
   initialUserContent,
   sharedProcess,
   activeSubAgentEvents,
+  automaticWait,
   timelineQuestions,
   retiredLoopPause,
   userMessageAuthor,
@@ -93,6 +94,7 @@ export function ConversationCard({
   initialUserContent?: ReactNode;
   sharedProcess?: SharedTurnProcess;
   activeSubAgentEvents?: ReadonlyMap<string, string>;
+  automaticWait?: import("../../lib/runtime-run-status").AutomaticWaitStage | null;
   timelineQuestions?: TimelineQuestionMessage[];
   retiredLoopPause?: boolean;
   userMessageAuthor?: string;
@@ -566,6 +568,7 @@ export function ConversationCard({
     hideTurnMetadata: compactAgentReply,
     sharedProcess,
     activeSubAgentEvents,
+    automaticWait,
     questionRows,
     interleavedUserMessages,
     interleavedUsersExpanded,
@@ -735,7 +738,7 @@ export function UserImageAttachments({
   );
 }
 
-export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed: boolean; runtimeActive?: boolean }) {
+export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed?: boolean; runtimeActive?: boolean }) {
   const { t } = useTranslation();
   if (item.stopRequested) {
     return <div className="mt-3 px-1 text-chat-detail text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase="stopping" role="status">{t("chat.stopping")}</div>;
@@ -743,13 +746,14 @@ export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }
   if (runtimeActive === false) return null;
   const elapsedSeconds = elapsedSecondsSince(item.createdAt, nowMs);
   const reconnectAttempt = item.providerRetry?.attempt;
-  const waitingWindow = !reconnectAttempt && item.phase === "waiting_for_model"
+  const reconnecting = reconnectAttempt !== undefined;
+  const waitingWindow = !reconnecting && item.phase === "waiting_for_model"
     ? providerWaitingWindow(item.providerLastActivityAt, nowMs)
     : undefined;
-  const phaseLabel = reconnectAttempt
+  const phaseLabel = reconnecting
     ? t("chat.runtimePhase.reconnecting", { attempt: reconnectAttempt, max: item.providerRetry?.max || 5 })
     : waitingWindow
-      ? t("chat.runtimePhase.waitingForModelProgress", { window: waitingWindow, max: 5 })
+      ? t("chat.runtimePhase.waitingForModelProgress")
       : item.phase === "waiting_for_model" && item.providerResponding
         ? t("chat.runtimePhase.thinking")
         : streamingPhaseLabel(item.phase, t);
@@ -757,31 +761,32 @@ export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }
   const label = activeOperation
     ? t("chat.runtimePhase.callingTool", { tool: activeOperation })
     : phaseLabel;
-  const reconnecting = reconnectAttempt !== undefined;
   const waiting = waitingWindow !== undefined;
-  const reconnectDetail = reconnectAttempt === item.providerRetry?.max
+  const reconnectDetail = item.providerRetry?.terminal === "NO_MORE_RETRY"
     ? t("chat.runtimePhase.reconnectingRetry")
     : waitingWindow !== undefined
       ? waitingWindow === 5
         ? t("chat.runtimePhase.waitingForModelTimeout")
         : t("chat.runtimePhase.waitingForModelDetail")
       : t("chat.runtimePhase.reconnectingDetail");
+  const showActivity = !item.phase || item.phase === "waiting_for_model" || item.phase === "receiving_response";
+  const content = <>
+    {showActivity && <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full bg-primary", !waiting && "motion-safe:animate-pulse")} />}
+    <span className="chat-current-activity__label font-medium text-foreground" role="status" aria-live="polite">{label}</span>
+    {(showElapsed ?? showActivity) && elapsedSeconds !== undefined && <time className="text-xs tabular-nums text-muted-foreground" dateTime={`PT${elapsedSeconds}S`}>{t("chat.runtimePhase.turnElapsed", { time: formatDuration(elapsedSeconds) })}</time>}
+  </>;
   return (
-    <div className="chat-current-activity mt-3 px-1 text-chat-detail text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase={item.phase || "unknown"} role="status" aria-live="polite" aria-atomic="true">
+    <div className="chat-current-activity mt-3 px-1 text-chat-detail text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase={item.phase || "unknown"}>
       {reconnecting || waiting ? (
         <details className="group">
           <summary className="group flex cursor-pointer list-none items-center gap-2 text-left [&::-webkit-details-marker]:hidden">
+            {content}
             <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
-            <span className="chat-current-activity__label">{label}</span>
-            {showElapsed && elapsedSeconds !== undefined ? <span>{t("agent.elapsed", { time: `${elapsedSeconds}s` })}</span> : null}
           </summary>
           <p className="mt-1 pl-5 text-xs text-muted-foreground/80">{reconnectDetail}</p>
         </details>
       ) : (
-        <div className="flex items-center gap-2">
-          <span className="chat-current-activity__label">{label}</span>
-          {showElapsed && elapsedSeconds !== undefined ? <span>{t("agent.elapsed", { time: `${elapsedSeconds}s` })}</span> : null}
-        </div>
+        <div className="flex items-center gap-2">{content}</div>
       )}
     </div>
   );
@@ -841,7 +846,7 @@ function streamingPhaseLabel(phase: AgentRuntimePhase | undefined, t: typeof i18
     case "verifying":
       return t("chat.runtimePhase.verifying");
     default:
-      return t("chat.runtimePhase.waitingForModel");
+      return t("thinking.workingOnIt");
   }
 }
 

@@ -153,6 +153,7 @@ export type RunSingleTurnOptions = {
 type InternalRunSingleTurnOptions = RunSingleTurnOptions & {
   background?: boolean;
   abortController?: AbortController;
+  onPendingChild?: (sessionId: string) => void;
 };
 
 export type PrepareTurnContextInput = {
@@ -1015,6 +1016,7 @@ export function useChatRunController({
     lane.sending = true;
     lane.stopping = false;
     foregroundChanged();
+    let waitingSessionId = "";
     try {
        let next: QueuedTurn | undefined = turn;
       let initialTurnSucceeded = false;
@@ -1023,8 +1025,9 @@ export function useChatRunController({
          const succeeded = await runSingleTurn(
           next.chatId || chatId,
           next,
-          next.sessionId ? { sessionId: next.sessionId } : undefined,
+          { sessionId: next.sessionId, onPendingChild: next.queueId ? undefined : (id) => { waitingSessionId = id; } },
          );
+         if (waitingSessionId) break;
          if (!succeeded && next.queueStatus === "waiting_for_resources") {
            if (!queueRef.current.some((item) => item.id === next?.id)) queueRef.current.unshift(next);
            setQueued([...queueRef.current]);
@@ -1045,21 +1048,25 @@ export function useChatRunController({
         if (next) dequeueTurn(next);
         setQueued([...queueRef.current]);
       }
-      if (initialTurnSucceeded) return "started";
-      const inputRetained = getChatById(chatId)?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
-      return inputRetained ? "failed" : "not_accepted";
+      if (!waitingSessionId) {
+        if (initialTurnSucceeded) return "started";
+        const inputRetained = getChatById(chatId)?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
+        return inputRetained ? "failed" : "not_accepted";
+      }
     } finally {
       setQueued([...queueRef.current]);
       lane.sending = false;
       lane.stopping = false;
       foregroundChanged();
     }
+    // Release the rejected foreground turn before the existing queue checks whether it can drain.
+    return enqueueFollowupTurn({ ...turn, chatId, sessionId: waitingSessionId });
   }
 
   async function enqueueFollowupTurn(turn: QueuedTurn): Promise<SubmitTurnResult> {
-    const ownerChatId = turn.chatId && getChatById(turn.chatId) ? turn.chatId : ensureActiveChat();
+    const ownerChatId = turn.chatId || ensureActiveChat();
     const ownerChat = getChatById(ownerChatId);
-    if (ownerChat && !followsChatSession(ownerChat, turn.sessionId)) return "not_accepted";
+    if (!ownerChat || !followsChatSession(ownerChat, turn.sessionId)) return "not_accepted";
     const active = lanesRef.current.get(ownerChatId)?.turn;
     const projectPath = ownerChat?.projectPath || undefined;
     const queuedTurn: QueuedTurn = {
@@ -1076,14 +1083,14 @@ export function useChatRunController({
     // runnable queue still only receives the result of admission below.
     setQueueTransitions((current) => [...current, { ...queuedTurn, queueTransition: "enqueue" }]);
     try {
-      return await persistQueuedFollowup(turn, queuedTurn, ownerChatId, ownerChat);
+      return await persistQueuedFollowup(turn, queuedTurn, ownerChatId);
     } finally {
       setQueueTransitions((current) => current.filter((item) => item.id !== turn.id || item.queueTransition !== "enqueue"));
     }
   }
 
   async function persistQueuedFollowup(
-    turn: QueuedTurn, queuedTurn: QueuedTurn, ownerChatId: string, ownerChat?: ChatThread,
+    turn: QueuedTurn, queuedTurn: QueuedTurn, ownerChatId: string,
   ): Promise<SubmitTurnResult> {
     const trace = createSteerDeliveryTrace(traceSteerDelivery, {
       chatId: ownerChatId,
@@ -1091,44 +1098,44 @@ export function useChatRunController({
       clientTurnId: turn.id,
     });
     trace("submit_received", { pendingDispatches: foregroundLane(ownerChatId).pendingDispatches, requestedDeliveryMode: "queue" });
-    const existing = ownerChat?.items.some((item) => item.type === "user" && item.clientTurnId === turn.id);
-    if (!existing) {
-      updateChat(ownerChatId, (current) => {
-        const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
-        const storedAttachments = turn.attachments.map((attachment) => persistAttachmentReference(attachment, attachmentPayloads));
-        return {
-          ...touchChat(current),
-          sessionId: queuedTurn.sessionId || current.sessionId,
-          attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
-          items: [...current.items, {
-            id: `user-${turn.id}`,
-            type: "user",
-            text: turn.text,
-            planMode: turn.planMode === true,
-            attachments: storedAttachments,
-            queuedFrom: true,
-            composerQueued: true,
-            queueStatus: "delivery_unverified",
-            clientTurnId: turn.id,
-            queueEnvelope: {
-              planMode: turn.planMode === true,
-              provider: turn.provider,
-              providerLabel: turn.providerLabel,
-              model: turn.model,
-              contextLimit: turn.contextLimit,
-              projectPath: queuedTurn.projectPath,
-              projectType: queuedTurn.projectType,
-              sessionId: queuedTurn.sessionId,
-              laneId: queuedTurn.queueLaneId,
-              computerUseRequested: turn.computerUseRequested,
-              computerUseVisualTheme: turn.computerUseVisualTheme,
-              computerUseVisualAccent: turn.computerUseVisualAccent,
-            },
-            createdAt: new Date().toISOString(),
-          }],
-        };
-      });
-    }
+    updateChat(ownerChatId, (current) => {
+      const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
+      const storedAttachments = turn.attachments.map((attachment) => persistAttachmentReference(attachment, attachmentPayloads));
+      const existing = current.items.find((item) => item.type === "user" && item.clientTurnId === turn.id);
+      const queuedItem: ConversationItem = {
+        ...(existing?.type === "user" ? existing : {}),
+        id: existing?.id || `user-${turn.id}`,
+        type: "user",
+        text: turn.text,
+        planMode: turn.planMode === true,
+        attachments: storedAttachments,
+        queuedFrom: true,
+        composerQueued: true,
+        queueStatus: "delivery_unverified",
+        clientTurnId: turn.id,
+        queueEnvelope: {
+          planMode: turn.planMode === true,
+          provider: turn.provider,
+          providerLabel: turn.providerLabel,
+          model: turn.model,
+          contextLimit: turn.contextLimit,
+          projectPath: queuedTurn.projectPath,
+          projectType: queuedTurn.projectType,
+          sessionId: queuedTurn.sessionId,
+          laneId: queuedTurn.queueLaneId,
+          computerUseRequested: turn.computerUseRequested,
+          computerUseVisualTheme: turn.computerUseVisualTheme,
+          computerUseVisualAccent: turn.computerUseVisualAccent,
+        },
+        createdAt: existing?.type === "user" && existing.createdAt ? existing.createdAt : new Date().toISOString(),
+      };
+      return {
+        ...touchChat(current),
+        sessionId: queuedTurn.sessionId || current.sessionId,
+        attachmentPayloads: Object.keys(attachmentPayloads).length ? attachmentPayloads : undefined,
+        items: existing ? current.items.map((item) => item === existing ? queuedItem : item) : [...current.items, queuedItem],
+      };
+    });
 
     await preserveLocalInput(endpoint, ownerChatId, turn.id);
     trace("rpc_started", { requestedDeliveryMode: "queue" });
@@ -1917,6 +1924,12 @@ export function useChatRunController({
         || abortController.signal.aborted || text.toLowerCase().includes("cancel");
       const stopped = lane?.dispatched?.clientTurnId === turn.id && lane.dispatched.sessionId === chatSessionId
         ? lane.dispatched.stopAcknowledgement : undefined;
+      const deferredCode = "sub_agent_parent_delivery_pending";
+      if (options?.onPendingChild && runtimeRequestStarted && !abortController.signal.aborted
+        && (cause === deferredCode || (cause instanceof ApiError && cause.status === 409 && cause.detail === deferredCode))) {
+        options.onPendingChild(chatSessionId);
+        return false;
+      }
       const queueFailure = cause instanceof ApiError && cause.detail && typeof cause.detail === "object"
         ? cause.detail as { code?: string; message?: string } : null;
       if (presentingFollowup && !followup?.admitted) {

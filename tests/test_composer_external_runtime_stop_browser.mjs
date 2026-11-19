@@ -31,6 +31,8 @@ const bundled = await build({
       function Fixture() {
         const [runs, setRuns] = useState([currentRun]);
         const [chat, setChat] = useState(activeChat);
+        const [modelActivity, setModelActivity] = useState(null);
+        window.setModelActivity = setModelActivity;
         const cancelTarget = runtimeActivityCancelTarget([chat], chat, runs);
         const runtimeActive = runtimeTurnActivityStatus(runs, activeChat.sessionId, 'external-cid');
         const transcript = applyRuntimeActivityDelta(
@@ -54,7 +56,8 @@ const bundled = await build({
           <div data-testid='agent-replies'>{chat.items.filter(item => item.type === 'agent').length}</div>
           <div data-testid='sidebar-activity'>{chatSidebarActivity(transcript, '', runs) || 'none'}</div>
           <ConversationCard item={stream} runtimeActive={runtimeActive} initialUserContent={<div>Keep this accepted user message</div>} />
-          <StreamingPhaseStatus item={stream} nowMs={Date.now()} showElapsed={false} runtimeActive={runtimeActive} />
+          <StreamingPhaseStatus item={modelActivity ? { ...stream, phase: 'waiting_for_model', createdAt: '2026-11-19T14:42:34Z', ...modelActivity } : stream}
+            nowMs={Date.parse('2026-11-19T14:42:50Z')} runtimeActive={runtimeActive} />
           <Composer
             input='' setInput={() => {}} sending={Boolean(cancelTarget)} queueAllowed={false} stopDisabled={stream.stopRequested}
             onSubmit={event => event?.preventDefault()} onStop={() => {
@@ -106,6 +109,25 @@ try {
     "a uniquely owned active external runtime turn exposes Stop");
   assert.equal(await page.locator("[data-chat-current-activity]").textContent(), "Verifying result", "an active external turn keeps its real phase label");
   assert.equal(await page.locator("[data-testid=sidebar-activity]").textContent(), "running", "an active external turn keeps the sidebar running marker");
+  const status = page.locator("[data-chat-current-activity]");
+  await page.evaluate(() => window.setModelActivity({ providerLastActivityAt: '2026-11-19T14:42:34Z' }));
+  await status.locator("time").waitFor({ timeout: 2500 });
+  assert.match(await status.locator("time").innerText(), /16s/);
+  assert.equal(await status.locator('[role=status] time').count(), 0, "the clock does not make screen readers repeat the phase");
+  assert.match(await status.getByRole("status").innerText(), /Waiting for model/i);
+  await page.evaluate(() => window.setModelActivity({ providerResponding: true, providerLastActivityAt: '2026-11-19T14:42:49Z' }));
+  await status.getByText("Thinking", { exact: true }).waitFor();
+  await page.evaluate(() => window.setModelActivity({createdAt:'2026-11-19T14:40:00Z', providerLastActivityAt:'2026-11-19T14:40:00Z'}));
+  await status.locator("summary").click();
+  assert.equal(await status.getByRole("status").innerText(), "Still waiting for a model response");
+  assert.doesNotMatch(await status.innerText(), /\d\/5|check your network/i, "silence alone cannot imply a retry or network failure");
+  assert.match(await status.locator("p").innerText(), /reply hasn.t arrived/i);
+  await page.evaluate(() => window.setModelActivity({ providerRetry: { attempt: 2, max: 5, reason: "capacity", statusCode: 503 } }));
+  await status.getByText("Reconnecting 2/5", { exact: true }).waitFor();
+  await page.evaluate(() => window.setModelActivity({ phase: undefined }));
+  await status.getByText("Working on it", { exact: true }).waitFor({ timeout: 2500 });
+  assert.match(await status.locator("time").innerText(), /16s/, "a known active run with no provider phase still shows elapsed time");
+  await page.evaluate(() => window.setModelActivity(null));
   await primary.click();
   assert.deepEqual(await page.evaluate(() => window.cancelRequests), [{ endpoint: "http://fixture", payload: {
     sessionId: "external-session", clientTurnId: "external-cid", turnId: "backend-turn", reason: "user_stop",

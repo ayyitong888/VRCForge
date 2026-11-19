@@ -308,7 +308,7 @@ def test_startup_loads_the_app_while_showing_a_real_noninteractive_shell() -> No
     assert main_source.index("await Promise.all") < main_source.index("const root = createRoot")
     assert "const AsyncAppSidebar = lazy" in app_source
     assert "const AsyncRightRuntimeSidebar = lazy" in app_source
-    assert "const AsyncSubAgentSidebar = lazy" in app_source
+    assert 'import { SubAgentSidebar }' in app_source  # The entry already has its clickable thread snapshot.
     assert 'import { AppSidebar }' not in app_source
     assert 'import { RightRuntimeSidebar }' not in app_source
     assert 'import { SubAgentWorkspaceSurface }' not in app_source

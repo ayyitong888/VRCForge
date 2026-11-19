@@ -24,7 +24,7 @@ import {
 import type { ApprovalActionState, ChatTimelineEvent, ConversationItem } from "../../lib/chat-types";
 import { cancelledAgentReplyText, isCancelledRuntimeResponse } from "../../lib/conversation-utils";
 import { isAgentShellResult } from "../../lib/runtime-parsing";
-import { isInterruptedRuntimeTurn, isWaitingForSubAgent } from "../../lib/runtime-run-status";
+import { automaticTurnWaitStage, isInterruptedRuntimeTurn, type AutomaticWaitStage } from "../../lib/runtime-run-status";
 import { formatLocalMessageTime } from "../../lib/message-time";
 import { displaySubAgentStatus } from "../../lib/subagent-ui";
 import { cn } from "../../lib/utils";
@@ -55,6 +55,7 @@ export type SharedTurnProcess = {
   first: boolean;
   last: boolean;
   live: boolean;
+  waiting?: boolean;
   open: boolean;
   failures: number;
   elapsedSeconds?: number;
@@ -83,6 +84,7 @@ export function buildAgentTimelineRows({
   hideTurnMetadata = false,
   sharedProcess,
   activeSubAgentEvents,
+  automaticWait,
   questionRows,
   interleavedUserMessages = [],
   interleavedUsersExpanded = false,
@@ -112,6 +114,7 @@ export function buildAgentTimelineRows({
   hideTurnMetadata?: boolean;
   sharedProcess?: SharedTurnProcess;
   activeSubAgentEvents?: ReadonlyMap<string, string>;
+  automaticWait?: AutomaticWaitStage | null;
   questionRows?: TimedDialogueRow[];
   interleavedUserMessages?: InterleavedUserMessage[];
   interleavedUsersExpanded?: boolean;
@@ -126,8 +129,10 @@ export function buildAgentTimelineRows({
   t: typeof i18n.t;
 }): ReactNode[] {
   const cancelled = isCancelledRuntimeResponse(response);
-  const waitingForChild = isWaitingForSubAgent(response.plan);
-  const backgroundWait = response.plan.nextStep === "waiting_for_tool" && response.plan.completionGate?.reason === "action_not_terminal";
+  const wait = automaticWait === undefined ? automaticTurnWaitStage(response, [], []) : automaticWait;
+  const waitingForChild = wait === "waiting" || wait === "handoff";
+  const backgroundWait = wait === "shell" || (response.plan.nextStep === "waiting_for_tool"
+    && !response.plan.reason && !response.shell && response.plan.completionGate?.reason === "action_not_terminal");
   const interrupted = isInterruptedRuntimeTurn(response);
   const interruptedPartial = interrupted ? response.plan.reply?.trim() || "" : "";
   if (interrupted) {
@@ -181,9 +186,9 @@ export function buildAgentTimelineRows({
       <span>{t(response.unityWriteMayHaveExecuted ? "chat.stoppedUnityWriteUnconfirmed" : "chat.cancelled")}</span>
     </div>,
   ] : (waitingForChild ? !visibleActiveChild : backgroundWait) && (!sharedProcess || sharedProcess.last) ? [...rows,
-    <div key="waiting-for-tool" data-agent-waiting-for-subagent={waitingForChild || undefined} role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+    <div key="waiting-for-tool" data-agent-waiting-for-subagent={waitingForChild ? true : undefined} role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <Clock className="h-3.5 w-3.5" aria-hidden="true" />
-      <span>{t(waitingForChild ? "subagent.parentWaiting" : "chat.runtimePhase.toolInBackground")}</span>
+      <span>{t(wait === "handoff" ? "subagent.parentTakingOver" : waitingForChild ? "subagent.parentWaiting" : "chat.runtimePhase.toolInBackground")}</span>
     </div>,
   ] : rows;
   const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];
@@ -199,6 +204,7 @@ export function buildAgentTimelineRows({
     response.steps,
     {
       live,
+      waiting: Boolean(wait),
       sharedProcess,
       activeSubAgentEvents,
       questionRows,
@@ -317,7 +323,7 @@ export function buildAgentTimelineRows({
     rows.push(
       sharedProcess ? sharedProcess.open && <div key="agent-turn-process" data-agent-process-content>{processRows}</div> :
       <div key="agent-turn-process" data-agent-turn-process-group>
-        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, t)} statusLabel="" statusTone="muted" processHeader>
+        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, t, live || Boolean(wait))} statusLabel="" statusTone="muted" processHeader>
           {processRows}
         </WorkSegmentRow>
       </div>,
@@ -482,6 +488,7 @@ export function buildDurableTimelineRows(
   options: {
     includeAssistant?: boolean;
     live?: boolean;
+    waiting?: boolean;
     renderElapsed?: boolean;
     processTitleElapsed?: number;
     processSupplement?: ReactNode;
@@ -677,7 +684,7 @@ export function buildDurableTimelineRows(
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
           kind="process"
-          title={turnProcessDisplayTitle(turnElapsed, i18n.t)}
+          title={turnProcessDisplayTitle(turnElapsed, i18n.t, options.live || options.waiting)}
           statusLabel={historicalFailureLabel(processInvocations)}
           showStatus={processInvocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
@@ -907,13 +914,15 @@ function historicalFailureLabel(invocations: TimelineInvocation[]): string {
 function turnProcessDisplayTitle(
   elapsedSeconds: number | undefined,
   t: typeof i18n.t,
+  active = false,
 ): string {
+  if (active) return t("thinking.workingOnIt");
   return t("agent.turnDuration", { duration: Number.isFinite(elapsedSeconds) ? formatDuration(elapsedSeconds || 0) : "—" });
 }
 
 export function SharedTurnProcessHeader({ process }: { process: SharedTurnProcess }) {
   return <div data-agent-turn-process-group>
-    <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(process.elapsedSeconds, i18n.t)}
+    <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(process.elapsedSeconds, i18n.t, process.live || process.waiting)}
       statusLabel={i18n.t("agent.timeline.failureRecords", {count: process.failures})} showStatus={process.failures > 0}
       statusTone="muted" processHeader forceOpen={process.live}
       controlledOpen={process.open} onOpenChange={process.onOpenChange} />
@@ -1777,7 +1786,7 @@ export function formatPayload(value: unknown): string {
   }
 }
 
-function formatDuration(totalSeconds: number): string {
+export function formatDuration(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
   if (seconds >= 3600) {
     const hours = Math.floor(seconds / 3600);

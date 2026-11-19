@@ -25,6 +25,7 @@ type TurnTimeline = {
   detail?: SubAgentTask;
   detailChecked?: boolean;
 };
+export type SubAgentTimelineCache = Map<string, TurnTimeline>;
 const RUNNING = new Set(["queued", "running", "cancelling"]);
 const BUDGET_STOP = "model_turn_budget_exhausted";
 
@@ -150,7 +151,7 @@ function TurnTechnicalDetails({ turn, readError }: { turn: SubAgentTask; readErr
 }
 
 /** Read the child's existing public ledger; opening a conversation never starts a turn. */
-export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled = false, onCopyItem, onOpenChatById, modelTaskId, onModelChange }: {
+export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled = false, onCopyItem, onOpenChatById, modelTaskId, onModelChange, timelineCache }: {
   endpoint: string;
   turns: SubAgentTask[];
   developerOptionsEnabled?: boolean;
@@ -158,11 +159,13 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
   onOpenChatById?: (chatId: string) => void;
   modelTaskId?: string;
   onModelChange?: (taskId: string, model: string) => void;
+  timelineCache?: SubAgentTimelineCache;
 }) {
   const { t } = useTranslation();
   const [timelines, setTimelines] = useState<Record<string, TurnTimeline>>({});
   const [readError, setReadError] = useState<{ turnId: string; message: string } | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [localCache] = useState<SubAgentTimelineCache>(() => new Map());
+  const cache = timelineCache ?? localCache;
   const [refresh, setRefresh] = useState(0);
   const sessionId = turns[0]?.childSessionId || "";
   const turnKey = turns.map((turn) => `${turn.id}:${turn.status}`).join("|");
@@ -175,11 +178,10 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
     const completedReads = new Set<string>();
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function read() {
-      setLoading(true);
       try {
         const pendingTurns = turns.filter((turn) => !completedReads.has(turn.id) || RUNNING.has(turn.status));
         const reads = await Promise.allSettled(pendingTurns.map(async (turn) => {
-          const current: TurnTimeline = { ...(loaded[turn.id] || { events: [], nextSequence: 0 }) };
+          const current: TurnTimeline = { ...(loaded[turn.id] || cache.get(turn.id) || { events: [], nextSequence: 0 }) };
           // List snapshots can omit a prior turn's result. Its detail owns
           // the persisted command output behind the public timeline rows.
           async function readDetail() {
@@ -203,7 +205,9 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
             } while (more && !controller.signal.aborted);
           }
           const outcomes = await Promise.allSettled([readTimeline(), readDetail()]);
+          if (controller.signal.aborted) return;
           loaded[turn.id] = current;
+          cache.set(turn.id, current);
           const failed = outcomes.find(result => result.status === "rejected");
           if (failed) throw failed.reason;
           completedReads.add(turn.id);
@@ -219,7 +223,6 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
         }
       } finally {
         if (!controller.signal.aborted) {
-          setLoading(false);
           if (polling) timer = setTimeout(() => void read(), 1500);
         }
       }
@@ -227,11 +230,12 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
     void read();
     return () => { controller.abort(); if (timer !== undefined) clearTimeout(timer); };
     // Poll cursors belong to this child and these turn identities, not list-object refreshes.
-  }, [endpoint, sessionId, turnKey, refresh, polling]);
+  }, [endpoint, sessionId, turnKey, refresh, polling, cache]);
 
-  const turnsWithResults = turns.map(turn => withRecordedResult(turn, timelines[turn.id]?.detail));
+  const timelineFor = (id: string) => timelines[id] || cache.get(id);
+  const turnsWithResults = turns.map(turn => withRecordedResult(turn, timelineFor(turn.id)?.detail));
   const modelTask = turnsWithResults.find(turn => turn.id === modelTaskId);
-  const modelRun = modelTask && timelines[modelTask.id]?.run;
+  const modelRun = modelTask && timelineFor(modelTask.id)?.run;
   const ledgerModel = modelRun && modelTask?.childSessionId && modelRun.sessionId === modelTask.childSessionId
     && modelRun.clientTurnId === modelTask.id ? modelRun.model?.trim() : "";
   const model = modelTask ? subAgentConversationModel(modelTask) || ledgerModel || "" : "";
@@ -239,8 +243,10 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
     if (modelTaskId && model) onModelChange?.(modelTaskId, model);
   }, [modelTaskId, model, onModelChange]);
   const projection = projectConversationSteeringMessages(mergeConversationTimelineItems(
-    turnsWithResults.flatMap(turn => turnItems(turn, t, timelines[turn.id])),
+    turnsWithResults.flatMap(turn => turnItems(turn, t, timelineFor(turn.id))),
   ));
+  const loading = Boolean(endpoint && sessionId && !readError && turns.some(turn => !timelineFor(turn.id)));
+  const hasContent = turnsWithResults.some(turn => turn.task?.trim() || turn.summary?.trim() || turn.result || timelineFor(turn.id)?.events.length);
   const dateSeparators = conversationRoundDateSeparators(projection.items, projection.initialUsersByTurnId);
   return (
     <div className="space-y-6" data-vrcforge-subagent-conversation data-subagent-session={sessionId}>
@@ -260,7 +266,7 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
         ) ? subAgentTaskIssueText(turn) : "";
         const turnReadError = readError?.turnId === turn.id ? readError.message : undefined;
         const empty = item.type === "agent" && !hasContent && !errorText && !budgetStop
-          && !loading && turn.status !== "cancelled" && turn.status !== "interrupted";
+          && !loading && !turnReadError && turn.status !== "cancelled" && turn.status !== "interrupted";
         const supplement = response ? (
           <>
             {turn.status === "paused" || budgetStop ? (
@@ -293,9 +299,9 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
           </section>
         );
       })}
-      {loading || (readError && polling) ? (
+      {(loading && !hasContent) || (readError && polling) ? (
         <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />{t(readError && polling ? "header.reconnecting" : "common.loading")}
+          {!hasContent && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}{t(readError && polling ? "header.reconnecting" : "common.loading")}
         </div>
       ) : null}
       {readError && !polling && !loading ? <div role="alert" className="text-xs text-muted-foreground">

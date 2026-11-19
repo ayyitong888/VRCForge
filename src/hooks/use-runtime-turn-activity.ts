@@ -3,12 +3,14 @@ import type { AgentRuntimeResponse, AgentRuntimeRun, AgentTurnResponseRecovery, 
 import { runtimeParentOwner, runtimeTurnLineage } from "../lib/runtime-turn-lineage";
 import { fetchAgentRunTimeline, fetchAgentTurnResponse, type AgentRunTimelinePage } from "../lib/api/agent-runtime";
 import type { ChatThread } from "../lib/chat-types";
+import type { SubAgentTask } from "../lib/api/sub-agents";
+import { isParentDeliveryPending } from "../lib/subagent-merge";
 import { applyAgentRuntimeDeltaToStreamingItem, finalizeInterruptedStreamingTurn, type AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import { mergeRuntimeTimelines, materializeRuntimeTimeline } from "../lib/chat-timeline-presentation";
 import { normalizeAgentRuntimeTimelineEvent } from "../lib/chat-streaming";
 import { type RuntimeTurnEvent } from "./use-runtime-turn-continuation";
 import { coalesceRuntimeTurnStreams, isExternalRuntimeStream, markRuntimeStreamStopping, RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
-import { isActiveRuntimeRunStatus, isInterruptedRuntimeTurn } from "../lib/runtime-run-status";
+import { isActiveRuntimeRunStatus, isInterruptedRuntimeTurn, isWaitingForSubAgent, matchesParentTurn } from "../lib/runtime-run-status";
 
 type Identity = RuntimeTurnLineage & { sessionId: string; clientTurnId: string; turnId?: string };
 type UpdateChat = (chatId: string, updater: (chat: ChatThread) => ChatThread) => boolean;
@@ -74,22 +76,31 @@ export function runtimeActivityCancelTarget(
   chats: ChatThread[],
   chat: ChatThread | undefined,
   runs: AgentRuntimeRun[],
+  tasks: readonly SubAgentTask[] = [],
 ): Identity & { turnId: string } | undefined {
   if (!chat?.sessionId) return undefined;
   const candidates = new Map<string, Identity & { turnId: string }>();
+  const waitingParents: Array<Identity & { turnId: string }> = [];
   for (const run of newestRunsByClientTurn(runs).values()) {
     const { sessionId, clientTurnId, turnId } = runIdentity(run);
+    if (run.dispatchStopped || !sessionId || sessionId !== chat.sessionId || !clientTurnId || !turnId) continue;
+    const identity = { ...runtimeTurnLineage(run), sessionId, clientTurnId, turnId };
+    if (run.status === "parked" && isWaitingForSubAgent(run)) {
+      if (tasks.some(task => task.parentSessionId === sessionId && (!task.parentChatId || task.parentChatId === chat.id)
+        && matchesParentTurn(identity, task.parentClientTurnId, task.parentTurnId) && isParentDeliveryPending(task))
+        && runtimeActivityOwner(chats, identity)?.id === chat.id) waitingParents.push(identity);
+      continue;
+    }
     const questionOwnsStop = run.continuationSource ? run.continuationSource === "question_answered"
       : /:question:[^:]+(?::feedback:[1-9]\d*)?$/.test(clientTurnId);
-    if (run.dispatchStopped || !isActiveRuntimeRunStatus(run.status) || !sessionId || sessionId !== chat.sessionId
-      || !clientTurnId || !turnId || questionOwnsStop) continue;
-    const identity = { ...runtimeTurnLineage(run), sessionId, clientTurnId, turnId };
+    if (!isActiveRuntimeRunStatus(run.status) || questionOwnsStop) continue;
     if (runtimeActivityOwner(chats, identity)?.id !== chat.id || hasAuthoritativeReply(chat, identity)
       || chat.items.some((item) => item.type === "agent" && item.response.dispatchStopped
         && responseMatchesIdentity(item.response, identity))) continue;
     candidates.set(generationKey(identity), identity);
   }
   const matching = [...candidates.values()];
+  if (!matching.length) return waitingParents.length === 1 ? waitingParents[0] : undefined;
   const projected = matching.filter((identity) => chat.items.some((item) => item.type === "streaming"
     && item.id.startsWith(RUNTIME_ACTIVITY_STREAM_PREFIX) && item.clientTurnId === identity.clientTurnId));
   const eligible = projected.length ? projected : matching;

@@ -3,6 +3,7 @@ import type {
   AgentContextUsage,
   AgentMessageAttachment,
   AgentRuntimeResponse,
+  AgentRuntimeRun,
   ChatHistoryEntry,
   ProviderModelInfo,
 } from "./api";
@@ -18,7 +19,10 @@ import {
   mergeCompactionRecovery,
   latestContextWindowUsage,
 } from "./context-compaction";
-import { subAgentAdoptedHistoryText } from "./subagent-merge";
+import { isParentDeliveryPending, subAgentAdoptedHistoryText } from "./subagent-merge";
+import type { SubAgentTask } from "./api/sub-agents";
+import { automaticTurnWaitStage, matchesParentTurn, isActiveRuntimeRunStatus, isInterruptedRuntimeTurn } from "./runtime-run-status";
+import { projectProcessRounds } from "./chat-process-rounds";
 import { formatCount } from "./utils";
 import type { CompactionRecoveryEntry } from "./api/types";
 import { buildTimelinePresentation, materializeRuntimeTimeline, isFinalAssistantPresentationEntry, timelineInvocationDisplayLabel, isCancellationMarkerAssistantText, projectApprovalWaitDialogue } from "./chat-timeline-presentation";
@@ -518,6 +522,41 @@ export function latestConversationItemId(
 
 export function isRetryableConversationItem(item: ConversationItem): boolean {
   return item.type === "user" || item.type === "agent" || item.type === "result" || item.type === "error" || item.type === "subagent";
+}
+
+/** Retrying restarts the original request, including any still-owned child work. */
+export function pendingConversationRetry(
+  chat: Pick<ChatThread, "id" | "sessionId" | "items">, itemId: string,
+  tasks: readonly SubAgentTask[], runs: readonly AgentRuntimeRun[],
+): boolean {
+  const index = chat.items.findIndex(item => item.id === itemId);
+  if (index < 0) return false;
+  const target = chat.items[index];
+  if (target.type === "agent" && isInterruptedRuntimeTurn(target.response)) return true;
+  const children = tasks.filter(task => (!task.parentChatId || task.parentChatId === chat.id)
+    && (!task.parentSessionId || task.parentSessionId === chat.sessionId));
+  if (target.type === "agent" && automaticTurnWaitStage(target.response, children, runs)) return true;
+  const activeRuns = runs.filter(run => run.sessionId === chat.sessionId && !run.dispatchStopped
+    && run.agent !== "sub-agent" && isActiveRuntimeRunStatus(run.status));
+  const pending = children.filter(isParentDeliveryPending);
+  if (!pending.length && !activeRuns.length) return false;
+  type Identity = { clientTurnId?: string; turnId?: string };
+  const owners: Identity[] = [];
+  if (target.type === "agent" || target.type === "streaming") {
+    const rounds = projectProcessRounds(chat.items, chat.sessionId).rounds;
+    const round = rounds.get(target);
+    for (const item of chat.items) {
+      if (item !== target && (!round || rounds.get(item) !== round)) continue;
+      if (item.type === "agent") owners.push({ clientTurnId: item.response.clientTurnId, turnId: item.response.turnId || item.response.turn_id });
+      if (item.type === "streaming") owners.push(item);
+    }
+  } else {
+    const user = chat.items.slice(0, index + 1).reverse().find(item => item.type === "user");
+    if (user?.type === "user") owners.push({ clientTurnId: user.clientTurnId || (user.id.startsWith("user-") ? user.id.slice(5) : undefined) });
+  }
+  const owns = (client?: string, turn?: string) => owners.some(owner => matchesParentTurn(owner, client, turn));
+  return pending.some(task => owns(task.parentClientTurnId, task.parentTurnId))
+    || activeRuns.some(run => owns(run.clientTurnId, run.turnId) || owns(run.parentClientTurnId, run.parentTurnId));
 }
 
 export function serializeChatAttachments(attachments: ChatAttachment[]): AgentMessageAttachment[] {

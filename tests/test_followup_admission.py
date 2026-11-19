@@ -146,6 +146,10 @@ def test_queued_user_turn_waits_for_child_delivery_before_native_history_advance
         dispatcher.notify_runtime_available.assert_not_called()
 
     try:
+        direct = host.AgentRuntimeMessageRequest(message="Next input", session_id="parent", clientTurnId="queued")
+        with pytest.raises(host.HTTPException) as direct_failure:
+            asyncio.run(host.app_agent_runtime_message(direct))
+        assert (direct_failure.value.status_code, direct_failure.value.detail) == (409, "sub_agent_parent_delivery_pending")
         assert_deferred()
         worker_release.set()
         assert dispatching.wait(5)

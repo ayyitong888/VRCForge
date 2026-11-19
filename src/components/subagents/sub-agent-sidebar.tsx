@@ -186,12 +186,12 @@ export function SubAgentSidebar({
       </div> : null}
       {openThread ? (
         <div className="min-h-0 flex-1 overflow-hidden" data-vrcforge-subagent-sidebar-thread>
-          <SubAgentWorkspaceSurface {...surfaceProps} tasks={tasks} selected={surfaceProps.selected}
-            onClose={onBack} onCloseSidebar={onClose} />
+          <SubAgentWorkspaceSurface key={surfaceProps.endpoint} {...surfaceProps} tasks={tasks} selected={surfaceProps.selected}
+            emptyMessage={error ? "" : t("common.loading")} onClose={onBack} onCloseSidebar={onClose} />
         </div>
       ) : null}
         <div style={{ display: openThread ? "none" : undefined }} className="app-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto p-3" data-vrcforge-subagent-sidebar-list>
-          {loading ? <div className="flex shrink-0 items-center gap-2 px-1 text-xs text-muted-foreground">
+          {loading && !threads.length && !error ? <div className="flex shrink-0 items-center gap-2 px-1 text-xs text-muted-foreground">
             <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
             <span>{t("common.loading")}</span>
           </div> : null}
@@ -199,7 +199,7 @@ export function SubAgentSidebar({
             busyTaskIds={surfaceProps.busyTaskIds} roles={roles} now={now} />
           <ThreadSection title={t("subagent.done")} threads={done} onSelect={onSelect} onCancel={surfaceProps.onCancel}
             busyTaskIds={surfaceProps.busyTaskIds} roles={roles} now={now} done />
-          {!loading && !threads.length ? <p className="px-2 py-2 text-xs text-muted-foreground">{t("subagent.noTasks")}</p> : null}
+          {!loading && !error && !threads.length ? <p className="px-2 py-2 text-xs text-muted-foreground">{t("subagent.noTasks")}</p> : null}
         </div>
     </aside>
   );

@@ -10,15 +10,17 @@ import { groupSubAgentThreads } from "../../lib/subagent-threads";
 import { Badge } from "../ui/badge";
 import { MessageCopyButton } from "../chat/message-copy-button";
 import { Button } from "../ui/button";
-import { SubAgentConversation, subAgentConversationCopyItem, subAgentConversationModel } from "./sub-agent-conversation";
+import { SubAgentConversation, subAgentConversationCopyItem, subAgentConversationModel, type SubAgentTimelineCache } from "./sub-agent-conversation";
 import { subAgentInspectionConclusion } from "./sub-agent-inspection-report";
 import { SubAgentMark } from "./sub-agent-panel";
 import { useConversationScroll } from "../../hooks/use-conversation-scroll";
 
 export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", developerOptionsEnabled = false,
-  onCancel, onResume, onMerge, busyTaskIds, onClose, onCloseSidebar, onCopyItem, onOpenChatById }: {
+  onCancel, onResume, onMerge, busyTaskIds, onClose, onCloseSidebar, onCopyItem, onOpenChatById, emptyMessage, timelineCache }: {
   tasks: SubAgentTask[];
   selected: SubAgentTask | null;
+  emptyMessage?: string;
+  timelineCache?: SubAgentTimelineCache;
   endpoint?: string;
   developerOptionsEnabled?: boolean;
   onCancel: (taskId: string) => void;
@@ -36,7 +38,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
   const [readModel, setReadModel] = useState<{ taskId: string; model: string }>();
   const recordReadModel = useCallback((taskId: string, model: string) => setReadModel({ taskId, model }), []);
   const threads = useMemo(() => groupSubAgentThreads(tasks), [tasks]);
-  const activeThread = threads.find((thread) => thread.turns.some((turn) => turn.id === selected?.id)) || threads[0];
+  const activeThread = threads.find((thread) => thread.turns.some((turn) => turn.id === selected?.id));
   const activeTask = activeThread ? selected?.id === activeThread.task.id ? selected : activeThread.task : null;
   const activeModel = activeTask && (subAgentConversationModel(activeTask)
     || (readModel?.taskId === activeTask.id ? readModel.model : ""));
@@ -102,7 +104,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
         <div className="app-scrollbar min-h-0 flex-1 overflow-auto pl-7 pr-4 py-5 md:pl-8 md:pr-6 md:py-6" data-vrcforge-subagent-conversation-scroll data-chat-history-scroll onScroll={(event) => onScroll(event.currentTarget)}>
           <div className="mx-auto max-w-3xl space-y-6">
           <SubAgentConversation key={activeThread.id} endpoint={endpoint} developerOptionsEnabled={developerOptionsEnabled} onCopyItem={onCopyItem} onOpenChatById={onOpenChatById}
-            modelTaskId={activeTask.id} onModelChange={recordReadModel}
+            timelineCache={timelineCache} modelTaskId={activeTask.id} onModelChange={recordReadModel}
             turns={activeThread.turns.map((turn) => turn.id === activeTask.id ? activeTask : turn)} />
           <div ref={conversationEndRef} />
           </div>
@@ -180,7 +182,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
               ) : null}
             </div>
           </div> : null}
-      </section> : <div className="p-4 text-xs text-muted-foreground">{t("subagent.noTasks")}</div>}
+      </section> : <div className="p-4 text-xs text-muted-foreground">{emptyMessage ?? t("subagent.noTasks")}</div>}
     </section>
   );
 }

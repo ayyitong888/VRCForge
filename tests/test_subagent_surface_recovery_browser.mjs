@@ -506,6 +506,29 @@ try {
     await page.close();
   }
 
+  if (issue === "sidebar-refresh") {
+    tasks = [taskA, ...Array.from({ length: 5 }, (_, i) => ({
+      ...done, id: `surface-done-${i}`, displayName: `Finished thread ${i}`,
+    }))];
+    const page = await open();
+    const entrance = page.locator("[data-vrcforge-open-subagent-surface]");
+    await entrance.getByText("1 running", { exact: true }).waitFor();
+    holdNextParent = chatA.id;
+    await waitFor(() => pending.length > 0, "a background refresh should be pending");
+    await entrance.click();
+    const list = page.locator("[data-vrcforge-subagent-sidebar-list]");
+    await list.waitFor();
+    assert.equal(await list.locator("[data-vrcforge-open-subagent-thread]").count(), 6);
+    assert.equal(await list.locator(".animate-spin").count(), 0, "known threads must remain ready during refresh");
+    await list.locator(`[data-vrcforge-open-subagent-thread="${taskA.id}"]`).click();
+    await page.locator("[data-vrcforge-subagent-workspace-surface]").getByText(taskA.displayName, { exact: true }).waitFor();
+    const refreshed = page.waitForResponse(response => new URL(response.url()).searchParams.get("parentChatId") === chatA.id);
+    pending.shift()();
+    await refreshed;
+    await page.evaluate(() => new Promise(frame => requestAnimationFrame(() => requestAnimationFrame(frame))));
+    await page.close();
+  }
+
   if (issue === "sidebar") {
     const startedAt = new Date(Date.now() - 70_000).toISOString();
     tasks = [

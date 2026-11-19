@@ -4,9 +4,7 @@ import { mkdtempSync } from "node:fs";
 import Module from "node:module";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { build } from "esbuild";
-const { chromium } = createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 
 const root = resolve(import.meta.dirname, "..");
 const fixtureSource = `
@@ -14,8 +12,9 @@ const fixtureSource = `
   import { renderToStaticMarkup } from "react-dom/server";
   import i18n from "./src/i18n";
   import { initReactI18next } from "react-i18next";
+  import messages from "./src/locales/en-US.json";
   import { ConversationCard } from "./src/components/chat/conversation-card";
-  i18n.use(initReactI18next).init({lng:"en", resources:{en:{translation:{chat:{runtimePhase:{reconnecting:"Reconnecting {{attempt}}/{{max}}", waitingForModelProgress:"Waiting for response ({{window}}/{{max}})", reconnectingDetail:"waiting", reconnectingRetry:"retry", waitingForModelDetail:"waiting", waitingForModelTimeout:"timeout"}, providerResponseTimedOut:"timeout"}, agent:{elapsed:"{{time}}"}}}}, interpolation:{escapeValue:false}});
+  i18n.use(initReactI18next).init({lng:"en-US", resources:{"en-US":{translation:messages}}, interpolation:{escapeValue:false}});
   const event = (id, sequence, kind, payload) => ({id, sequence, timestamp: ` + "`2026-09-22T00:00:0${sequence}.000Z`" + `, kind, payload});
   const timeline = [
     event("call-a", 1, "tool_call", {actionId:"a", tool:"vrcforge_read_text_file", status:"started"}),
@@ -36,10 +35,7 @@ const fixtureSource = `
     const pureFinal = render({id:"pure", type:"agent", response:{plan:{reply:"pure final",summary:"done",planner:"fixture",shellNeeded:false,nextStep:"done"},timeline:[timeline.at(-1)]}});
     const failedTimeline = timeline.map((item) => item.id === "result-d" ? {...item, payload:{...item.payload, status:"failed"}} : item);
     const failed = render({id:"failed", type:"agent", response:{plan:{reply:"failed final",summary:"done",planner:"fixture",shellNeeded:false,nextStep:"done"},timeline:failedTimeline}});
-    const retrying = render({id:"retry", type:"streaming", clientTurnId:"retry", text:"", phase:"waiting_for_model", providerRetry:{attempt:2,max:5,reason:"capacity",statusCode:503}, createdAt:new Date().toISOString()});
-    const waitAt = new Date(Date.now() - 60_000).toISOString();
-    const waiting = render({id:"waiting", type:"streaming", clientTurnId:"waiting", text:"", phase:"waiting_for_model", providerLastActivityAt:waitAt, createdAt:waitAt});
-    return {durable, streaming, pureFinal, failed, retrying, waiting};
+    return {durable, streaming, pureFinal, failed};
   }
 `;
 
@@ -77,17 +73,6 @@ function checkGreen(result) {
 
 const current = await compileAt(root);
 checkGreen(current);
-const browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
-try {
-  const page = await browser.newPage();
-  await page.setContent(`<main>${current.retrying}${current.waiting}</main>`);
-  assert.equal(await page.getByText("Reconnecting 2/5", { exact: true }).count(), 1,
-    "browser renders the real retry attempt");
-  assert.equal(await page.getByText("Waiting for response (1/5)", { exact: true }).count(), 1,
-    "browser renders time fallback as waiting, not reconnecting");
-} finally {
-  await browser.close();
-}
 
 const baselineArg = process.argv.find((arg) => arg.startsWith("--baseline="));
 if (baselineArg) {

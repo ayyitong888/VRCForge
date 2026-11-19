@@ -90,7 +90,7 @@ tasks[1].result = { rawResult: { ...firstResult, clientTurnId: "second", turnId:
   steps: [{ actionId: "inspect-package", result: inspectionOutput }] }, providerRoute: { model: "fixture-requested-model" } };
 let liveReads = 0;
 let failFirstTimeline = false;
-let failFirstDetail = false;
+let delayedTimeline;
 const requests = [];
 const plugins = baseline ? [{ name: "baseline-panel", setup(b) {
   b.onLoad({ filter: /sub-agent-panel\.tsx$/ }, () => ({
@@ -111,6 +111,9 @@ const bundled = await build({ stdin: { resolveDir: root, loader: "tsx", contents
   const parentUser={id:"parent-initial",type:"user",text:initial[0].task,createdAt:initial[0].createdAt};
   const parentTurn={id:"parent-turn",type:"agent",response:{...${JSON.stringify(firstResult)},timeline:${JSON.stringify(first)}},elapsedSeconds:12};
   function Fixture(){ const [tasks,setTasks]=useState(initial),[selected,setSelected]=useState(null),[open,setOpen]=useState(false),[visible,setVisible]=useState(true),[draft,setDraft]=useState(''),[developer,setDeveloper]=useState(false);
+    const [endpoint, setEndpoint] = useState(location.origin);
+    const timelineCache = React.useMemo(() => new Map(), [endpoint]);
+    window.selectAlternateEndpoint = enabled => setEndpoint(location.origin + (enabled ? "/alternate" : ""));
     window.setDeveloper=setDeveloper;
     window.onlyFailed=()=>setTasks([initial[2]]);window.resetTasks=()=>setTasks(initial);window.setLanguage=lng=>i18n.changeLanguage(lng);window.manyDone=()=>setTasks(Array.from({length:24},(_,n)=>({...initial[1],id:"history-"+n,childSessionId:"history-child-"+n,displayName:"Completed review "+n,resumeOf:undefined})));window.cancelled=[];
     const noop=()=>{};const choose=id=>{setSelected(tasks.find(t=>t.id===(id||tasks[0]?.id)));setOpen(true);setVisible(true)};
@@ -123,8 +126,8 @@ const bundled = await build({ stdin: { resolveDir: root, loader: "tsx", contents
         </div>
         <div className="p-4" data-main-composer><Composer input={draft} setInput={setDraft} sending={false} onSubmit={event=>event?.preventDefault()} onSwitchMode={noop} compact /></div>
       </section>
-      <div className="min-h-0 overflow-hidden bg-workspace">{visible?<Sidebar endpoint={location.origin} tasks={tasks} selected={selected} roles={[{id:"llm_readonly",title:"Reviewer"}]}
-        openThread={open} developerOptionsEnabled={developer} loading={false} error="" onOpen={choose} onSelect={choose} onCancel={id=>window.cancelled.push(id)} onResume={resume}
+      <div className="min-h-0 overflow-hidden bg-workspace">{visible?<Sidebar endpoint={endpoint} tasks={tasks} selected={selected} roles={[{id:"llm_readonly",title:"Reviewer"}]}
+        openThread={open} timelineCache={timelineCache} developerOptionsEnabled={developer} loading={false} error="" onOpen={choose} onSelect={choose} onCancel={id=>window.cancelled.push(id)} onResume={resume}
         onMerge={noop} onCopyItem={item=>window.copiedReply=conversationItemText(item,i18n.t)} busyTaskIds={new Set()}
         onBack={()=>setOpen(false)} onClose={()=>setVisible(false)}/>:<button data-open-subagents onClick={()=>setVisible(true)}>Open subagents</button>}</div>
     </main>}
@@ -139,11 +142,15 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   if (url.pathname === "/") { res.writeHead(200,{"Content-Type":"text/html; charset=utf-8"});res.end(`<style>${css}</style><div id="root"></div><script>${bundled.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script>`);return; }
   requests.push({ method: req.method, path: url.pathname, session: url.searchParams.get("sessionId"), turn: url.searchParams.get("clientTurnId"), after: Number(url.searchParams.get("afterSequence") || 0) });
+  if (url.pathname.startsWith("/alternate/")) {
+    if (delayedTimeline) await delayedTimeline;
+    res.writeHead(404); res.end(); return;
+  }
   if (req.method === "GET" && url.pathname === "/api/app/sub-agents/first") {
-    if (failFirstDetail) { failFirstDetail = false; res.writeHead(503); res.end(); return; }
     res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({ok:true,task:firstDetails}));return;
   }
   if (url.pathname === "/api/app/agent/runs/timeline") {
+    if (delayedTimeline) await delayedTimeline;
     const turn = url.searchParams.get("clientTurnId");
     if (turn === "failed") {
       res.writeHead(503, { "Content-Type": "application/json" });
@@ -162,7 +169,7 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === "POST" && url.pathname === "/api/app/sub-agents/second/resume") {
     let body="";for await(const chunk of req)body+=chunk;
-    failFirstTimeline = failFirstDetail = true;
+    failFirstTimeline = true;
     const data=JSON.parse(body);res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({ok:true,task:{...tasks[1],id:"third",resumeOf:"second",task:data.task,status:"running",canResume:false,createdAt:"2026-10-28T10:04:00Z"}}));return;
   }
   res.writeHead(404);res.end();
@@ -365,14 +372,49 @@ try {
   assert(requests.some(r=>r.turn==="first"&&r.after===200),"history must read the second page");
   assert.equal(requests.filter(r=>r.method==="POST").length,0,"opening and reading must never execute a turn");
   assert.equal(await page.locator("[data-main-composer] textarea").inputValue(),"Keep this parent draft","opening child must preserve parent draft");
+  let releaseAlternate;
+  delayedTimeline = new Promise(resolve => { releaseAlternate = resolve; });
+  try {
+    const alternateRead = page.waitForRequest(request => new URL(request.url()).pathname.startsWith("/alternate/"));
+    await page.evaluate(() => window.selectAlternateEndpoint(true));
+    await alternateRead;
+    assert.equal(await surface.getByText("Full original report beyond page 200.", { exact: true }).count(), 0,
+      "the previous backend's child ledger must not appear under a new endpoint");
+  } finally {
+    delayedTimeline = undefined;
+    releaseAlternate();
+    await page.evaluate(() => window.selectAlternateEndpoint(false));
+  }
+  await surface.getByText("Full original report beyond page 200.", { exact: true }).waitFor();
+  await surface.locator("[data-vrcforge-subagent-back]").click();
+  let releaseTimeline;
+  delayedTimeline = new Promise(resolve => { releaseTimeline = resolve; });
+  try {
+    await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').click();
+    await surface.locator('[data-subagent-conversation-turn="first"]').waitFor();
+    assert.equal(await surface.getByText("Full original report beyond page 200.", { exact: true }).count(), 1,
+      "going back to the thread must render the previously read report before its refresh returns");
+    assert.equal(await surface.locator("[data-vrcforge-subagent-conversation] [role=status] .animate-spin").count(), 0);
+  } finally {
+    delayedTimeline = undefined;
+    releaseTimeline();
+  }
   const question="Continue with the third outfit.";
   await surface.getByLabel("New question for this child").fill(question);
+  const olderReadRecovered = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/app/agent/runs/timeline" && url.searchParams.get("clientTurnId") === "first" && response.ok();
+  });
   await surface.getByRole("button",{name:"Ask a follow-up",exact:true}).click();
   await surface.getByText("Third turn retains the same child context.",{exact:true}).waitFor();
   assert.equal(await surface.locator('[data-subagent-user-message]').count(),3);
   await surface.getByText("Full original report beyond page 200.", { exact: true }).waitFor();
-  assert(requests.slice(requests.findIndex(request => request.method === "POST")).filter(request => request.path === "/api/app/sub-agents/first").length >= 2,
-    "the existing live poll retries failed older timeline and result reads without dropping the successful new turn");
+  await olderReadRecovered;
+  const followUpReads = requests.slice(requests.findIndex(request => request.method === "POST"));
+  assert(followUpReads.filter(request => request.turn === "first").length >= 2,
+    "the live poll retries the failed older timeline without dropping the new turn or the visible prior report");
+  assert.equal(followUpReads.filter(request => request.path === "/api/app/sub-agents/first").length, 0,
+    "the completed detail was already read and does not need to be fetched again");
   await surface.locator('[data-vrcforge-subagent-back]').click();
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
   assert.equal(await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').count(),1);

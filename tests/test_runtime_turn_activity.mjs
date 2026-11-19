@@ -26,6 +26,18 @@ assert.equal(activity.runtimeActivityCancelTarget([chat], chat, [older, newer]).
   "Stop owns the newest start even if the older run updated last");
 assert.equal(activity.runtimeActivityCancelTarget([chat], chat, [older, { ...newer, status: "completed" }]), undefined,
   "a stale active row cannot revive a superseded generation");
+const waiting = { ...run, status: "parked", nextStep: "waiting_for_tool", reason: "sub_agent_pending" };
+const parkedChat = { ...chat, items: [{ id: "receipt", type: "agent", response: { ...identity, plan: waiting } }] };
+const child = { id: "review", parentChatId: chat.id, parentSessionId: chat.sessionId,
+  parentTurnId: run.turnId, parentClientTurnId: run.clientTurnId, status: "running" };
+const stopWhileWaiting = (tasks, runs = [waiting]) => activity.runtimeActivityCancelTarget([parkedChat], parkedChat, runs, tasks);
+assert.deepEqual(stopWhileWaiting([child]), identity, "a parked parent with a live child remains stoppable after its HTTP receipt");
+assert.equal(stopWhileWaiting([{ ...child, status: "paused", parentContinuationStatus: "delivered" }]), undefined);
+assert.equal(stopWhileWaiting([{ ...child, parentTurnId: "another" }]), undefined);
+assert.equal(stopWhileWaiting([{ ...child, parentChatId: "another" }]), undefined);
+const successor = { ...run, turnId: "successor", clientTurnId: "handoff", continuationSource: "sub_agent_finished" };
+assert.equal(stopWhileWaiting([{ ...child, status: "paused", parentContinuationStatus: "dispatching" }], [waiting, successor])?.turnId,
+  successor.turnId, "handoff moves Stop to the running continuation");
 assert.equal(projected.items.length, 1);
 assert.equal(activity.projectRuntimeTurnActivity(projected, run), projected, "repeated discovery does not create another stream");
 assert.equal(activity.projectRuntimeTurnActivity(chat, { ...run, status: "failed" }), chat, "a terminal snapshot cannot resurrect activity");
