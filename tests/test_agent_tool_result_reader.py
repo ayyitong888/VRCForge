@@ -167,7 +167,10 @@ def test_reader_is_fresh_core_read_in_both_contexts_and_layers():
             catalog = dashboard_server._RuntimePlannerCatalog().read(layer, project_context_active=project)
             tool = next(item for item in catalog.visible_tools if item.runtime_name == TOOL_NAME)
             assert tool.block == "core" and not tool.write
-            assert set(tool.input_schema["properties"]) - {"promptSkillProvenance"} == {"resultRef", "source", "jsonPointer", "offset", "limit", "textOffset", "matchNameOrPath"}
+            assert set(tool.input_schema["properties"]) - {"promptSkillProvenance"} == {
+                "resultRef", "messageId", "executionId", "source", "jsonPointer", "offset", "limit",
+                "textOffset", "matchNameOrPath",
+            }
             prompt = dashboard_server.AGENT_GATEWAY.runtime_planner._build_llm_plan_prompt(
                 "Read omitted data", [], exposure_layer=layer, project_context_active=project, internal_tool_blocks=["core"])
             assert "- read_tool_result" in prompt
@@ -316,9 +319,9 @@ def test_live_reader_schema_exposes_executable_bounds_and_rejects_r2_mistakes():
 
     schema = canonical_unity_read_tool_input_schema(TOOL_NAME)
     assert schema["additionalProperties"] is False
-    assert schema["required"] == ["resultRef"]
+    assert [branch["required"] for branch in schema["oneOf"]] == [["resultRef"], ["messageId"], ["executionId"]]
     assert schema["properties"]["limit"]["minimum"] == 1
-    assert schema["properties"]["limit"]["maximum"] == 20
+    assert "maximum" not in schema["properties"]["limit"]
     assert schema["properties"]["offset"]["minimum"] == 0
     assert "RFC6901" in schema["properties"]["jsonPointer"]["description"]
     assert "~1" in schema["properties"]["jsonPointer"]["description"]
@@ -326,8 +329,41 @@ def test_live_reader_schema_exposes_executable_bounds_and_rejects_r2_mistakes():
     actual = next(tool for tool in catalog.visible_tools if tool.runtime_name == TOOL_NAME)
     valid = {"resultRef": "result_" + "a" * 32, "jsonPointer": "/parameters", "offset": 6, "limit": 20}
     assert validate_planner_tool_arguments(actual.input_schema, valid)["ok"]
-    for wrong in ({**valid, "limit": 28}, {**valid, "query": "衣柜"}, {**valid, "jsonPointer": "parameters"}):
+    assert validate_planner_tool_arguments(actual.input_schema, {**valid, "limit": 28})["ok"]
+    for wrong in ({**valid, "limit": 0}, {**valid, "query": "衣柜"}, {**valid, "jsonPointer": "parameters"}):
         assert not validate_planner_tool_arguments(actual.input_schema, wrong)["ok"]
+
+
+def test_reader_caps_large_item_request_and_preserves_exact_next_page():
+    step = retained({"parameters": [{"name": str(index)} for index in range(42)]})
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        first = read(step, jsonPointer="/parameters", offset=1, limit=33)
+        assert (first["requestedLimit"], first["effectiveLimit"], first["returnedItems"]) == (33, 20, 20)
+        assert first["hasMore"]
+        assert first["nextRequest"] == {"tool": TOOL_NAME, "arguments": {
+            "resultRef": step["resultRead"]["resultRef"], "source": "result",
+            "jsonPointer": "/parameters", "offset": 21, "limit": 20,
+        }}
+        second = read_tool_result(first["nextRequest"]["arguments"], sanitize=sanitize)
+        assert second["items"][0]["jsonPointer"] == "/parameters/21"
+
+
+def test_planner_only_suggests_a_leading_slash_for_a_valid_exact_read():
+    from agent_tool_result_reader import INPUT_SCHEMA
+    from runtime_planner_service import validate_planner_tool_arguments
+
+    request = {"resultRef": "result_" + "b" * 32, "jsonPointer": "state/a~1b",
+               "source": "owner_model", "limit": 33, "offset": 7, "matchNameOrPath": "Actual asset"}
+    rejected = validate_planner_tool_arguments(INPUT_SCHEMA, request, tool_name=TOOL_NAME)
+    assert not rejected["ok"] and rejected["code"] == "planner_invalid_response"
+    assert [(issue["path"], issue["code"]) for issue in rejected["issues"]] == [("jsonPointer", "pattern")]
+    corrected = {**request, "jsonPointer": "/state/a~1b"}
+    assert rejected["nextRequest"] == {"tool": TOOL_NAME, "arguments": corrected}
+    assert validate_planner_tool_arguments(INPUT_SCHEMA, corrected, tool_name=TOOL_NAME)["ok"]
+    for invalid in ({**request, "limit": 0}, {**request, "jsonPointer": "state/~2"},
+                    {**request, "resultRef": "unowned-id"}, {**request, "executionId": "exec-1"}):
+        assert "nextRequest" not in validate_planner_tool_arguments(INPUT_SCHEMA, invalid, tool_name=TOOL_NAME)
+    assert "nextRequest" not in validate_planner_tool_arguments(INPUT_SCHEMA, request, tool_name="another_tool")
 
 
 def test_reader_next_request_survives_real_gateway_redaction_and_observation():

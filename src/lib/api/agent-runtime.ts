@@ -13,6 +13,10 @@ export type ChatHistoryEntry = {
   subAgentTaskId?: string;
   clientTurnId?: string;
   authorRole?: "agent_relay" | "goal";
+  messageId?: string;
+  sourceText?: string;
+  handoffAttachments?: AgentMessageAttachment[];
+  references?: Array<{ id: string; text: string }>;
 };
 
 export type AgentHistoryContextBudget = {

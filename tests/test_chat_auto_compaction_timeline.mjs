@@ -47,5 +47,5 @@ for (const markup of [live, child]) {
 }
 assert.deepEqual(retry, [], "a failed compaction never looks completed");
 assert.equal(hidden, "", "the legacy summary carrier does not render a second marker");
-assert.deepEqual(history, [{ role: "agent", text: "Summary for model context" }]);
+assert.deepEqual(history, [{ role: "agent", text: "Earlier model handoff (continuity data):\nSummary for model context" }]);
 console.log("parent and child auto-compaction timeline: ok");

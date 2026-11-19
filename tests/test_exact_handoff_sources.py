@@ -8,6 +8,7 @@ import dashboard_server as dashboard
 from agent_gateway import AgentGateway
 from agent_handoff_graph import parse_handoff_graph
 from agent_runtime_input import RuntimeInputSource
+from agent_runtime_session_state import model_handoff_payload
 from context_compaction import MODEL_HANDOFF_PREFIX, compact_context
 from runtime_planner_service import PlannerTurnMetadata, RuntimePlannerService
 from tests.test_native_context_guard import _Catalog, _Desktop, _NativeModel, _Turn
@@ -102,7 +103,7 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     assert contexts[-1]["activeTodo"] == todo
     assert state._native_pending(saved) == {"pending-call"}
     assert any(message.get("content") == first_source.model_text("  Exact first request\r\n") for message in saved["messages"])
-    original_graph = parse_handoff_graph(saved["messages"][0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
+    original_graph = parse_handoff_graph(next(payload for row in saved["messages"] if (payload := model_handoff_payload(row))))
     assert original_graph["nodes"]["inspect"]["text"] == "Inspect the saved observation"
 
     state.settle_native_call("owner", binding=binding, call_id="pending-call", content='{"status":"approved"}')
@@ -113,7 +114,7 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     assert second.status_code == 200, second.text
     assert second.json().get("nativeApplied") is True, second.text[:800]
     saved_again = state.native_conversation("owner", binding=binding)
-    graph = parse_handoff_graph(saved_again["messages"][0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
+    graph = parse_handoff_graph(next(payload for row in saved_again["messages"] if (payload := model_handoff_payload(row))))
     assert graph["nodes"]["goal"] == original_graph["nodes"]["goal"] == {
         "kind": "goal", "text": "  Exact first request\r\n",
         "evidence": [{"type": "message", "id": grounding[0]["id"]}],

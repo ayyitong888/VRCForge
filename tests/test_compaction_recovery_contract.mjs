@@ -50,10 +50,10 @@ test("runtime replacement merges durable archives before projecting old items", 
   const projectionStart = runController.indexOf("const projection = projectRuntimeCompactionItems", compactStart);
   const replacement = runController.slice(compactStart, projectionStart);
   assert.match(replacement, /mergeCompactionRecovery\(\s*collectCompactionRecovery\(durableItems\),\s*responseRecovery/s);
-  assert.ok((runController.match(/item\.type === "question_answer"/g) || []).length >= 2);
+  assert.match(runController, /item\.type === "question_answer"/);
   const replacementSource = contextController.slice(
     contextController.indexOf("function buildReplacementItems"),
     contextController.indexOf("function applyCompactedAttachmentReferences"),
   );
-  assert.match(replacementSource, /item\.type === "question_answer"/);
+  assert.match(replacementSource, /projectRuntimeCompactionItems\(/);
 });

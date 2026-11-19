@@ -20,12 +20,12 @@ import {
   buildDurableCompactionStateEntries,
   evaluateCompactionBudget,
   fingerprintCompactionSource,
-  contextUsageBoundaryItemId,
   mergeCompactionRecovery,
+  projectRuntimeCompactionItems,
   resolveContextLimit,
   type ContextCompactionBudgetDecision,
 } from "../lib/context-compaction";
-import { buildChatHistory, latestAgentContextUsage } from "../lib/conversation-utils";
+import { buildChatHistory, latestAgentContextUsage, visibleAgentDialogueText } from "../lib/conversation-utils";
 import type { PrepareTurnContextInput, PreparedTurnContext } from "./use-chat-run-controller";
 
 type CompactTrigger = "manual" | "auto";
@@ -215,15 +215,17 @@ export function useContextCompactionController({
     });
     const sourceMarker = retainedProjection.find((item) => item.type === "compact" && item.id === generation);
     const summarizedIds = new Set(sourceMarker?.type === "compact" ? sourceMarker.summarizedItemIds || [] : []);
-    const summarySourceItems = snapshotItems.filter((item) => summarizedIds.has(item.id));
-    const summaryHistory = [
-      ...buildChatHistory(summarySourceItems, t, snapshotItems),
+    const summarySourceItems = snapshotItems.filter((item) => summarizedIds.has(item.id)
+      || item.type === "user" || item.type === "question_answer");
+    const summaryHistory = summarizedIds.size ? [
+      ...buildChatHistory(summarySourceItems, t, snapshotItems, true),
       ...buildDurableCompactionStateEntries(summarySourceItems),
-    ];
+    ] : [];
     const summaryTargetTokens = (decision.targetAfterTokens ?? 0)
       - estimateHistoryTokens(buildChatHistory(retainedProjection, t))
       - estimateIncomingContextTokens(request.incomingText, request.incomingAttachments) - 8;
-    if ((!summaryHistory.length || summaryTargetTokens < 64) && !mayCompactNative) {
+    const fallbackHistory = summaryTargetTokens >= 64 ? summaryHistory : [];
+    if (!fallbackHistory.length && !mayCompactNative) {
       if (request.trigger === "manual") setError(t("compact.noContent"));
       return { status: "skipped", decision, chat: snapshot };
     }
@@ -267,11 +269,11 @@ export function useContextCompactionController({
 
     try {
       const payload: CompactAgentHistoryResponse = await compactAgentHistory(request.endpoint, {
-        history: summaryHistory,
+        history: fallbackHistory,
         signal: controller.signal,
         trigger: request.trigger,
         phase: request.phase,
-        sourceDigest: fingerprintCompactionSource(summaryHistory),
+        sourceDigest: fingerprintCompactionSource(fallbackHistory),
         language: i18n.resolvedLanguage || i18n.language,
         provider: request.provider,
         model: request.model,
@@ -507,43 +509,8 @@ function buildReplacementItems(
   compactItem: Extract<ConversationItem, { type: "compact" }>,
 ): ConversationItem[] {
   const durable = stripTransientConversationItems(items);
-  const turnStarts: number[] = [];
-  const settledApprovals = new Set(durable.flatMap((item) => item.type === "result" ? [item.approvalId] : []));
-  const pendingTurns = new Set<number>();
-  for (const [index, item] of durable.entries()) {
-    if (item.type === "user") turnStarts.push(index);
-    if (item.type === "agent") {
-      const approval = item.response.approvalId || item.response.approval_id;
-      const start = turnStarts.at(-1);
-      if (start !== undefined && approval && !settledApprovals.has(approval)) pendingTurns.add(start);
-    }
-  }
-  const latestStart = turnStarts.at(-1);
-  const currentTurn = latestStart !== undefined && (pendingTurns.has(latestStart)
-    || !durable.slice(latestStart).some((item) => item.type === "agent"));
-  const recentStart = turnStarts.at(currentTurn ? -3 : -2) ?? turnStarts[0] ?? durable.length;
-  const retainedSuffix = Math.min(recentStart, ...pendingTurns);
-  const recentDialogue = durable.slice(retainedSuffix);
-  const initialTask = turnStarts.length ? durable[turnStarts[0]] : undefined;
-  const stateCards = durable
-    .filter((item) => item.type === "subagent" || item.type === "result");
-  const retainedIds = new Set([...recentDialogue, ...stateCards].map((item) => item.id));
-  if (initialTask) retainedIds.add(initialTask.id);
-  const summarizedItemIds = durable
-    .filter((item) => item.type === "compact"
-      || ((item.type === "user" || item.type === "question_answer" || item.type === "agent") && !retainedIds.has(item.id)))
-    .map((item) => item.id);
-  const marker = { ...compactItem, summarizedItemIds, contextUsageBoundaryItemId: contextUsageBoundaryItemId(durable) };
-  const result: ConversationItem[] = [];
-  let inserted = false;
-  for (const item of durable) {
-    if (!inserted && summarizedItemIds.includes(item.id)) {
-      result.push(marker);
-      inserted = true;
-    }
-    result.push(item);
-  }
-  return inserted ? result : [marker, ...result];
+  return projectRuntimeCompactionItems(durable, new Set(durable.map((item) => item.id)), compactItem,
+    (response) => Boolean(visibleAgentDialogueText(response))).items;
 }
 
 function applyCompactedAttachmentReferences(

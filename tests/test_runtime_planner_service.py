@@ -3206,10 +3206,12 @@ def test_prompt_and_observation_use_only_typed_read_ports_and_bounded_projection
 
 
 def test_compaction_port_preserves_success_and_fail_closed_metadata() -> None:
-    history = [{"role": "user", "text": "x" * 20_000}]
+    history = [{"role": "user", "text": " First exact instruction  "},
+               {"role": "agent", "text": "historical material " * 4_000},
+               {"role": "agent", "text": " Last exact answer  "}]
     usage: dict[str, object] = {
         "exact": True,
-        "lastInputTokens": 10_000,
+        "lastInputTokens": 5_200,
         "lastPromptEstimatedTokens": 5_000,
         "peakInputTokens": 10_000,
     }
@@ -3232,7 +3234,11 @@ def test_compaction_port_preserves_success_and_fail_closed_metadata() -> None:
         loop_state=[],
         context_usage=usage,
     )
-    assert replacement == [{"role": "agent", "text": "bounded summary"}]
+    assert [row["role"] for row in replacement] == ["user", "user", "agent", "agent"]
+    assert replacement[0]["text"] == " First exact instruction  "
+    assert replacement[1]["text"] == "continue"
+    assert replacement[2]["text"].endswith("bounded summary")
+    assert replacement[3]["text"] == " Last exact answer  "
     assert metadata is not None and metadata["applied"] is True
     assert blocked is False
     assert usage["compactionCount"] == 1
@@ -3250,7 +3256,7 @@ def test_compaction_port_preserves_success_and_fail_closed_metadata() -> None:
         loop_state=[],
         context_usage={
             "exact": True,
-            "lastInputTokens": 10_000,
+            "lastInputTokens": 5_200,
             "lastPromptEstimatedTokens": 5_000,
         },
     )
@@ -3311,22 +3317,25 @@ def test_compaction_projects_pre_and_post_prompts_with_current_exposure_layer() 
         message="continue",
         params={"_contextCompactionLimit": 10_000},
         observe={},
-        history=[{"role": "user", "text": "x" * 20_000}],
+        history=[{"role": "user", "text": "First instruction"},
+                 {"role": "agent", "text": "historical material " * 4_000},
+                 {"role": "agent", "text": "Last answer"}],
         loop_state=[],
         context_usage={
             "exact": True,
-            "lastInputTokens": 10_000,
+            "lastInputTokens": 5_200,
             "lastPromptEstimatedTokens": 5_000,
         },
         runtime_exposure_layer=EXPOSURE_LAYER_EXECUTION,
     )
 
-    assert replacement == [{"role": "agent", "text": "bounded summary"}]
+    assert [row["text"] for row in replacement if row["role"] == "user"] == ["First instruction", "continue"]
+    assert replacement[-1]["text"] == "Last answer"
     assert metadata is not None and metadata["applied"] is True
     assert blocked is False
-    # Measure the original prompt, fixed overhead, and replacement prompt in
-    # the same exposure layer; the fixed-overhead read reserves summary space.
-    assert catalog.reads == [EXPOSURE_LAYER_EXECUTION] * 3
+    # The original prompt, fixed skeleton, retained blocks and replacement
+    # all use the same execution-layer tool exposure.
+    assert catalog.reads == [EXPOSURE_LAYER_EXECUTION] * 4
 
 
 def test_compaction_blocks_empty_history_when_loop_evidence_exceeds_context() -> None:
@@ -3358,7 +3367,8 @@ def test_compaction_blocks_empty_history_when_loop_evidence_exceeds_context() ->
     assert metadata is not None
     assert metadata["blocked"] is True
     assert blocked is True
-    assert len(compactor.calls) == 1
+    assert metadata["failureClass"] == "insufficient_summary_budget"
+    assert not compactor.calls
 
 
 def test_compaction_uses_prompt_estimate_when_provider_usage_is_missing() -> None:
@@ -3386,7 +3396,8 @@ def test_compaction_uses_prompt_estimate_when_provider_usage_is_missing() -> Non
     assert metadata is not None
     assert metadata["blocked"] is True
     assert blocked is True
-    assert len(compactor.calls) == 1
+    assert metadata["failureClass"] == "insufficient_summary_budget"
+    assert not compactor.calls
 
 
 def _function_map(tree: ast.Module, class_name: str | None = None) -> dict[str, ast.FunctionDef]:

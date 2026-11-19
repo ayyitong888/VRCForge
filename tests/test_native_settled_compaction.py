@@ -36,13 +36,14 @@ def test_single_turn_settled_multicall_compacts_and_keeps_all_user_instructions(
     assert len(compactor.calls) == 1
     projected = compactor.calls[0][0]
     transactions = [entry["text"] for entry in projected if "Historical tool transaction" in entry["text"]]
-    assert len(transactions) == 3 and all(call_id in transactions[0] for call_id in ["read-a", "read-b"])
+    assert len(transactions) == 6 and all(call_id in transactions[0] for call_id in ["read-a", "read-b"])
     assert "PRIVATE_CURRENT_REASONING" not in str(projected)
-    assert [m for m in turn.messages() if m["role"] == "user"] == [m for m in before["messages"] if m["role"] == "user"]
-    assert [m["tool_call_id"] for m in turn.messages() if m["role"] == "tool"] == ["recent-2", "recent-3", "recent-4"]
+    assert [m["content"] for m in turn.messages() if m.get("handoffUser")] == [
+        m["content"] for m in before["messages"] if m["role"] == "user"]
+    assert not any(m["role"] == "tool" for m in turn.messages())
     assert state._native_pending(turn.snapshot()) == set()
-    assert turn.snapshot()["activeTurnStart"] == 1
-    assert model.requests[-1]["messages"][-1]["role"] == "system"
+    assert turn.snapshot()["messages"][turn.snapshot()["activeTurnStart"]]["content"] == "Inspect this avatar; do not write assets."
+    assert model.requests[-1]["messages"][0]["role"] == "system"
 
 
 @pytest.mark.parametrize("status,tool,result", [

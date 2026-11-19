@@ -31,13 +31,14 @@ import {
   buildChatHistory,
   collectCompactionRecovery,
   serializeChatAttachments,
+  visibleAgentDialogueText,
 } from "../lib/conversation-utils";
 import { isRuntimeSessionVerificationError } from "../lib/app-runtime";
 import {
   boundedCompactionAttempts,
   boundedCompactionSummaryCharacters,
 } from "../lib/chat-compaction-state";
-import { contextUsageBoundaryItemId, fingerprintCompactionSource, mergeCompactionRecovery, projectRuntimeCompactionItems } from "../lib/context-compaction";
+import { fingerprintCompactionSource, mergeCompactionRecovery, projectRuntimeCompactionItems } from "../lib/context-compaction";
 import {
   cancelAgentRunFollowup,
   fetchAgentQuestions,
@@ -1435,11 +1436,6 @@ export function useChatRunController({
           .filter((item) => item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact" || item.type === "subagent")
           .map((item) => item.id),
       );
-      const summarizedItemIds = new Set(
-        baseItems
-          .filter((item) => item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact")
-          .map((item) => item.id),
-      );
       const savedFollowupInput = presentingFollowup ? chat?.items.find(
         (item): item is Extract<ConversationItem, { type: "user" }> =>
           item.type === "user" && item.clientTurnId === turn.id,
@@ -1815,25 +1811,25 @@ export function useChatRunController({
             beforeTokens: runtimeCompaction.beforeTokens,
             afterTokens: runtimeCompaction.afterTokens,
             contextLimit: runtimeCompaction.contextLimit,
-            summarizedItemIds: [...summarizedItemIds],
-            contextUsageBoundaryItemId: contextUsageBoundaryItemId(durableItems),
             compactionRecovery: mergeCompactionRecovery(
               collectCompactionRecovery(durableItems),
               responseRecovery,
             ),
             createdAt: new Date().toISOString(),
           };
-          const projection = projectRuntimeCompactionItems(durableItems, summarizedItemIds, compactItem);
-          if (projection.replacedCount > 0 || summarizedItemIds.size === 0) {
+          const projection = projectRuntimeCompactionItems(durableItems, summarizedSourceItemIds, compactItem,
+            (agentResponse) => Boolean(visibleAgentDialogueText(agentResponse)));
+          const marker = projection.items.find((item) => item.type === "compact" && item.id === generation);
+          if (marker?.type === "compact") {
             const attachmentPayloads = { ...(current.attachmentPayloads || {}) };
             const compactedAttachmentRefs = mergeCompactedAttachmentReferences(
               current.compactedAttachmentRefs,
               collectCompactedAttachmentReferences(
-                durableItems.filter((item) => summarizedItemIds.has(item.id)),
+                durableItems.filter((item) => marker.summarizedItemIds?.includes(item.id)),
                 attachmentPayloads,
               ),
             );
-            durableItems = projection.replacedCount > 0 ? projection.items : [compactItem, ...durableItems];
+            durableItems = projection.items;
             midTurnCompactionApplied = true;
             current = {
               ...current,

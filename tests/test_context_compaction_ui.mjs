@@ -333,6 +333,7 @@ test("mid-turn projection marks summarized dialogue and preserves the full durab
   const items = [
     { id: "old-user", type: "user", text: "old request" },
     { id: "old-answer", type: "question_answer", questionId: "q-1", header: "Review", text: "old answer" },
+    { id: "superseded-reply", type: "agent", response: { plan: { reply: "superseded" } } },
     { id: "task", type: "subagent", task: { id: "task", status: "running" } },
     { id: "old-agent", type: "agent", response: { plan: { reply: "old answer" } } },
     { id: "approval", type: "result", approvalId: "approval-1" },
@@ -347,23 +348,26 @@ test("mid-turn projection marks summarized dialogue and preserves the full durab
   };
   const projected = policy.projectRuntimeCompactionItems(
     items,
-    new Set(["old-user", "old-answer", "old-agent"]),
+    new Set(["old-user", "old-answer", "superseded-reply", "task", "old-agent"]),
     compactItem,
+    (response) => Boolean(response.plan.reply),
   );
-  assert.equal(projected.replacedCount, 3);
+  assert.equal(projected.replacedCount, 1);
   assert.deepEqual(projected.items.map((item) => item.id), [
-    "compact-window",
     "old-user",
     "old-answer",
+    "superseded-reply",
     "task",
     "old-agent",
+    "compact-window",
     "approval",
     "current-user",
   ]);
-  assert.equal(projected.items[0].detail, "safe successor summary");
-  assert.deepEqual(projected.items[0].summarizedItemIds, ["old-user", "old-answer", "old-agent"]);
+  assert.equal(projected.items[5].detail, "safe successor summary");
+  assert.deepEqual(projected.items[5].summarizedItemIds, ["superseded-reply"]);
+  assert.equal(projected.items[5].lastPublicItemId, "old-agent");
 
-  const stale = policy.projectRuntimeCompactionItems(items, new Set(["missing"]), compactItem);
+  const stale = policy.projectRuntimeCompactionItems(items, new Set(["missing"]), compactItem, () => false);
   assert.equal(stale.replacedCount, 0);
   assert.deepEqual(stale.items, items);
 });

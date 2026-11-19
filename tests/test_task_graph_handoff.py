@@ -11,7 +11,114 @@ from agent_handoff_graph import (
     ready_task_ids,
     serialize_handoff_graph,
 )
-from context_compaction import _Redactor, _redact_handoff_payload
+from context_compaction import _Redactor, _redact_handoff_payload, compact_context
+
+
+def test_handoff_binds_answer_operation_and_todo_to_their_own_sources():
+    user = {"id": "user-1", "source": "user", "text": "Use the second option.",
+            "references": [{"id": "assistant-1", "text": "Mount now, or import all packages first and mount after?"}]}
+    todo = {"progressId": "import-all", "title": "Import all packages", "status": "running"}
+    operation = {"id": "exec-781", "kind": "execution", "tool": "unity_import_package", "state": "readback_pending"}
+    pointer = {"type": "message", "id": "user-1"}
+
+    def summarize(prompt):
+        assert '"status":"running"' in prompt
+        return {"nodes": {
+            "import": {"kind": "task", "text": todo["title"], "todoId": todo["progressId"],
+                       "status": "done", "evidence": [pointer]},
+            "mount": {"kind": "task", "text": "Mount the outfits", "status": "pending", "evidence": [pointer]},
+        }, "edges": [["mount", "depends_on", "import", {"reason": "Chosen order", "evidence": [pointer]}]]}
+
+    def compact(summarizer, operations, prior=None):
+        return compact_context([{"role": "user", "text": user["text"]}], handoff=True, task_inputs=[user],
+                               todo_items=[todo], outstanding_operations=operations, prior_handoff=prior,
+                               summarizer=summarizer)
+
+    first = compact(summarize, [operation])
+    graph = parse_handoff_graph(first["summary"])
+    assert graph["nodes"]["import"]["todoId"] == todo["progressId"]
+    assert "status" not in graph["nodes"]["import"]
+    answer = next(node for node in graph["nodes"].values() if node["kind"] == "decision")
+    assert user["references"][0]["text"] in answer["text"] and user["text"] in answer["text"]
+    assert answer["evidence"][0] == pointer
+    recovery_id, = handoff_view(graph, [todo])["recoverTaskIds"]
+    assert graph["nodes"][recovery_id]["operationRef"] == operation
+    assert handoff_view(graph, [todo])["readyTaskIds"] == [recovery_id, "import"]
+
+    revised = compact(lambda _: {"nodes": {recovery_id: {"status": "done"}}}, [], first["summary"])
+    assert handoff_view(parse_handoff_graph(revised["summary"]), [todo])["recoverTaskIds"] == [recovery_id]
+    completed = compact(lambda _: {}, [{**operation, "state": "done"}], revised["summary"])
+    done_graph = parse_handoff_graph(completed["summary"])
+    assert handoff_view(done_graph, [{**todo, "status": "completed"}])["readyTaskIds"] == ["mount"]
+
+
+def test_source_order_expansion_and_phase_readiness_survive_round_trip():
+    graph = apply_handoff_edits(None, {
+        "nodes": {
+            "imports": node("task", "Import phase", group=True, todoId="phase-import"),
+            "primary": node("task", "Primary package", todoId="primary"),
+            "secondary": node("task", "Secondary package", status="pending"),
+            "mounts": node("task", "Mount phase", group=True),
+            "mount": node("task", "Mount the primary outfit", status="pending"),
+            "verify": node("task", "Verify in scene", status="pending"),
+            "inspect": node("task", "Inspect appearance choices", status="pending"),
+            "order": node("decision", "Install both packages before mounting the primary outfit.",
+                          order={"before": ["imports"], "after": ["mounts", "verify"], "reason": "Both packages first"}),
+            "choice": node("decision", "Mount only the primary outfit"),
+        },
+        "edges": [
+            ["primary", "belongs_to", "imports"], ["secondary", "belongs_to", "imports"],
+            ["mount", "belongs_to", "mounts"], ["choice", "constrains", "mount"],
+        ],
+    })
+    restored = parse_handoff_graph(serialize_handoff_graph(graph))
+    assert restored == graph
+    assert [edge for edge in restored["edges"] if edge[1] == "depends_on"] == [
+        ["mounts", "depends_on", "imports", {"decisionId": "order"}],
+        ["verify", "depends_on", "imports", {"decisionId": "order"}],
+    ]
+    completed = [{"progressId": "primary", "status": "completed"}, {"progressId": "phase-import", "status": "completed"}]
+    assert handoff_view(restored, completed)["readyTaskIds"] == ["secondary", "inspect"]
+    advanced = apply_handoff_edits(restored, {"nodes": {"secondary": {"status": "done"}}})
+    assert handoff_view(advanced, completed)["readyTaskIds"] == ["mount", "verify", "inspect"]
+
+
+def test_compaction_discards_dependencies_without_an_available_source():
+    user = {"id": "user-1", "source": "user", "text": "Import first. Inspect appearance separately."}
+    result = compact_context(
+        [{"role": "user", "text": user["text"]}], handoff=True, task_inputs=[user],
+        summarizer=lambda _: {"nodes": {
+            "inspect": node("task", "Inspect appearance", status="pending"),
+            "import": node("task", "Import", status="pending"),
+            "mount": node("task", "Mount", status="pending"),
+        }, "edges": [
+            ["import", "depends_on", "inspect"],
+            ["mount", "depends_on", "inspect", {"reason": "Unsupported",
+                                               "evidence": [{"type": "message", "id": "made-up"}]}],
+            ["mount", "depends_on", "import", {"reason": "Import first",
+                                              "evidence": [{"type": "message", "id": "user-1"}]}],
+        ]},
+    )
+    graph = parse_handoff_graph(result["summary"])
+    assert len(graph["edges"]) == 1
+    assert handoff_view(graph)["readyTaskIds"] == ["inspect", "import"]
+
+
+def test_summary_preserves_a_decision_without_proving_a_new_operational_blocker():
+    from context_compaction import _handoff_edit_sources
+
+    old_summary = {"type": "archive", "id": "digest:0"}
+    receipt = {"type": "receipt", "id": "call-checked"}
+    fields = {"reason": "Needs inspection", "evidence": [old_summary]}
+    edits = {"nodes": {"decision": {"kind": "decision", "text": "Import before mounting.",
+                                    "evidence": [old_summary]}},
+             "edges": [["import", "depends_on", "inspect", fields],
+                       ["import", "blocked_by", "uncertain", fields],
+                       ["mount", "depends_on", "import", {**fields, "evidence": [old_summary, receipt["id"]]}]]}
+    verified = _handoff_edit_sources(edits, None, [], {("archive", "digest:0"), ("receipt", "call-checked")},
+                                     set(), summary_refs={"digest:0"})
+    assert verified["nodes"]["decision"]["evidence"] == [old_summary]
+    assert verified["edges"] == [["mount", "depends_on", "import", {**fields, "evidence": [receipt]}]]
 
 
 def node(kind, text, **fields):

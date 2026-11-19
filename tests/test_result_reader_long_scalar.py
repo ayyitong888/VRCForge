@@ -47,7 +47,10 @@ def test_scalar_offset_remains_item_offset_and_limit_is_validated():
         end = read(step, offset=1, limit=1)
         assert end["items"] == [] and end["hasMore"] is False
         assert end["totalItems"] == 1
-        for arguments in ({"offset": 2}, {"offset": -1}, {"offset": True}, {"limit": 0}, {"limit": 21}, {"limit": True}):
+        clamped = read(step, limit=21)
+        assert (clamped["requestedLimit"], clamped["effectiveLimit"], clamped["returnedItems"]) == (21, 20, 1)
+        assert not clamped["hasMore"]
+        for arguments in ({"offset": 2}, {"offset": -1}, {"offset": True}, {"limit": 0}, {"limit": True}):
             with pytest.raises(ValueError):
                 read(step, **arguments)
 

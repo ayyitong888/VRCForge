@@ -335,30 +335,29 @@ export function latestContextWindowUsage(
 
 export function projectRuntimeCompactionItems(
   items: readonly ConversationItem[],
-  summarizedItemIds: ReadonlySet<string>,
+  sourceItemIds: ReadonlySet<string>,
   compactItem: Extract<ConversationItem, { type: "compact" }>,
+  hasPublicReply: (response: Extract<ConversationItem, { type: "agent" }>["response"]) => boolean,
 ): RuntimeCompactionProjection {
-  const projected: ConversationItem[] = [];
-  const marker = { ...compactItem, contextUsageBoundaryItemId: contextUsageBoundaryItemId(items), summarizedItemIds: [...summarizedItemIds].filter((id) =>
-    items.some((item) => item.id === id && (item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact"))) };
-  let inserted = false;
-  let replacedCount = 0;
-  for (const item of items) {
-    const summarizedDialogue = summarizedItemIds.has(item.id)
-      && (item.type === "user" || item.type === "question_answer" || item.type === "agent" || item.type === "compact");
-    if (!summarizedDialogue) {
-      projected.push(item);
-      continue;
-    }
-    replacedCount += 1;
-    if (!inserted) {
-      projected.push(marker);
-      inserted = true;
-    }
-    projected.push(item);
-    continue;
-  }
-  return replacedCount > 0 ? { items: projected, replacedCount } : { items: [...items], replacedCount: 0 };
+  let boundary = items.length;
+  while (boundary > 0 && !sourceItemIds.has(items[boundary - 1].id)) boundary -= 1;
+  if (!boundary && sourceItemIds.size) return { items: [...items], replacedCount: 0 };
+  const source = items.slice(0, boundary);
+  const settledApprovals = new Set(items.flatMap((item) => item.type === "result" ? [item.approvalId] : []));
+  const pending = (response: Extract<ConversationItem, { type: "agent" }>["response"]) => {
+    const approval = response.approvalId || response.approval_id;
+    return Boolean(approval && !settledApprovals.has(approval));
+  };
+  const lastPublic = [...source].reverse().find((item) => sourceItemIds.has(item.id) && item.type === "agent"
+    && !pending(item.response) && hasPublicReply(item.response));
+  const summarizedItemIds = source.flatMap((item) => {
+    if (!sourceItemIds.has(item.id)) return [];
+    if (item.type === "compact") return [item.id];
+    return item.type === "agent" && item !== lastPublic && !pending(item.response) ? [item.id] : [];
+  });
+  const marker = { ...compactItem, blockHandoff: true, summarizedItemIds, lastPublicItemId: lastPublic?.id,
+    contextUsageBoundaryItemId: contextUsageBoundaryItemId(source) };
+  return { items: [...source, marker, ...items.slice(boundary)], replacedCount: summarizedItemIds.length };
 }
 
 const KNOWN_MODEL_CONTEXT_LIMITS: Readonly<Record<string, number>> = Object.freeze({

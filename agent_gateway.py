@@ -104,7 +104,7 @@ from optimization_service import (
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
 from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO_SKILL_WRITE_INPUT_SCHEMA
-from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts, model_handoff_payload
 from agent_runtime_input import classify_history, classify_steer, resolve_turn_source
 from agent_runtime_turn_identity import (
     MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH, continuation_client_turn_id, continuation_identity,
@@ -677,7 +677,8 @@ def _external_tool_argument_rejection(
     # The existing target guard owns reference presence and validity.
     if write and "executionTarget" not in normalized and "executionTarget" in schema.get("required", ()):
         schema = {**schema, "required": [key for key in schema["required"] if key != "executionTarget"]}
-    issues = validate_planner_tool_arguments(schema, normalized)["issues"]
+    validation = validate_planner_tool_arguments(schema, normalized, tool_name=name)
+    issues = validation["issues"]
     if not issues:
         return None
     error = build_external_tool_error(
@@ -701,6 +702,7 @@ def _external_tool_argument_rejection(
         "errorDetails": error,
         "retryable": True,
         **tool_argument_recovery(issues),
+        **({"nextRequest": validation["nextRequest"]} if "nextRequest" in validation else {}),
     }
 
 
@@ -1543,7 +1545,7 @@ class AgentGateway:
 
         self.register_tool(
             RESULT_READER_TOOL,
-            "When to use: page retained structured data by its exact resultRef and jsonPointer, or set matchNameOrPath to find an exact known member in that collection. Honor returned scope and freshness. Owned expired references return needs_rescan with reason and scope. When NOT to use: do not read another session/project, files, opaque capture output, credentials, or rerun a mutation. Negative example: guessing an old resultRef cannot grant access. Legacy Unity references remain current_turn only.",
+            "When to use: page retained data by resultRef and jsonPointer, look up an exact member with matchNameOrPath, or recover a compacted message by messageId or an execution receipt by executionId. Honor scope and freshness. Owned expired references return needs_rescan. When NOT to use: do not read another session/project, files, credentials, or rerun a mutation. Negative example: guessing an ID cannot grant access. Legacy Unity result references remain current_turn only.",
             "read/debug",
             lambda params: read_tool_result(params, sanitize=planner_policy.sanitize_planner_observation_text),
         )
@@ -2291,7 +2293,8 @@ class AgentGateway:
         if audit.get("applied") is not True:
             return {"ok": False, "summary": "", **audit,
                     **({"status": "no_content"} if audit.get("failureClass") == "no_compactable_history" else {})}
-        return {"ok": True, "nativeApplied": True, **audit, "summary": replacement["messages"][0]["content"]}
+        summary = next(row["content"] for row in replacement["messages"] if model_handoff_payload(row) is not None)
+        return {"ok": True, "nativeApplied": True, **audit, "summary": summary}
 
     def bind_runtime_subagent_control(
         self,
@@ -6336,7 +6339,8 @@ class AgentGateway:
             turn_id=turn_id,
             client_turn_id=client_turn_id,
         )
-        history = [entry for entry in ensure_list(params.get("history")) if isinstance(entry, dict)]
+        history = [{k: v for k, v in entry.items() if not k.startswith("_")}
+                   for entry in ensure_list(params.get("history")) if isinstance(entry, dict)]
         history = [
             {**entry, "role": "runtime"} if entry.get("role") == "user" and not classify_history(entry).is_human else entry
             for entry in history
@@ -6666,12 +6670,32 @@ class AgentGateway:
             )
             model_context_steps.append({**report_step, **retained})
             observation.update(retained)
+        def native_question_reference(question_id: str) -> dict[str, str] | None:
+            try:
+                question = self.questions.get_scoped(question_id, session_id=session_id, project_root=project_root)
+            except AgentQuestionServiceError:
+                return None
+            text = question.get("question")
+            return {"id": "question:" + question_id, "text": text} if isinstance(text, str) and text else None
+
+        native_question_answer = None
+        if continuation_source == "question_answered" and (question_id := continuation.get("questionId")):
+            answer_record = ensure_dict(continuation.get("authenticatedQuestionAnswer"))
+            if input_source.is_human:
+                native_question_answer = {"id": str(question_id), "text": str(params.get("message") or "")}
+            elif (answer_record.get("sessionId") == session_id and answer_record.get("projectRoot") == project_root
+                    and answer_record.get("questionId") == question_id and answer_record.get("answer")):
+                native_question_answer = {"id": str(question_id), "text": str(answer_record["answer"])}
         try:
             native_turn = NativeRuntimeTurn(
                 self._runtime_session_state, self.runtime_planner, session_id, turn_id,
                 native_binding, message, loop_state, continuation_context,
                 continuation_completion, continuation_observation,
                 initial_history=history, client_turn_id=client_turn_id,
+                source_text=(user_source["message"] if authenticated_app_input and isinstance(user_source.get("message"), str)
+                             else str(params.get("message") or "")),
+                attachments=attachments,
+                question_reference=native_question_reference, question_answer=native_question_answer,
                 input_source=input_source,
                 project_context_active=project_context_active,
                 late_approval_id=str(continuation.get("approvalId") or "") if approval_continuation else "",
@@ -7032,6 +7056,15 @@ class AgentGateway:
 
         native_turn.retain_recovery = retain_compaction_recovery
         native_turn.retain_recovery_catalog = retain_compaction_recovery_catalog
+
+        def read_handoff_record(key: str, identity: str) -> dict[str, Any] | None:
+            if not native_binding:
+                from agent_native_handoff_blocks import legacy_handoff_archive
+                return legacy_handoff_archive(history, identity) if key == "messageId" else None
+            if key == "messageId":
+                return self.runtime_sessions.native_handoff_archive(session_id, binding=native_binding, message_id=identity)
+            from agent_handoff_operations import lookup_native_handoff_receipt
+            return lookup_native_handoff_receipt(native_turn.snapshot(), identity)
         incoming_recovery = params.get("compactionRecovery", [])
         if not isinstance(incoming_recovery, list):
             raise AgentGatewayError("compactionRecovery must be a list", status_code=400)
@@ -7451,6 +7484,8 @@ class AgentGateway:
                 600,
             )
             recovery = tool_argument_recovery(issues)
+            if action_kind != "write" and isinstance(validation.get("nextRequest"), dict):
+                recovery["nextRequest"] = redact_sensitive(validation["nextRequest"])
             outcome = normalize_agent_tool_result(
                 {
                     "ok": False,
@@ -7662,7 +7697,13 @@ class AgentGateway:
                     history, compaction_result, compaction_blocked = self.runtime_planner.maybe_compact_runtime_history(
                         message=message,
                         params=params,
-                        observe={**observe, "runtimeInputSource": input_source},
+                        observe={**observe, "runtimeInputSource": input_source,
+                                 "_handoffLastPublicReply": next(
+                                     (text for event in reversed(timeline) if event.get("kind") == "assistant"
+                                      and isinstance(text := ensure_dict(event.get("payload")).get("summary"), str)), None,
+                                 ),
+                                 "activeTodo": self.list_agent_progress(limit=AGENT_GOAL_MAX_ITEMS,
+                                     session_id=session_id, project_root=project_root)["items"]},
                         history=history,
                         loop_state=loop_state[runtime_compacted_loop_steps:],
                         context_usage=context_usage,
@@ -8783,7 +8824,9 @@ class AgentGateway:
                     with self._bind_runtime_skill_scope(
                         task_loop, subagent_read_roots=scoped_general_roots if step_tool in SUB_AGENT_TASK_TOOLS else (),
                     ), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
-                        bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps], snapshot_lookup=self._scan_results.lookup if project_root else None) if step_tool == RESULT_READER_TOOL else nullcontext()
+                        bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps],
+                                                 snapshot_lookup=self._scan_results.lookup if project_root else None,
+                                                 handoff_lookup=read_handoff_record) if step_tool == RESULT_READER_TOOL else nullcontext()
                     ), (bind_attachment_inspection_chat(attachment_owners) if step_tool == "vrcforge_inspect_chat_attachment" else nullcontext()):
                         step_payload = self._runtime_skill_executor.execute(
                             step_tool,

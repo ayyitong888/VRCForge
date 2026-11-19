@@ -18,6 +18,9 @@ def _with_source(prompt, payload):
     source = json.loads(prompt.split("\nREDACTED_ENTRIES=", 1)[1])[0]["sourceRef"]
     for node in payload["nodes"].values():
         node.setdefault("evidence", [source])
+    payload["edges"] = [edge + [{"reason": "Prerequisite recorded in this fixture", "evidence": [source]}]
+                        if len(edge) == 3 and edge[1] in {"depends_on", "blocked_by"} else edge
+                        for edge in payload.get("edges", ())]
     return payload
 
 
@@ -66,7 +69,7 @@ def _request(planner, snapshot, observe=None):
         global_instructions="ORIGINAL_AGENT_RULES", project_instructions="EXACT_PROJECT_AGENTS")[0]
 
 
-def test_manual_native_handoff_keeps_exact_tail_and_same_pending_approval_after_restart():
+def test_manual_native_handoff_orders_user_graph_and_exact_pending_approval_after_restart():
     compactor = ModelHandoff()
     state, planner, model, turn = fixture(compactor, prior=False, current="ORIGINAL_USER_TASK", limit=32_000)
     for index in range(8):
@@ -77,18 +80,19 @@ def test_manual_native_handoff_keeps_exact_tail_and_same_pending_approval_after_
             state.settle_native_call("s", binding="b", call_id="old-progress-only", content='{"content":"OLD_PROGRESS_ONLY_LIST"}')
     approval_call_id = _pair(state, 8, wait=True)
     before = turn.snapshot()
-    oldest_tail = next(i for i, item in enumerate(before["messages"]) if any(call["id"] == "group-5-a" for call in item.get("tool_calls", [])))
+    pending_start = next(i for i, item in enumerate(before["messages"]) if any(call["id"] == approval_call_id for call in item.get("tool_calls", [])))
     with planner.bind_turn({}):
         request = _request(planner, before, {"activeTodo": [{"id": "task1", "content": "TODO_EXACT_CONTENT", "status": "in_progress"}]})
         candidate, _ = planner.maybe_compact_native_context(request, turn, force=True, preserve_pending=True, has_todo=True)
     assert turn.compaction["applied"] is True
     assert not model.requests
     after = turn.snapshot()
-    assert after["messages"][0]["content"].startswith(MODEL_HANDOFF_PREFIX)
-    graph = parse_handoff_graph(after["messages"][0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
+    graph_index = next(i for i, row in enumerate(after["messages"]) if str(row.get("content")).startswith(MODEL_HANDOFF_PREFIX))
+    assert 0 < after["activeTurnStart"] < graph_index
+    graph = parse_handoff_graph(after["messages"][graph_index]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
     assert graph["nodes"]["readback"]["status"] == "open"
-    assert after["messages"][after["activeTurnStart"]] == before["messages"][before["activeTurnStart"]]
-    assert [item for item in after["messages"] if item.get("role") in {"tool", "assistant"}][1:] == before["messages"][oldest_tail:]
+    assert after["messages"][after["activeTurnStart"]]["content"] == before["messages"][before["activeTurnStart"]]["content"]
+    assert after["messages"][graph_index + 1:] == before["messages"][pending_start:]
     assert "TODO_EXACT_CONTENT" in json.dumps(after["messages"])
     assert "EXACT_PROJECT_AGENTS" in candidate["instructions"]
     rewritten_prompt, = compactor.prompts
@@ -99,11 +103,11 @@ def test_manual_native_handoff_keeps_exact_tail_and_same_pending_approval_after_
     assert "group-0-a" in rewritten_prompt and "group-0-b" in rewritten_prompt
     assert any("OLD_TODO_CONTENT" in entry["text"] for entry in after["compactionRecovery"][-1]["sourceEntries"])
     records = json.loads(rewritten_prompt.split("REDACTED_ENTRIES=", 1)[1])
-    assert "group-5-a" not in json.dumps(records) and approval_call_id not in json.dumps(records)
+    assert "group-5-a" in json.dumps(records) and approval_call_id not in json.dumps(records)
     next_record = next(record for record in records if "group-1-a" in json.dumps(record.get("transaction")))
     archive = after["compactionRecovery"][-1]
-    assert next_record["recordIndex"] == 2 and archive["sourceDigest"] in rewritten_prompt
-    assert "OLD_PROGRESS_ONLY_LIST" in archive["sourceEntries"][1]["text"]
+    assert archive["sourceDigest"] in rewritten_prompt
+    assert any("OLD_PROGRESS_ONLY_LIST" in row["text"] for row in archive["sourceEntries"])
     assert "group-1-a" in archive["sourceEntries"][next_record["recordIndex"]]["text"]
     assert after["activeDispatchCallId"] == approval_call_id
     assert state._native_pending(after) == {approval_call_id}
@@ -113,7 +117,7 @@ def test_manual_native_handoff_keeps_exact_tail_and_same_pending_approval_after_
     assert not state._native_pending(turn.snapshot())
 
 
-def test_long_active_turn_preserves_previous_completed_dialogue_and_parallel_receipts():
+def test_long_active_turn_retains_all_user_texts_and_last_public_reply():
     compactor = ModelHandoff()
     state, planner, _, turn = fixture(compactor, prior=False, current="ORIGINAL_USER_TASK", limit=32_000)
     _pair(state, 90)
@@ -125,15 +129,14 @@ def test_long_active_turn_preserves_previous_completed_dialogue_and_parallel_rec
     for index in range(8):
         _pair(state, index)
     before = turn.snapshot()
-    prior_start = next(i for i, item in enumerate(before["messages"]) if item.get("content") == "PREVIOUS_EXACT_INPUT_1")
-    intact_previous = before["messages"][prior_start:before["activeTurnStart"]]
     with planner.bind_turn({}):
         planner.maybe_compact_native_context(_request(planner, before), turn, force=True)
     assert turn.compaction["applied"] is True
     after = turn.snapshot()
-    assert after["messages"][after["activeTurnStart"] - len(intact_previous):after["activeTurnStart"]] == intact_previous
-    assert "PREVIOUS_EXACT_INPUT_1" not in compactor.prompts[0].split("REDACTED_ENTRIES=", 1)[1]
-    assert "group-91-a" not in compactor.prompts[0].split("REDACTED_ENTRIES=", 1)[1]
+    assert [row["content"] for row in after["messages"] if row.get("handoffUser")] == [
+        "ORIGINAL_USER_TASK", "PREVIOUS_EXACT_INPUT_1", "PREVIOUS_EXACT_INPUT_2", "CURRENT_LONG_TURN"]
+    assert [row["content"] for row in after["messages"] if str(row.get("content")).startswith("PREVIOUS_EXACT_REPLY")] == ["PREVIOUS_EXACT_REPLY_2"]
+    assert "group-91-a" in compactor.prompts[0].split("REDACTED_ENTRIES=", 1)[1]
     assert "group-90-a" in compactor.prompts[0] and "group-4-a" in compactor.prompts[0]
 
 
@@ -174,12 +177,13 @@ def test_long_handoff_merges_ordered_pages_and_keeps_earliest_decision_after_pro
         seen_groups.extend(i for i in range(12) if f"BEGIN_COMPLETE_GROUP_{i} " in text)
         return {} if prior else _with_source(prompt, {"nodes": {
             "goal": _node("goal", "Follow the agreed order."),
-            "order": _node("decision", "inspect, apply, validate", scope="graph"),
+            "order": _node("decision", "inspect, apply, validate", scope="graph",
+                           order={"before": ["inspect"], "after": ["apply", "validate"],
+                                  "reason": "The original batch calls for inspection first."}),
             "inspect": _node("task", "Inspect", "pending"),
             "apply": _node("task", "Apply", "pending"),
             "validate": _node("task", "Validate", "pending"),
-        }, "edges": [["apply", "depends_on", "inspect"], ["validate", "depends_on", "apply"],
-                     ["order", "constrains", "inspect"], ["order", "constrains", "apply"], ["order", "constrains", "validate"]]})
+        }, "edges": [["validate", "depends_on", "apply"]]})
 
     result = compact_context(source, handoff=True, real_context_limit=9_000, target_tokens=1200, summarizer=summarize)
     assert result["ok"] is True
@@ -242,6 +246,9 @@ def test_retained_success_is_evidence_for_handoff_reconciliation_without_quoting
 
 
 def test_repeated_compaction_resolves_linked_work_and_keeps_failure_history():
+    order_source = {"type": "message", "id": "recorded-order"}
+    recovery_source = {"type": "receipt", "id": "older-call"}
+    shader_source = {"type": "receipt", "id": "shader-read"}
     prior = {"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
                  "goal": _node("goal", "Finish imports and validate the avatar."),
                  "package-a": _node("task", "Import package A", "pending"),
@@ -251,11 +258,13 @@ def test_repeated_compaction_resolves_linked_work_and_keeps_failure_history():
                  "shader": _node("issue", "Shader cannot be accessed", "open", facts="Readback did not return a shader"),
                  "retry": _node("attempt", "Original import attempt", "failure", reason="Unity reloaded",
                                 evidence=[{"type": "receipt", "id": "older-call"}]),
-                 "order": _node("decision", "Import A before B", scope="graph"),
+                 "order": _node("decision", "Import A before B", scope="graph", evidence=[order_source],
+                                order={"before": ["package-a"], "after": ["package-b"], "reason": "Original import order."}),
              },
-             "edges": [["package-b", "depends_on", "package-a"], ["package-a", "blocked_by", "recovery"],
-                       ["check", "blocked_by", "shader"], ["retry", "attempt_of", "package-a"],
-                       ["order", "constrains", "package-a"], ["order", "constrains", "package-b"]]}
+             "edges": [["package-b", "depends_on", "package-a", {"decisionId": "order"}],
+                       ["package-a", "blocked_by", "recovery", {"reason": "Recovery paused writes", "evidence": [recovery_source]}],
+                       ["check", "blocked_by", "shader", {"reason": "Shader lookup failed", "evidence": [shader_source]}],
+                       ["retry", "attempt_of", "package-a"]]}
     rows = [{"role": "tool", "text": "receipt-2: Package A import confirmed."}]
 
     def summarize(prompt):
@@ -272,7 +281,7 @@ def test_repeated_compaction_resolves_linked_work_and_keeps_failure_history():
     assert graph["nodes"]["package-a"]["status"] == "done"
     assert not {"retry", "recovery"} & graph["nodes"].keys()
     assert {"type": "receipt", "id": "older-call"} in graph["nodes"]["package-a"]["evidence"]
-    assert graph["edges"] == [edge for edge in prior["edges"] if not {"retry", "recovery"} & set(edge)]
+    assert graph["edges"] == [edge for edge in prior["edges"] if not {"retry", "recovery"} & set(edge[:3])]
     assert result["recovery"]["sourceEntries"] == rows
 
     from agent_runtime_session_state import native_model_history
@@ -291,12 +300,27 @@ def test_older_phase_graph_is_supplied_as_linked_prerequisites():
                  {"id": "verify", "action": "Verify document", "phase": 2, "dependsOn": []},
              ]}
     prompts = []
-    result = compact_context([{"role": "tool", "text": "A partial document required a new read."}], handoff=True,
-        prior_handoff=json.dumps(prior), summarizer=lambda prompt: prompts.append(prompt) or {})
+    source = [{"role": "assistant", "text": MODEL_HANDOFF_PREFIX + json.dumps(prior)},
+              {"role": "tool", "text": "A partial document required a new read before verification."}]
+
+    def summarize(prompt):
+        prompts.append(prompt)
+        old = _prior_graph(prompt)
+        assert ["read", "depends_on", "find"] in old["edges"]
+        assert ["verify", "depends_on", "read"] in old["edges"]
+        pointer = json.loads(prompt.split("\nPRIOR_HANDOFF_SOURCE=", 1)[1].split("\n", 1)[0])
+        return {"nodes": {
+            "read-first": _node("decision", "Locate the document before reading it", evidence=[pointer],
+                                order={"before": ["find"], "after": ["read"], "reason": "Recorded read prerequisite"}),
+            "verify-last": _node("decision", "Verify after reading", evidence=[pointer],
+                                 order={"before": ["read"], "after": ["verify"], "reason": "Recorded verification phase"}),
+        }}
+
+    result = compact_context(source[1:], handoff=True, recovery_history=source, handoff_archive_indices=[1],
+                             prior_handoff=json.dumps(prior), summarizer=summarize)
     graph = parse_handoff_graph(result["summary"])
-    assert _prior_graph(prompts[0]) == graph
-    assert ["read", "depends_on", "find"] in graph["edges"]
-    assert ["verify", "depends_on", "read"] in graph["edges"]
+    assert ["read", "depends_on", "find", {"decisionId": "read-first"}] in graph["edges"]
+    assert ["verify", "depends_on", "read", {"decisionId": "verify-last"}] in graph["edges"]
     assert graph["nodes"]["early-read"] == _node("attempt", "Read document", "failure", reason="Network stalled")
 
 
@@ -335,12 +359,12 @@ def test_retries_one_wrong_handoff_envelope_with_same_graph_and_same_records():
     assert "invented" not in graph["nodes"] and graph["edges"] == []
 
 
-def test_verbatim_tail_is_never_cut_to_force_fit():
+def test_verbatim_assistant_reply_is_never_cut_to_force_fit():
     compactor = ModelHandoff()
     state, planner, _, turn = fixture(compactor, prior=False, current="ORIGINAL_USER_TASK", limit=8_000)
     for index in range(8):
         _pair(state, index)
-    state.append_native_user("s", binding="b", message="EXACT_LARGE_CORRECTION " * 5000)
+    state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "EXACT_LARGE_REPLY " * 5000})
     before = turn.snapshot()
     with planner.bind_turn({}):
         _, guard = planner.maybe_compact_native_context(_request(planner, before), turn, force=True)

@@ -24,6 +24,9 @@ const windowEnd = compactionSource.indexOf("export function projectRuntimeCompac
 const windowImplementation = windowStart >= 0 && windowEnd >= 0
   ? compactionSource.slice(windowStart, windowEnd).replace("export function", "function")
   : "function latestContextWindowUsage() { return undefined; }";
+const projectionImplementation = compactionSource
+  .slice(windowEnd, compactionSource.indexOf("const KNOWN_MODEL_CONTEXT_LIMITS", windowEnd))
+  .replace("export function", "function");
 const usageConversationSource = await readFile(path.join(root, "src/lib/conversation-utils.ts"), "utf8");
 const usageStart = usageConversationSource.indexOf("export function latestAgentContextUsage");
 const usageEnd = usageConversationSource.indexOf("export function buildChatHistory", usageStart);
@@ -47,6 +50,8 @@ const fingerprintCompactionSource = (entries) => entries.map((entry) => entry.te
 ${invalidationImplementation}
 ${boundaryImplementation}
 ${windowImplementation}
+${projectionImplementation}
+const visibleAgentDialogueText = (response) => typeof response === "string" ? response : response?.plan?.reply || "";
 const mergeCompactionRecovery = (...values) => values.flatMap((value) => Array.isArray(value) ? value : []);
 const buildChatHistory = (items) => {
   const summarized = new Set(items.flatMap((item) => item.type === "compact" ? (item.summarizedItemIds || []) : []));
@@ -93,7 +98,8 @@ const historyHarness = `${conversationSource.slice(historyStart, historyEnd)}
 const appendAttachmentSummary = (text) => text;
 const userMessageTextForHistory = (item) => item.text;
 const agentRelaySource = (item) => item.forwardedFrom?.sourceChatId ?? (item.forwardedByAgent ? "" : undefined);
-const visibleAgentDialogueText = (response) => String(response?.plan?.reply || response?.plan?.summary || "");
+const visibleAgentDialogueText = (response) => typeof response === "string" ? response : String(response?.plan?.reply || response?.plan?.summary || "");
+const serializeChatAttachments = (attachments) => attachments;
 const subAgentAdoptedHistoryText = () => "";
 export { buildChatHistory };
 `;
@@ -169,7 +175,7 @@ function request() {
   return { chatId: "chat-1", endpoint: "http://test", trigger: "manual", phase: "standalone", provider: "test", model: "test" };
 }
 
-test("manual native compaction keeps a pending approval on its original session and sends only complete older turns", async () => {
+test("manual native compaction keeps the pending approval on its original session and sends all user statements", async () => {
   const chat = makeChat(true);
   chat.projectPath = "D:/Fixture";
   chat.items.push(
@@ -181,7 +187,7 @@ test("manual native compaction keeps a pending approval on its original session 
     { id: "user-pending", type: "user", text: "Latest write requires approval" },
     { id: "agent-pending", type: "agent", response: { approvalId: "pending-ref", plan: { reply: "Await approval" } } },
   );
-  const exactTail = structuredClone(chat.items.slice(-6));
+  const transcript = structuredClone(chat.items);
   const harness = makeHarness(chat, async () => undefined);
   harness.compactAgentHistoryState.promise = async (_endpoint, payload) => {
     assert.equal(payload.sessionId, "session-old");
@@ -189,14 +195,17 @@ test("manual native compaction keeps a pending approval on its original session 
     assert.equal(payload.projectRoot, "D:/Fixture");
     const sent = JSON.stringify(payload.history);
     assert.match(sent, /Historical completed response/);
-    assert.doesNotMatch(sent, /First recent|Second recent|pending-ref|A long user request/);
+    assert.match(sent, /First recent complete turn/);
+    assert.match(sent, /Second recent complete turn/);
+    assert.match(sent, /A long user request/);
+    assert.doesNotMatch(sent, /Second recent complete answer|pending-ref/);
     return { nativeApplied: true, summary: "handoff", summaryDigest: "digest" };
   };
   const outcome = await harness.render((_chatId, _sessionId, allowPendingApproval) => !allowPendingApproval).compactChat(request());
   assert.equal(outcome.status, "applied");
   assert.equal(chat.sessionId, "session-old");
-  assert.deepEqual(chat.items.slice(-6), exactTail);
-  assert.deepEqual(chat.items.find(item => item.type === "compact").summarizedItemIds, ["agent-1", "user-2", "agent-2"]);
+  assert.deepEqual(chat.items.filter(item => item.type !== "compact"), transcript);
+  assert.deepEqual(chat.items.find(item => item.type === "compact").summarizedItemIds, ["agent-1", "agent-2", "agent-3"]);
 });
 
 test("manual compaction checks the server when the owning session has no local history", async () => {
@@ -280,13 +289,14 @@ test("successful replacement clears session and persistence failure restores it"
   assert.equal(outcome.status, "applied");
   assert.equal(chat.sessionId, "");
   assert.deepEqual(chat.items.filter(item => item.type !== "compact").map(item => item.id), rawIds);
-  assert.deepEqual(chat.items.find(item => item.type === "compact").summarizedItemIds, ["agent-1"]);
+  assert.deepEqual(chat.items.find(item => item.type === "compact").summarizedItemIds, ["agent-1", "agent-recent-1"]);
   assert.equal(chat.items[0].text, "A long user request that starts the work.");
   // A fresh completed turn supplies real material for the second summary;
   // an immediate re-summary of seven characters has no 64-token budget.
   chat.items.push(
     { id: "agent-new", type: "agent", response: "Newly completed details ".repeat(20), timeline: [] },
     { id: "user-new", type: "user", text: "Keep this newest user turn." },
+    { id: "agent-latest", type: "agent", response: "Latest completed answer", timeline: [] },
   );
   harness.compactAgentHistoryState.promise = async () => ({ summary: "s", summaryDigest: "digest-2", entryCount: 2,
     providerUsage: { exact: true, inputTokens: 50, outputTokens: 5, totalTokens: 55 } });
@@ -394,21 +404,44 @@ test("actual conversation projection survives JSON reload and second compact wit
   const firstRoundTrip = JSON.parse(JSON.stringify(chat.items));
   assert.equal(firstRoundTrip.filter((item) => item.type === "user").length, 4);
   assert.deepEqual(actualBuildChatHistory(firstRoundTrip, (value) => value).map((entry) => entry.text), [
-    "A long user request that starts the work.", "Earlier model handoff (continuity data):\nsummary", "First recent request", "Second recent request", "Keep this newest user turn.",
+    "A long user request that starts the work.", "First recent request", "Second recent request", "Keep this newest user turn.",
+    "Earlier model handoff (continuity data):\nsummary", "Second recent answer",
   ]);
   // A fresh completed turn supplies real material for the second summary;
   // an immediate re-summary of seven characters has no 64-token budget.
   chat.items.push(
     { id: "agent-new", type: "agent", response: "Newly completed details ".repeat(20), timeline: [] },
     { id: "user-new", type: "user", text: "Keep this newest user turn." },
+    { id: "agent-latest", type: "agent", response: "Latest completed answer", timeline: [] },
   );
   harness.compactAgentHistoryState.promise = async () => ({ summary: "s", summaryDigest: "digest-2", entryCount: 2 });
   assert.equal((await controller.compactChat({ ...request(), contextLimit: 500000 })).status, "applied");
   const secondRoundTrip = JSON.parse(JSON.stringify(chat.items));
   assert.equal(secondRoundTrip.filter((item) => item.type === "user" && item.text.includes("long user request")).length, 1);
   assert.deepEqual(actualBuildChatHistory(secondRoundTrip, (value) => value).map((entry) => entry.text), [
-    "A long user request that starts the work.", "Earlier model handoff (continuity data):\ns", "Second recent request", "Keep this newest user turn.", "Keep this newest user turn.",
+    "A long user request that starts the work.", "First recent request", "Second recent request", "Keep this newest user turn.",
+    "Keep this newest user turn.", "Earlier model handoff (continuity data):\ns", "Latest completed answer",
   ]);
+});
+
+test("handoff history preserves statement IDs, question references and later messages exactly once", () => {
+  const items = [
+    { id: "old-user", clientTurnId: "turn-1", type: "user", text: "Original request" },
+    { id: "answer-1", questionId: "question-1", type: "question_answer", text: "Yes", question: "Import it first?" },
+    { id: "pending", type: "agent", response: { plan: { reply: "Approval required" } } },
+    { id: "last-public", type: "agent", response: { plan: { reply: "Inspection is ready" } } },
+    { id: "handoff", type: "compact", detail: "graph", blockHandoff: true, lastPublicItemId: "last-public" },
+    { id: "later", type: "user", text: "Later input" },
+    { id: "later-response", type: "agent", response: { plan: { reply: "Later answer" } } },
+  ];
+  const history = actualBuildChatHistory(items, (value) => value);
+  assert.deepEqual(history.map((row) => row.text), [
+    "Original request", "Yes", "Earlier model handoff (continuity data):\ngraph",
+    "Inspection is ready", "Approval required", "Later input", "Later answer",
+  ]);
+  assert.equal(history[0].messageId, "turn-1");
+  assert.equal(history[1].messageId, "question-answer:question-1");
+  assert.deepEqual(history[1].references, [{ id: "question-1", text: "Import it first?" }]);
 });
 
 test("late abort after compactor response prevents the commit", async () => {

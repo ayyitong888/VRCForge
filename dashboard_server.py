@@ -139,6 +139,7 @@ except Exception:  # pragma: no cover - source installs may not include psutil.
 from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
+    RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS,
     RUNTIME_BLOCKED_SKILLS,
     canonical_unity_read_tool_input_schema,
     canonical_unity_write_tool_input_schema,
@@ -3304,6 +3305,10 @@ async def _execute_app_agent_runtime_message(
     runtime_params["_attachmentInspectionOwners"] = tuple(
         value for value in ((runtime_request.chat_id or "").strip(), (runtime_request.session_id or "").strip()) if value
     )
+    if human_user_message and runtime_request.attachments and runtime_params["_attachmentInspectionOwners"]:
+        runtime_params["attachments"] = await asyncio.to_thread(
+            _vault_inline_runtime_images, runtime_request.attachments, runtime_params["_attachmentInspectionOwners"][0],
+        )
     browser_requested = False
     browser_adult_confirmed = False
     agent_relay = str(runtime_request.client_turn_id or "").startswith(AGENT_RELAY_INPUT_PREFIX)
@@ -3638,16 +3643,42 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
                     record_compact_provider_receipt(provider_receipts, getattr(response, "usage", None))
                     return str(getattr(response, "text", "") or "")
                 summarizer = summarize
-            has_todo = bool(request.session_id and AGENT_GATEWAY.list_agent_progress(
-                limit=1, project_root=request.project_root, session_id=request.session_id,
-            )["items"])
+            todo_items = AGENT_GATEWAY.list_agent_progress(
+                project_root=request.project_root, session_id=request.session_id,
+            )["items"] if request.session_id else []
+            from agent_native_handoff_blocks import project_legacy_handoff_blocks
+            from agent_runtime_session_state import model_handoff_payload
+
+            task_history = []
+            for row in request.history:
+                if "references" not in row:
+                    task_history.append(row)
+                    continue
+                row = {key: value for key, value in row.items() if key != "references"}
+                message_id = str(row.get("messageId") or "")
+                if row.get("role") == "user" and message_id.startswith("question-answer:"):
+                    question_id = message_id.removeprefix("question-answer:")
+                    try:
+                        question = AGENT_GATEWAY.questions.get_scoped(
+                            question_id, session_id=request.session_id, project_root=request.project_root,
+                        )
+                    except AgentQuestionServiceError:
+                        question = {}
+                    if isinstance(question.get("question"), str):
+                        row["references"] = [{"id": question_id, "text": question["question"]}]
+                task_history.append(row)
+            task_inputs = project_legacy_handoff_blocks(
+                task_history, is_handoff=lambda row: model_handoff_payload(row) is not None,
+                character_budget=request.real_context_limit or 64_000, measure=estimate_compaction_prompt_tokens,
+            )["taskInputs"]
             result = compact_context(
                 history, summarizer=summarizer, source_digest=request.source_digest,
                 trigger=request.trigger, phase=request.phase, language=request.language,
                 provider=settings.llm_provider, model=settings.llm_model, target_tokens=request.target_tokens,
-                real_context_limit=request.real_context_limit, handoff=True, has_todo=has_todo,
+                real_context_limit=request.real_context_limit, handoff=True, has_todo=bool(todo_items), todo_items=todo_items,
                 prior_handoff=prior_handoff, recovery_history=request.history if prior_handoff is not None else None,
                 handoff_archive_indices=archive_indices if prior_handoff is not None else None,
+                task_inputs=task_inputs,
             )
         result["providerUsage"] = aggregate_compact_provider_usage(
             provider_receipts, provider=settings.llm_provider, model=settings.llm_model
@@ -6718,6 +6749,37 @@ def chat_attachment_vault_store() -> ChatAttachmentVault:
                 _CHAT_ATTACHMENT_VAULT = ChatAttachmentVault(root)
                 _cleanup_stale_chat_attachment_upload_files(root, time.time())
     return _CHAT_ATTACHMENT_VAULT
+
+
+def _vault_inline_runtime_images(attachments: list[dict[str, Any]], owner: str) -> list[dict[str, Any]]:
+    """Give direct App image uploads the same retained source as composer uploads."""
+    result = []
+    for raw in attachments:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        result.append(row)
+        data_url = row.get("dataUrl") or row.get("data_url")
+        if row.get("vaultPayloadHash") or row.get("vault_payload_hash") or not isinstance(data_url, str):
+            continue
+        header, _delimiter, payload = data_url.partition(",")
+        if (not header.startswith("data:image/") or not header.endswith(";base64")
+                or len(data_url) > RUNTIME_ATTACHMENT_DATA_URL_MAX_CHARS):
+            continue
+        media_type = header[5:-7]
+        name = str(row.get("name") or "")
+        if not Path(name).suffix:
+            name = (name or "attached-image") + (mimetypes.guess_extension(media_type) or "")
+        try:
+            stored = chat_attachment_vault_store().ingest(
+                data=base64.b64decode(payload, validate=True), name=name, declared_type=media_type, chat_id=owner,
+            )
+        except (ChatAttachmentVaultError, ValueError, OSError):
+            # Keep direct image handling available even if its exact payload
+            # cannot be retained by the existing vault.
+            continue
+        row.update(vaultPayloadHash=stored["payloadHash"], vaultKind=stored["kind"])
+    return result
 
 
 def _cleanup_stale_chat_attachment_upload_files(root: Path, now: float) -> None:
@@ -17499,6 +17561,8 @@ class _RuntimePlannerCompactor:
             handoff_archive_indices=metadata.get("_handoffArchiveIndices"),
             retained_evidence=metadata.get("_retainedEvidence") or (),
             task_inputs=metadata.get("_handoffTaskInputs") or (),
+            todo_items=metadata.get("_handoffTodo") or (),
+            outstanding_operations=metadata.get("_outstandingOperations"),
         )
         if deadline_exceeded:
             result["fallbackReason"] = "compaction_deadline"

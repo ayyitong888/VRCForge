@@ -64,8 +64,11 @@ def test_legacy_compacts_current_turn_observations_without_changing_execution_st
             history=[], loop_state=loop_state, context_usage={})
     assert metadata["applied"] is True
     assert blocked is False
-    assert changed == [{"role": "agent", "text": MODEL_HANDOFF_PREFIX + "verified current-turn summary"}]
-    assert 0 < metadata["compactedLoopStepCount"] < 30
+    assert [item["role"] for item in changed] == ["user", "agent", "runtime"]
+    assert changed[0]["text"] == "continue"
+    assert changed[1]["text"] == MODEL_HANDOFF_PREFIX + "verified current-turn summary"
+    assert json.loads(changed[2]["text"]) == [loop_state[-1]]
+    assert metadata["compactedLoopStepCount"] == 30
     assert observe == {}
     assert loop_state[-1]["result"]["questionId"] == "q-1"
 
@@ -156,7 +159,10 @@ def test_legacy_compacts_returned_failed_results_but_preserves_unresolved_suffix
 
     assert metadata["applied"] is True
     assert blocked is False
-    assert changed == [{"role": "agent", "text": MODEL_HANDOFF_PREFIX + compactor.summary}, *history]
+    assert [item["text"] for item in changed[:3]] == [
+        history[0]["text"], "Continue after the read.", MODEL_HANDOFF_PREFIX + compactor.summary,
+    ]
+    assert json.loads(changed[3]["text"]) == before[-2:]
     assert loop_state == before
     passed = "\n".join(entry["text"] for entry in compactor.calls[0][0])
     assert "returned-failure" in passed

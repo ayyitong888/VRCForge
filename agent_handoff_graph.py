@@ -31,14 +31,19 @@ _NODE_CONTROLS = {"kind", "text", "status", "scope", "reason", "facts", "evidenc
 HANDOFF_EDIT_CONTRACT = (
     'Return one compact JSON delta with optional "nodes", "edges", and "removeEdges". '
     '"nodes" maps stable ASCII slug IDs to changed node fields. New nodes need kind and text. '
-    'A goal copies the user’s actual wording verbatim. Task status: pending, in_progress, done, or abandoned. '
+    'A goal copies the user’s actual wording verbatim. An existing TODO-backed task uses todoId from TODO_SOURCE '
+    'and has no status field. A task without a matching TODO has status pending, in_progress, done, or abandoned. '
     'Attempt status: success or failure, with reason explaining the method and outcome. '
     'Issue status: open or closed, with facts explaining the obstacle. Decisions with scope "graph" apply to the full graph. '
+    'To represent a phase, create a task with group=true and use belongs_to for its member tasks. Its completion comes from its members. '
+    'For an agreed order, update the source-linked decision with order={before:[task or group IDs],after:[task or group IDs],reason:"reason the named phases must be ordered"}. '
     'Every new node needs a nonempty evidence array, for example "evidence":[{"type":"receipt","id":"opaque source ID"}]. '
     'Use exact available message, receipt, or scan IDs. Preserve earlier evidence and failed attempts. '
     'Use distinct task IDs for distinct targets and acceptance criteria. A confirmed success finishes only its own task. '
     'Edges are [from,relation,to]. Use task belongs_to goal or parent task; task depends_on prerequisite task; '
     'attempt attempt_of task; task blocked_by issue; decision constrains task. '
+    'A direct depends_on or blocked_by edge has a fourth object {reason:"concrete prerequisite",evidence:[exact source pointers]}. '
+    'Use constrains for decisions on how to act that do not affect the runnable frontier. '
     'Use [failed-attempt,"replaced_by",new-attempt,"why the approach changed"] for a replacement. '
     'Example: {"nodes":{"verify":{"kind":"goal","text":"Verify the export","evidence":[{"type":"message","id":"message-example"}]},'
     '"check-file":{"kind":"task","text":"Verify the exported file","status":"pending",'
@@ -94,22 +99,39 @@ def _valid_node(node: dict[str, Any]) -> bool:
     if not isinstance(kind, str) or kind not in _STATUSES or not _is_text(node.get("text")):
         return False
     statuses = _STATUSES[kind]
-    if (statuses and node.get("status") not in statuses) or (not statuses and "status" in node):
+    if node.get("group") is True:
+        if kind != "task" or "status" in node or ("todoId" in node and not _is_text(node["todoId"])):
+            return False
+    elif "todoId" in node:
+        if kind != "task" or not _is_text(node["todoId"]) or "status" in node:
+            return False
+    elif (statuses and node.get("status") not in statuses) or (not statuses and "status" in node):
         return False
     if ("scope" in node and (kind != "decision" or node["scope"] != "graph")
             or ((kind == "attempt" or "reason" in node) and not _is_text(node.get("reason")))
             or ((kind == "issue" or "facts" in node) and not _is_text(node.get("facts")))):
         return False
     evidence = node.get("evidence", [])
-    if not isinstance(evidence, list) or any(
-        not isinstance(pointer, dict) or not _is_text(pointer.get("type")) or not _is_text(pointer.get("id"))
-        for pointer in evidence
-    ):
+    if not _valid_evidence(evidence):
         return False
+    if "order" in node:
+        order = node["order"]
+        if (kind != "decision" or not isinstance(order, dict) or not _is_text(order.get("reason"))
+                or not any(pointer["type"] in {"message", "archive"} for pointer in evidence)
+                or any(not isinstance(ids, list) or not ids or not all(map(_is_id, ids))
+                       for ids in (order.get("before"), order.get("after")))):
+            return False
     try:
         return _is_json_value(node)
     except RecursionError:
         return False
+
+
+def _valid_evidence(evidence: Any) -> bool:
+    return isinstance(evidence, list) and all(
+        isinstance(pointer, dict) and _is_text(pointer.get("type")) and _is_text(pointer.get("id"))
+        for pointer in evidence
+    )
 
 
 def _edge_key(edge: Any) -> tuple[str, str, str] | None:
@@ -145,13 +167,25 @@ def _keep_edges(nodes: dict[str, Any], candidates: list[Any]) -> list[list[str]]
         return (source != target and nodes.get(source, {}).get("kind") in source_kinds
                 and nodes.get(target, {}).get("kind") in target_kinds)
 
-    for edge in candidates:
+    # Derived edges are regenerated from their source decision on every edit.
+    candidates = [edge for edge in candidates if not (isinstance(edge, list) and len(edge) == 4
+                  and isinstance(edge[3], dict) and "decisionId" in edge[3])]
+    ordered = [[later, "depends_on", earlier, {"decisionId": node_id}]
+               for node_id, node in nodes.items() if (order := node.get("order"))
+               for earlier in order["before"] for later in order["after"]]
+    for edge in [*ordered, *candidates]:
         key = _edge_key(edge)
         if key is None or not valid(key):
             continue
         source, relation, target = key
-        if relation != "replaced_by" and len(edge) != 3:
+        if relation not in {"replaced_by", "depends_on", "blocked_by"} and len(edge) != 3:
             continue
+        if relation in {"depends_on", "blocked_by"} and len(edge) == 4:
+            source_link = edge[3]
+            if not isinstance(source_link, dict) or ("decisionId" not in source_link
+                    and (not _is_text(source_link.get("reason")) or not source_link.get("evidence")
+                         or not _valid_evidence(source_link["evidence"]))):
+                continue
         if relation == "replaced_by" and (len(edge) != 4 or not _is_text(edge[3]) or nodes[source]["status"] != "failure"):
             continue
         if relation == "attempt_of":
@@ -163,7 +197,9 @@ def _keep_edges(nodes: dict[str, Any], candidates: list[Any]) -> list[list[str]]
             if _cyclic_edge(adjacency, source, target):
                 continue
             adjacency[source].add(target)
-        edges[key] = list(edge)
+        previous = edges.get(key)
+        if not previous or len(previous) != 4 or not isinstance(previous[3], dict) or "decisionId" not in previous[3]:
+            edges[key] = list(edge)
     return [edge for edge in edges.values() if edge[1] != "replaced_by"
             or (edge[0] in ownership and edge[2] in ownership)]
 
@@ -187,7 +223,7 @@ def _apply_nodes(
         old = nodes.get(node_id, {})
         if edit is None:
             if (not old or linked[node_id] or node_id in protected_attempts
-                    or (old["kind"] == "task" and old["status"] in _PENDING_STATES)):
+                    or (old["kind"] == "task" and old.get("status", "pending") in _PENDING_STATES)):
                 continue
             del nodes[node_id]
             deleted.add(node_id)
@@ -197,6 +233,8 @@ def _apply_nodes(
         if node_id in protected_attempts and edit.get("status", "failure") != "failure":
             continue
         node = {**old, **edit}
+        if "todoId" in node or node.get("group") is True:
+            node.pop("status", None)
         if _valid_node(node) and (old or not require_new_evidence or node.get("evidence")):
             if "evidence" in edit:
                 evidence = {(pointer["type"], pointer["id"]): pointer
@@ -316,34 +354,72 @@ def parse_handoff_graph(value: str) -> dict[str, Any] | None:
     return None
 
 
-def handoff_view(graph: dict[str, Any]) -> dict[str, Any]:
+def handoff_view(graph: dict[str, Any], todo_items=()) -> dict[str, Any]:
     """Derive the current task frontier and unresolved issues from typed edges."""
     nodes = graph["nodes"]
-    waiting = set()
+    from agent_handoff_sources import index_todos
+
+    todos = index_todos(todo_items)
+    todo_status = {
+        "pending": "pending", "in_progress": "in_progress", "running": "in_progress", "blocked": "blocked",
+        "completed": "done", "cancelled": "abandoned", "deleted": "abandoned",
+    }
+    statuses = {node_id: (None if node.get("group") else
+                         todo_status.get(todos.get(node["todoId"], {}).get("status"), "unavailable")
+                         if "todoId" in node else node.get("status"))
+                for node_id, node in nodes.items()}
     ancestors = defaultdict(set)
+    members = defaultdict(set)
     for source, relation, target, *_ in graph["edges"]:
-        if relation == "depends_on" and nodes[target]["status"] != "done":
+        if relation == "belongs_to":
+            ancestors[source].add(target)
+            members[target].add(source)
+
+    def group_status(node_id):
+        if not nodes[node_id].get("group"):
+            return statuses[node_id]
+        if statuses[node_id] is None:
+            children = {group_status(child) for child in members[node_id] if nodes[child]["kind"] == "task"}
+            statuses[node_id] = "done" if children == {"done"} else "pending"
+        return statuses[node_id]
+
+    for node_id, node in nodes.items():
+        if node["kind"] == "task":
+            group_status(node_id)
+    waiting = set()
+    for source, relation, target, *_ in graph["edges"]:
+        if relation == "depends_on" and statuses[target] != "done":
             waiting.add(source)
         elif relation == "blocked_by" and nodes[target]["status"] == "open":
             waiting.add(source)
-        elif relation == "belongs_to":
-            ancestors[source].add(target)
+    # A phase-level prerequisite or blocker applies to all of its nested tasks.
+    pending_groups = [node_id for node_id in waiting if nodes[node_id].get("group")]
+    while pending_groups:
+        for member in members[pending_groups.pop()] - waiting:
+            waiting.add(member)
+            pending_groups.append(member)
     ready = []
+    recoveries = []
     goals = {node_id for node_id, node in nodes.items() if node["kind"] == "goal"}
     completed_goals = set()
     pending = False
     for node_id, node in nodes.items():
         if node["kind"] != "task":
             continue
-        if node["status"] == "done":
+        status = statuses[node_id]
+        if status == "done":
             completed_goals.update(ancestors[node_id] & goals)
-        elif node["status"] in _PENDING_STATES:
+        elif status != "abandoned":
             pending = True
-            if node_id not in waiting:
+            if node.get("operationRef") and status == "in_progress":
+                recoveries.append(node_id)
+            elif status in _PENDING_STATES and node_id not in waiting and not node.get("group"):
                 ready.append(node_id)
+    ready = recoveries + ready
     incomplete = not goals or pending or bool(goals - completed_goals)
     return {
         "readyTaskIds": ready,
+        **({"recoverTaskIds": recoveries} if recoveries else {}),
         "openIssueIds": [node_id for node_id, node in nodes.items()
                          if node["kind"] == "issue" and node["status"] == "open"],
         "incomplete": incomplete,
@@ -383,7 +459,22 @@ def map_handoff_graph_text(
         if "evidence" in control:
             control["evidence"] = transform_properties({"evidence": control["evidence"]})["evidence"]
         properties = {key: value for key, value in node.items() if key not in _NODE_CONTROLS}
-        nodes[ids[node_id]] = {**transform_properties(properties), **control}
-    edges = [[ids[source], relation, ids[target], *(transform(value) for value in details)]
-             for source, relation, target, *details in graph["edges"]]
+        projected = transform_properties(properties)
+        if "order" in node:
+            for field in ("before", "after"):
+                projected["order"][field] = [ids[ref] for ref in node["order"][field] if ref in ids]
+        nodes[ids[node_id]] = {**projected, **control}
+    edges = []
+    for source, relation, target, *details in graph["edges"]:
+        edge = [ids[source], relation, ids[target]]
+        if details:
+            detail = details[0]
+            if isinstance(detail, dict):
+                projected = transform_properties(detail)
+                if "decisionId" in detail:
+                    projected["decisionId"] = ids[detail["decisionId"]]
+                edge.append(projected)
+            else:
+                edge.append(transform(detail))
+        edges.append(edge)
     return {**graph, "nodes": nodes, "edges": edges}

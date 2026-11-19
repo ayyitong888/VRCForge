@@ -11,6 +11,7 @@ import copy
 import json
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
+from agent_native_handoff_blocks import handoff_block_messages
 from agent_user_path_context import human_indices, human_user_projection
 from agent_runtime_input import RuntimeInputSource, classify_steer
 from responses_native_protocol import public_assistant_messages
@@ -152,11 +153,16 @@ class NativeRuntimeTurn:
         input_source: RuntimeInputSource = RuntimeInputSource.USER,
         late_approval_id: str = "",
         compaction_only: bool = False,
+        source_text: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        question_reference: Callable[[str], dict[str, str] | None] | None = None,
+        question_answer: dict[str, str] | None = None,
     ) -> None:
         self._state = owner
         self._planner = planner
         self._project_context_active = project_context_active
         self._session_id = session_id
+        self._question_reference = question_reference
         self._turn_id = turn_id
         self._client_turn_id = client_turn_id
         self._binding = binding
@@ -294,6 +300,15 @@ class NativeRuntimeTurn:
                 )
             if binding != saved_binding:
                 raise ValueError("Provider settings changed. The action result was saved; send a new message to continue with the selected provider.")
+            if question_answer:
+                question_id, answer = question_answer["id"], question_answer["text"]
+                if self._queued_calls:
+                    self._native_steers.insert(0, {
+                        "inputId": "question-answer:" + question_id, "message": "",
+                        "authenticatedAnswer": answer, "attachments": attachments or [],
+                    })
+                else:
+                    self._append_question_answer(question_id, answer, attachments)
         else:
             state.begin_native_turn(
                 session_id,
@@ -302,8 +317,22 @@ class NativeRuntimeTurn:
                 message=message,
                 initial_history=initial_history,
                 input_source=input_source,
-                input_id=client_turn_id,
+                input_id="question-answer:" + question_answer["id"] if question_answer and input_source.is_human else client_turn_id,
+                source_text=source_text,
+                attachments=attachments,
+                references=[reference] if question_answer and question_reference
+                    and (reference := question_reference(question_answer["id"])) else None,
             )
+            if question_answer and not input_source.is_human:
+                self._append_question_answer(question_answer["id"], question_answer["text"], attachments)
+
+    def _append_question_answer(self, question_id: str, answer: str, attachments=None) -> None:
+        reference = self._question_reference(question_id) if self._question_reference else None
+        self._state.append_native_user(
+            self._session_id, binding=self._binding, message=answer, input_source=RuntimeInputSource.USER,
+            input_id="question-answer:" + question_id, attachments=attachments,
+            references=[reference] if reference else None,
+        )
 
     def append_hidden(self, text: str) -> None:
         self._state.append_native_user(self._session_id, binding=self._binding, message=text, human=False, hidden=True)
@@ -430,6 +459,17 @@ class NativeRuntimeTurn:
     def handoff_tail(self, snapshot: dict[str, Any]) -> int:
         return self._state.native_handoff_tail(snapshot)
 
+    def handoff_projection(self, snapshot: dict[str, Any], *, character_budget: int, measure: Callable[[str], int] = len
+                           ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return self._state.native_handoff_projection(snapshot, character_budget=character_budget, measure=measure)
+
+    @staticmethod
+    def handoff_messages(blocks: dict[str, Any], *, summary: str = "",
+                         current_context: list[dict[str, Any]] | None = None,
+                         include_pending: bool = True) -> list[dict[str, Any]]:
+        return handoff_block_messages(blocks, summary=summary, current_context=current_context,
+                                      include_pending=include_pending)
+
     def compaction_projection(self, snapshot: dict[str, Any], *, tail_from: int | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Read-only projection; installation still revalidates snapshot identity."""
         return self._state.native_compaction_projection(snapshot, tail_from=tail_from)
@@ -437,16 +477,22 @@ class NativeRuntimeTurn:
     def replace_compacted_history(self, expected_snapshot: dict[str, Any], summary: str,
                                  *, recovery: dict[str, Any] | None = None,
                                  current_context: list[dict[str, Any]] | None = None,
-                                 tail_from: int | None = None) -> None:
+                                 tail_from: int | None = None,
+                                 handoff_blocks: dict[str, Any] | None = None) -> None:
         # Check Stop and compare-and-replace under the same existing state lock.
         with self._state.shared_state_lock:
             if self.cancelled():
                 raise ValueError("native compaction cancelled")
             compacted = self._state.replace_native_compacted_history(
                 self._session_id, binding=self._binding,
-                expected_snapshot=expected_snapshot, summary=summary, recovery=recovery, current_context=current_context, tail_from=tail_from,
+                expected_snapshot=expected_snapshot, summary=summary, recovery=recovery, current_context=current_context,
+                tail_from=tail_from, handoff_blocks=handoff_blocks,
             )
-            if self.steer_attachments:
+            if handoff_blocks is not None:
+                # Any steer already consumed by this history enters the handoff
+                # as source material; only future steers are bound as attachments.
+                self.steer_attachments.clear()
+            elif self.steer_attachments:
                 retained_indices = (
                     index for index in human_indices(expected_snapshot)
                     if (index in self._state._native_handoff_indices(expected_snapshot, tail_from) if tail_from is not None
@@ -702,27 +748,27 @@ class NativeRuntimeTurn:
             steer = self._native_steers[0]
             input_id = steer["inputId"]
             source = classify_steer(input_id)
-            if not steer["message"]:
+            if not steer["message"] and not steer["attachments"]:
                 source = RuntimeInputSource.RUNTIME
             if terminal is not None and not input_id.startswith("question-answer:"):
                 # The queue owns unsent inputs. Appending them here would expose
                 # a paused steer to the next model request without its replay.
                 self._native_steers.pop(0)
                 continue
-            history_index = self._state.append_native_user(
-                self._session_id,
-                binding=self._binding,
-                message=steer["message"] or "See attached materials.",
-                input_source=source,
-                input_id=input_id,
-            )
-            if steer["attachments"] and history_index is not None:
-                self.steer_attachments[history_index] = steer["attachments"]
-            if answer := steer["authenticatedAnswer"]:
-                self._state.append_native_user(
-                    self._session_id, binding=self._binding, message=answer,
-                    input_source=RuntimeInputSource.USER,
+            if steer["message"] or not steer["authenticatedAnswer"]:
+                history_index = self._state.append_native_user(
+                    self._session_id,
+                    binding=self._binding,
+                    message=steer["message"] or "See attached materials.",
+                    input_source=source,
+                    input_id=input_id,
+                    attachments=steer["attachments"],
+                    source_text=steer["message"],
                 )
+                if steer["attachments"] and history_index is not None:
+                    self.steer_attachments[history_index] = steer["attachments"]
+            if answer := steer["authenticatedAnswer"]:
+                self._append_question_answer(input_id.removeprefix("question-answer:"), answer, steer["attachments"])
             self._native_steers.pop(0)
             # A saved Question answer has its own durable handoff.
             if terminal is None and input_id and input_id not in self._consumed_steer_input_ids:

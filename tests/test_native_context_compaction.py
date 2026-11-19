@@ -6,7 +6,7 @@ import pytest
 
 from agent_runtime_native_turn import NativeRuntimeTurn
 from agent_native_history_store import NativeHistoryStore
-from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts, model_handoff_payload
 from agent_runtime_input import RuntimeInputSource
 from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY_V2 as SCAN_RESULT_CONTINUATION_POLICY, is_scan_result_policy_message
 from agent_output_truncation import CONTINUE_MESSAGE
@@ -76,7 +76,7 @@ def test_native_compaction_after_dispatched_tool_applies_summary():
     assert state._native_pending(turn.snapshot()) == set()
 
 
-def test_native_compaction_reuses_port_and_retains_recent_settled_receipts():
+def test_native_compaction_reuses_port_and_archives_already_consumed_receipts():
     compactor = Compactor()
     state, planner, model, turn = fixture(compactor)
     state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "checking",
@@ -85,7 +85,7 @@ def test_native_compaction_reuses_port_and_retains_recent_settled_receipts():
     state.settle_native_call("s", binding="b", call_id="current-read", content='{"status":"ok"}')
     state.append_native_user("s", binding="b", message="Keep checking")
     before = state.native_conversation("s", binding="b")
-    suffix = [deepcopy(item) for item in before["messages"] if item["role"] == "user"]
+    suffix = [item["content"] for item in before["messages"] if item["role"] == "user"]
     usage = {"requestCount": 9, "cumulativeInputTokens": 9000, "peakInputTokens": 15000}
 
     result = plan(planner, turn, usage)
@@ -97,11 +97,12 @@ def test_native_compaction_reuses_port_and_retains_recent_settled_receipts():
     grouped = [entry["text"] for entry in compactor.calls[0][0] if "read-old" in entry["text"]]
     assert len(grouped) == 1 and "readback-old" in grouped[0] and "fixture.txt" in grouped[0]
     current_group = [entry["text"] for entry in compactor.calls[0][0] if "current-read" in entry["text"]]
-    assert not current_group
+    assert len(current_group) == 1 and '"tool_call_id": "current-read"' in current_group[0]
     assert "CURRENT_EXACT_REPLAY" not in str(compactor.calls[0][0])
-    assert [item for item in model.requests[0]["messages"] if item["role"] == "user"] == suffix
-    assert {"role": "tool", "tool_call_id": "current-read", "content": '{"status":"ok"}'} in model.requests[0]["messages"]
-    assert model.requests[0]["messages"][-1]["role"] == "system"
+    assert [item["content"].split("\n", 1)[1] for item in model.requests[0]["messages"]
+            if item["role"] == "user" and item["content"].startswith("[User message ")] == suffix
+    assert not any(item["role"] == "tool" for item in model.requests[0]["messages"])
+    assert model.requests[0]["messages"][0]["role"] == "system"
     compacted = state.native_conversation("s", binding="b")
     assert compacted["messages"][compacted["activeTurnStart"]]["content"] == "Continue checking"
     assert turn.compaction["applied"] is True and turn.compaction["afterTokens"] < turn.compaction["beforeTokens"]
@@ -122,11 +123,11 @@ def test_compaction_preserves_only_confirmed_human_provenance_and_active_output_
     plan(planner, turn)
     assert turn.compaction["applied"] is True
     entries = compactor.calls[0][0]
-    assert [entry["role"] for entry in entries if entry["text"] == original_goal] == ["runtime"]
+    assert [entry["role"] for entry in entries if entry["text"] == original_goal] == ["user", "runtime"]
     assert {"role": "runtime", "text": "runtime-generated reference data"} in entries
     assert any(entry["role"] == "tool" and "read-old" in entry["text"] for entry in entries)
     assert {"role": "system", "content": CONTINUE_MESSAGE} in model.requests[-1]["messages"]
-    assert {"role": "user", "content": original_goal} in turn.snapshot()["messages"]
+    assert len([row for row in turn.snapshot()["messages"] if row.get("handoffUser") and row["content"] == original_goal]) == 1
 
 
 def test_active_program_task_survives_compaction_and_restore_without_claiming_human_provenance(tmp_path):
@@ -136,7 +137,8 @@ def test_active_program_task_survives_compaction_and_restore_without_claiming_hu
     task = "Delegated from the parent agent"
     turn = NativeRuntimeTurn(state, planner, "s", "delegated", "b", task, [], None, None, None,
                              input_source=RuntimeInputSource.PARENT_AGENT)
-    state.append_native_user("s", binding="b", message="User steer is authoritative")
+    state.append_native_user("s", binding="b", message="User steer is authoritative", input_id="steer-note",
+                             attachments=[{"name": "actual-user-note.txt", "type": "text/plain", "payloadKind": "metadata"}])
     before = turn.snapshot()
     assert before["activeTurnStart"] not in before["humanUserMessageIndices"]
     turn.steer_attachments[before["activeTurnStart"] + 1] = [
@@ -148,15 +150,17 @@ def test_active_program_task_survives_compaction_and_restore_without_claiming_hu
     after = turn.snapshot()
     start = after["activeTurnStart"]
     assert start not in after["humanUserMessageIndices"]
-    assert start + 1 in after["humanUserMessageIndices"]
+    assert max(after["humanUserMessageIndices"]) < start
     assert after["messages"][start]["content"] == RuntimeInputSource.PARENT_AGENT.model_text(task)
     assert after["messages"][start]["runtimeInputSource"] == "parent_agent"
-    assert after["messages"][start + 1]["content"] == "User steer is authoritative"
+    steer = after["messages"][after["humanUserMessageIndices"][-1]]
+    assert steer["messageId"] == "steer-note"
     projected = model.requests[-1]["messages"]
-    assert projected[start] == {"role": "user", "content": RuntimeInputSource.PARENT_AGENT.model_text(task)}
+    assert {"role": "user", "content": RuntimeInputSource.PARENT_AGENT.model_text(task)} in projected
     assert not any("runtimeInputSource" in message for message in projected)
-    assert projected[start + 1]["content"].startswith("User steer is authoritative\n")
-    assert "actual-user-note.txt" in projected[start + 1]["content"]
+    assert any(row["content"].startswith("[User message steer-note]\n") for row in projected if row["role"] == "user")
+    assert "actual-user-note.txt" not in str(projected)
+    assert after["handoffArchive"]["steer-note"]["attachments"][0]["name"] == "actual-user-note.txt"
     restored = AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(threading.RLock(), store))
     assert restored.native_conversation("s", binding="b") == after
 
@@ -240,15 +244,17 @@ def test_native_guard_excludes_inline_image_bytes_from_measurement():
     assert guard["requestTokens"] < 200
 
 
-def test_native_image_is_rebound_after_compaction_without_entering_summary():
+def test_native_image_becomes_recoverable_pointer_without_entering_summary():
     compactor = Compactor()
-    _state, planner, model, turn = fixture(compactor, limit=8000)
+    state, planner, model, _turn = fixture(compactor, limit=8000)
+    image = {"name": "screenshot.png", "dataUrl": "data:image/png;base64," + "A" * 100_000,
+             "vaultPayloadHash": "a" * 64}
+    turn = NativeRuntimeTurn(state, planner, "s", "image", "b", "Continue checking", [], None, None, None,
+                             client_turn_id="image-user", attachments=[image])
     observe = {
         "turn": {
             "directImageInput": True,
-            "attachments": [{
-                "dataUrl": "data:image/png;base64," + "A" * 100_000,
-            }],
+            "attachments": [image],
         },
     }
     with planner.bind_turn({}):
@@ -260,11 +266,11 @@ def test_native_image_is_rebound_after_compaction_without_entering_summary():
     assert "data:image/png;base64," not in json.dumps(compactor.calls[0][0])
     current = next(
         item for item in model.requests[0]["messages"]
-        if item.get("role") == "user" and isinstance(item.get("content"), list)
+        if item.get("role") == "user" and str(item.get("content")).startswith("[User message image-user]")
     )
-    assert current["content"][0] == {"type": "text", "text": "Continue checking"}
-    assert current["content"][1]["type"] == "image_url"
-    assert current["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert 'messageId="image-user"' in current["content"]
+    assert "data:image/png;base64," not in str(model.requests[0]["messages"])
+    assert turn.snapshot()["handoffArchive"]["image-user"]["attachments"][0]["vaultPayloadHash"] == "a" * 64
 
 
 def test_native_image_without_compaction_reports_text_only_measurement():
@@ -346,7 +352,7 @@ def test_native_compaction_restores_exact_prefix_policy_once_without_touching_su
     compactor = Compactor(summary="Old work. " + SCAN_RESULT_CONTINUATION_POLICY)
     state, planner, model, turn = fixture(compactor, prior_policy=True)
     before = state.native_conversation("s", binding="b")
-    suffix = [deepcopy(item) for item in before["messages"] if item["role"] == "user"]
+    suffix = [item["content"] for item in before["messages"] if item["role"] == "user"]
     measured = []
     measured_tools = []
     native_guard = planner.native_context_guard
@@ -362,8 +368,7 @@ def test_native_compaction_restores_exact_prefix_policy_once_without_touching_su
     policy = {"role": "system", "content": SCAN_RESULT_CONTINUATION_POLICY}
     assert model.requests[0]["messages"].count(policy) == 1
     assert state.native_conversation("s", binding="b")["messages"].count(policy) == 1
-    candidate = next(messages for messages in measured if messages and messages[0].get("role") == "assistant"
-                     and str(messages[0].get("content", "")).startswith("Earlier model handoff"))
+    candidate = next(messages for messages in measured if any(model_handoff_payload(row) for row in messages))
     original_request = measured[0]
     assert candidate.count(policy) == 1
     assert [message for message in candidate if message.get("role") == "system" and message != policy] == [
@@ -371,9 +376,10 @@ def test_native_compaction_restores_exact_prefix_policy_once_without_touching_su
     ]
     assert model.requests[0]["tools"] == measured_tools[0]
     assert turn.compaction["applied"] is True
-    assert [item for item in model.requests[0]["messages"] if item["role"] == "user"] == suffix
+    assert [item["content"].split("\n", 1)[1] for item in model.requests[0]["messages"]
+            if item["role"] == "user" and item["content"].startswith("[User message ")] == suffix
     persisted = state.native_conversation("s", binding="b")
-    assert [item for item in persisted["messages"] if item["role"] == "user"] == suffix
+    assert [item["content"] for item in persisted["messages"] if item.get("handoffUser")] == suffix
     assert persisted["messages"][persisted["activeTurnStart"]]["content"] == "Continue checking"
 
 
@@ -457,12 +463,16 @@ def test_pending_current_call_settles_at_assembly_then_compacts():
 
     grouped = [entry["text"] for entry in compactor.calls[0][0] if "pending-current" in entry["text"]]
     assert not grouped
-    assert pending_results[0] in model.requests[0]["messages"]
-    assert any(
-        call.get("id") == "pending-current"
-        for message in model.requests[0]["messages"]
-        for call in message.get("tool_calls", [])
-    )
+    wire = model.requests[0]["messages"]
+    matching_calls = [call for message in wire for call in message.get("tool_calls", [])
+                      if call.get("id") == "pending-current"]
+    if pending_results[0] in wire:
+        assert len(matching_calls) == 1
+    else:
+        assert not matching_calls
+        txn_id = next(key for key, row in turn.snapshot()["handoffArchive"].items() if row["source"] == "tool")
+        assert any(f'messageId="{txn_id}"' in (row.get("content") or "") for row in wire)
+        assert json.loads(turn.snapshot()["handoffArchive"][txn_id]["text"])[1] == pending_results[0]
     assert state._native_pending(turn.snapshot()) == set()
 
 

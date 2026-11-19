@@ -112,33 +112,29 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
         compaction_input, compaction_request = compactor.calls[0]
         assert compaction_request["phase"] == "mid_turn"
         assert compaction_request["_priorHandoff"] == "PREVIOUS_LEGACY_HANDOFF"
-        assert compaction_request["_recoveryHistory"][0]["text"] == MODEL_HANDOFF_PREFIX + "PREVIOUS_LEGACY_HANDOFF"
-        assert compaction_request["_handoffArchiveIndices"] == [1, 2]
-        assert len(compaction_input) == 2, [
-            [(step.get("status"), step.get("tool")) for step in state]
-            for state in compaction_inputs
-        ]
-        assert "LONG_PRIOR_HISTORY_MARKER" in compaction_input[0]["text"]
-        assert "FIRST_OBSERVATION_MARKER" in "\n".join(item["text"] for item in compaction_input)
-        assert "LATEST_OBSERVATION_MARKER" not in "\n".join(item["text"] for item in compaction_input)
-        assert not any("VERBATIM_" in item["text"] for item in compaction_input)
+        assert any(row["text"] == MODEL_HANDOFF_PREFIX + "PREVIOUS_LEGACY_HANDOFF"
+                   for row in compaction_request["_recoveryHistory"])
+        assert len(compaction_request["_handoffArchiveIndices"]) == len(compaction_input)
+        source = "\n".join(item["text"] for item in compaction_input)
+        assert all(marker in source for marker in ("LONG_PRIOR_HISTORY_MARKER", "FIRST_OBSERVATION_MARKER", "LATEST_OBSERVATION_MARKER"))
+        assert any(row["text"] == "VERBATIM_ORIGINAL_REQUEST" for row in compaction_request["_handoffTaskInputs"])
         assert shell_execute.call_count == 5
 
         compacted_prompts = [prompt for prompt in model.prompts if "COMPACTED_LEGACY_PREFIX_SUMMARY" in prompt]
         assert len(compacted_prompts) >= 2
         third_prompt, fourth_prompt = compacted_prompts[:2]
         assert "COMPACTED_LEGACY_PREFIX_SUMMARY" in third_prompt
-        assert "LATEST_OBSERVATION_MARKER" in third_prompt
+        assert "LATEST_OBSERVATION_MARKER" not in third_prompt
         assert "FIRST_OBSERVATION_MARKER" not in third_prompt
         assert "PREVIOUS_LEGACY_HANDOFF" not in third_prompt
         assert "COMPACTED_LEGACY_PREFIX_SUMMARY" in fourth_prompt
-        assert "LATEST_OBSERVATION_MARKER" in fourth_prompt
+        assert "LATEST_OBSERVATION_MARKER" not in fourth_prompt
         assert "APPENDED_AFTER_OFFSET_MARKER" in fourth_prompt
         assert "FIRST_OBSERVATION_MARKER" not in fourth_prompt
         assert all(f"VERBATIM_{suffix}" in fourth_prompt for suffix in ("ORIGINAL_REQUEST", "RECENT_TURN_1", "RECENT_TURN_2"))
 
         assert result["plan"]["reply"] == "All five fixture actions completed."
-        assert result["contextCompaction"]["compactedLoopStepCount"] == 1
+        assert result["contextCompaction"]["compactedLoopStepCount"] == 4
         markers = [item for item in result["timeline"] if item["kind"] == "context_compaction"]
         assert len(markers) == 1
         assert markers[0]["payload"] == {"status": "completed"}

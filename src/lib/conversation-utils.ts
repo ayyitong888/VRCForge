@@ -220,17 +220,32 @@ export function latestAgentContextUsage(items: ConversationItem[]): AgentContext
   return latestContextWindowUsage(items);
 }
 
-export function buildChatHistory(items: ConversationItem[], t: TFunction, sourceItems = items): ChatHistoryEntry[] {
+export function buildChatHistory(items: ConversationItem[], t: TFunction, sourceItems = items, keepUserStatements = false): ChatHistoryEntry[] {
   const history: ChatHistoryEntry[] = [];
-  const summarizedItemIds = new Set(items.flatMap((item) => (
+  let boundary = items.length - 1;
+  while (boundary >= 0) {
+    const item = items[boundary];
+    if (item.type === "compact" && item.blockHandoff === true) break;
+    boundary -= 1;
+  }
+  const activeItems = boundary < 0 ? items : items.slice(boundary);
+  const summarizedItemIds = new Set(activeItems.flatMap((item) => (
     item.type === "compact" ? item.summarizedItemIds || [] : []
   )));
   const goalInputIds = new Set(sourceItems.flatMap((item) => (
     item.type === "agent" && item.response.goalDeliveryId
       ? [`goal-user-${item.response.goalDeliveryId}`] : []
   )));
-  for (const item of items) {
-    if (summarizedItemIds.has(item.id)) {
+  const before = boundary < 0 ? [] : items.slice(0, boundary);
+  const marker = items[boundary];
+  const lastPublic = marker?.type === "compact" ? before.find((item) => item.id === marker.lastPublicItemId) : undefined;
+  const isUser = (item: ConversationItem) => item.type === "user" || item.type === "question_answer";
+  const orderedItems = boundary < 0 ? items : [
+    ...before.filter(isUser), marker, ...(lastPublic ? [lastPublic] : []),
+    ...before.filter((item) => !isUser(item) && item !== lastPublic), ...items.slice(boundary + 1),
+  ];
+  for (const item of orderedItems) {
+    if (summarizedItemIds.has(item.id) && !(keepUserStatements && isUser(item))) {
       continue;
     }
     if (item.type === "user") {
@@ -241,6 +256,12 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction, source
         history.push({
           role: "user",
           text,
+          ...(!authorRole ? {
+            messageId: item.clientTurnId || item.id,
+            sourceText: item.text,
+            ...(item.attachments?.length ? { handoffAttachments: serializeChatAttachments(item.attachments)
+              .map(({ dataUrl, ...attachment }) => attachment) } : {}),
+          } : {}),
           ...(authorRole ? { authorRole } : {}),
           ...(authorRole === "agent_relay" && item.clientTurnId ? { clientTurnId: item.clientTurnId } : {}),
         });
@@ -248,7 +269,15 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction, source
     } else if (item.type === "question_answer") {
       const text = appendAttachmentSummary(item.text, item.attachments || [], t);
       if (text.trim()) {
-        history.push({ role: "user", text });
+        history.push({
+          role: "user",
+          text,
+          messageId: `question-answer:${item.questionId}`,
+          sourceText: item.text,
+          ...(item.question ? { references: [{ id: item.questionId, text: item.question }] } : {}),
+          ...(item.attachments?.length ? { handoffAttachments: serializeChatAttachments(item.attachments)
+            .map(({ dataUrl, ...attachment }) => attachment) } : {}),
+        });
       }
     } else if (item.type === "agent") {
       const text = visibleAgentDialogueText(item.response);

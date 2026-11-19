@@ -9,13 +9,15 @@ def fold_completed_subtrees(graph: dict) -> dict:
     edges = graph["edges"]
     children = defaultdict(set)
     parents = defaultdict(set)
+    order_sources = {member for node in nodes.values() for order in [node.get("order")] if order
+                     for phase in ("before", "after") for member in order[phase]}
     for source, relation, target, *_ in edges:
         if relation == "belongs_to":
             children[target].add(source)
             parents[source].add(target)
 
     for root, root_node in graph["nodes"].items():
-        if root not in nodes or root_node["kind"] != "task" or root_node["status"] != "done":
+        if root not in nodes or root_node["kind"] != "task" or root_node.get("status") != "done":
             continue
         branch = {root}
         pending = list(children[root])
@@ -24,7 +26,7 @@ def fold_completed_subtrees(graph: dict) -> dict:
             if child in nodes and child not in branch:
                 branch.add(child)
                 pending.extend(children[child])
-        if any(nodes[node]["status"] != "done" or len(parents[node]) != 1 for node in branch - {root}):
+        if any(nodes[node].get("status") != "done" or len(parents[node]) != 1 for node in branch - {root}):
             continue
 
         # A shared decision, open issue or cross-task replacement chain remains independently addressable.
@@ -32,7 +34,8 @@ def fold_completed_subtrees(graph: dict) -> dict:
         for source, relation, target, *_ in edges:
             if relation == "attempt_of" and target in branch:
                 details.add(source)
-            elif relation == "constrains" and target in branch and nodes[source].get("scope") != "graph":
+            elif (relation == "constrains" and target in branch and nodes[source].get("scope") != "graph"
+                  and not nodes[source].get("userReplyId")):
                 details.add(source)
             elif relation == "blocked_by" and source in branch and nodes[target]["status"] == "closed":
                 details.add(target)
@@ -53,7 +56,7 @@ def fold_completed_subtrees(graph: dict) -> dict:
                 pending.append(neighbor)
 
         removed = (branch - {root}) | (details - shared)
-        if not removed:
+        if not removed or removed & order_sources:
             continue
         pointers = []
         seen = set()
@@ -78,11 +81,11 @@ def fold_completed_subtrees(graph: dict) -> dict:
                     continue
                 source = root if source in removed else source
                 target = root if target in removed else target
-            kept[(source, relation, target, *properties)] = None
+            kept[(source, relation, target)] = [source, relation, target, *properties]
         # A task outside the branch can sit between a completed child and its parent.
         # Contracting such a branch would invent a dependency cycle.
         ordering = TopologicalSorter()
-        for source, relation, target, *_ in kept:
+        for source, relation, target in kept:
             if relation == "depends_on":
                 ordering.add(source, target)
         try:
@@ -92,5 +95,5 @@ def fold_completed_subtrees(graph: dict) -> dict:
         nodes[root] = {**nodes[root], "evidence": pointers}
         for node_id in removed:
             del nodes[node_id]
-        edges = [list(edge) for edge in kept]
+        edges = list(kept.values())
     return {**graph, "nodes": nodes, "edges": edges}

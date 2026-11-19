@@ -22,6 +22,7 @@ MAX_PAGE_CHARS = 12000
 MAX_SCAN_SUMMARY_CHARS = 6000
 MAX_INLINE_SCAN_CHARS = 4000
 DEFAULT_PAGE_ITEMS = 6
+MAX_PAGE_ITEMS = 20
 _SCAN_PAGING_FIELDS = ("paging", "pagination", "nextRequest", "nextKeyRequest",
                        "nextOffset", "hasMore", "total", "totalCount", "returned", "complete", "readHints")
 
@@ -36,9 +37,10 @@ class _ResultFieldUnavailable(ValueError):
 
 INPUT_SCHEMA = {
     "type": "object",
-    "required": ["resultRef"],
     "additionalProperties": False,
     "properties": {
+        "messageId": {"type": "string", "minLength": 1, "description": "Retrieve the original content of this session's handoff pointer. Use textOffset to continue."},
+        "executionId": {"type": "string", "minLength": 1, "description": "Read the original execution receipt by the exact ID in the handoff. Follow it with the corresponding readback."},
         "resultRef": {"type": "string", "pattern": "^result_[0-9a-f]{32}$",
                       "description": "Copy the exact resultRef from resultContinuation. Honor its scope and freshness; an expired owned reference returns needs_rescan with a reason and scope, never fresh data. Never guess another session's reference."},
         "jsonPointer": {"type": "string", "maxLength": 1024, "default": "",
@@ -46,8 +48,8 @@ INPUT_SCHEMA = {
                         "description": "RFC6901 pointer: empty string selects root; otherwise keep the leading slash, e.g. /parameters or /layers/0/states. Escape a key's slash as ~1 and tilde as ~0. Copy exact pointers from returned rows."},
         "offset": {"type": "integer", "minimum": 0, "default": 0,
                    "description": "Zero-based item or field offset, or match offset when matchNameOrPath is set. Use nextRequest to continue."},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": DEFAULT_PAGE_ITEMS,
-                  "description": "Maximum items in this page (1 through 20). The character budget may return fewer; follow nextRequest when hasMore is true."},
+        "limit": {"type": "integer", "minimum": 1, "default": DEFAULT_PAGE_ITEMS,
+                  "description": "Requested item count. The reader caps each page at 20 items and the byte budget may return fewer. Follow nextRequest when hasMore is true."},
         "textOffset": {"type": "integer", "minimum": 0,
                        "description": "Only for an exact text field with offset=0: character offset in its sanitized text, independent of item offset/limit. Copy nextRequest to retrieve remaining text."},
         "matchNameOrPath": {"type": "string", "minLength": 1, "maxLength": 1024,
@@ -56,6 +58,18 @@ INPUT_SCHEMA = {
                    "description": "Use owner_model only with the owner-validated model payload attached to this exact result reference."},
     },
 }
+INPUT_SCHEMA["oneOf"] = [
+    {
+        "required": [selector],
+        "properties": {key: {} for key in allowed},
+        "additionalProperties": False,
+    }
+    for selector, allowed in (
+        ("resultRef", tuple(key for key in INPUT_SCHEMA["properties"] if key not in {"messageId", "executionId"})),
+        ("messageId", ("messageId", "textOffset")),
+        ("executionId", ("executionId", "textOffset")),
+    )
+]
 # Existing owner-validated channels must not gain a generic raw-result escape.
 _RESTRICTED = frozenset({
     TOOL_NAME, "vrcforge_list_internal_tool_blocks", "vrcforge_load_internal_tool_block",
@@ -77,6 +91,7 @@ class ResultReadContext:
     project_root: str
     steps: tuple[Mapping[str, Any], ...]
     snapshot_lookup: Callable[[str, str, str, str], dict[str, Any] | None] | None = None
+    handoff_lookup: Callable[[str, str], dict[str, Any] | None] | None = None
 
 
 _CONTEXT: ContextVar[ResultReadContext | None] = ContextVar("tool_result_read_context", default=None)
@@ -85,8 +100,9 @@ _CONTEXT: ContextVar[ResultReadContext | None] = ContextVar("tool_result_read_co
 @contextmanager
 def bind_tool_result_context(session_id: str, turn_id: str, project_root: str,
                              steps: list[dict[str, Any]], *,
-                             snapshot_lookup: Callable[[str, str, str, str], dict[str, Any] | None] | None = None) -> Iterator[None]:
-    token = _CONTEXT.set(ResultReadContext(session_id, turn_id, project_root, tuple(steps), snapshot_lookup))
+                             snapshot_lookup: Callable[[str, str, str, str], dict[str, Any] | None] | None = None,
+                             handoff_lookup: Callable[[str, str], dict[str, Any] | None] | None = None) -> Iterator[None]:
+    token = _CONTEXT.set(ResultReadContext(session_id, turn_id, project_root, tuple(steps), snapshot_lookup, handoff_lookup))
     try:
         yield
     finally:
@@ -280,6 +296,24 @@ def result_reference(session_id: str, turn_id: str, project_root: str, step: Map
 
 def _size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
+
+
+def _fit_text_page(start: int, total: int, build: Callable[[int], dict[str, Any]]) -> dict[str, Any]:
+    if total - start <= MAX_PAGE_CHARS:
+        complete = build(total)
+        if _size(complete) <= MAX_PAGE_CHARS:
+            return complete
+    low, high = start, min(total, start + MAX_PAGE_CHARS)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _size(build(middle)) <= MAX_PAGE_CHARS:
+            low = middle
+        else:
+            high = middle - 1
+    result = build(low)
+    if _size(result) > MAX_PAGE_CHARS or low == start < total:
+        raise ValueError("Text page metadata exceeds the page budget; select a narrower field")
+    return result
 
 
 def _pointer(parent: str, name: object) -> str:
@@ -669,7 +703,52 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
     if context is None or not context.session_id or not context.turn_id:
         raise PermissionError("Result reads require the owning active runtime turn")
     if set(params) - set(INPUT_SCHEMA["properties"]):
-        raise ValueError("Result reader accepts only resultRef, source, jsonPointer, offset, limit, textOffset and matchNameOrPath")
+        raise ValueError("Result reader received unknown parameters")
+    for key in ("messageId", "executionId"):
+        if key not in params:
+            continue
+        identity, offset = params[key], params.get("textOffset", 0)
+        if (not isinstance(identity, str) or not identity or set(params) - {key, "textOffset"}
+                or type(offset) is not int or offset < 0):
+            raise ValueError("Use one exact handoff ID with an optional nonnegative textOffset")
+        record = context.handoff_lookup(key, identity) if context.handoff_lookup else None
+        if not record:
+            raise ValueError("The handoff record is unavailable in this session")
+        content = record.get("text") if key == "messageId" else json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        if not isinstance(content, str):
+            raise ValueError("The handoff record has no readable content")
+        if offset > len(content):
+            raise ValueError("textOffset is outside the handoff text")
+        page = {"schema": PAGE_SCHEMA, "ok": True, "authority": "historical_context_data", key: identity,
+                "textOffset": offset, "textTotalChars": len(content)}
+        if key == "messageId" and isinstance(record.get("attachments"), list) and not offset:
+            descriptors = []
+            for attachment in record["attachments"]:
+                if not isinstance(attachment, dict):
+                    continue
+                descriptor = {key: attachment[key] for key in (
+                    "name", "type", "size", "messageId", "payloadHash", "vaultPayloadHash", "vaultKind", "truncated",
+                ) if key in attachment}
+                if descriptor.get("messageId"):
+                    descriptor["availability"] = "retained"
+                elif descriptor.get("vaultPayloadHash") or (
+                    attachment.get("payloadKind") == "vault_file" and descriptor.get("payloadHash")
+                ):
+                    descriptor["availability"] = "vault"
+                else:
+                    descriptor["availability"] = "unavailable"
+                descriptors.append(descriptor)
+            if descriptors:
+                page["attachments"] = descriptors
+
+        def handoff_text_page(end: int) -> dict[str, Any]:
+            more = end < len(content)
+            result = {**page, "text": content[offset:end], "hasMore": more}
+            if more:
+                result["nextRequest"] = {"tool": TOOL_NAME, "arguments": {key: identity, "textOffset": end}}
+            return result
+
+        return _fit_text_page(offset, len(content), handoff_text_page)
     source = params.get("source", "result")
     if source not in ("result", "owner_model"):
         raise ValueError("source must be result or owner_model")
@@ -725,9 +804,10 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
         return _unavailable_field_page(
             exc, result_ref=ref, source=source, step=step, sanitize=sanitize,
         )
-    offset, limit = params.get("offset", 0), params.get("limit", DEFAULT_PAGE_ITEMS)
-    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
-        raise ValueError("offset must be nonnegative and limit must be between 1 and 20")
+    offset, requested_limit = params.get("offset", 0), params.get("limit", DEFAULT_PAGE_ITEMS)
+    if type(offset) is not int or offset < 0 or type(requested_limit) is not int or requested_limit < 1:
+        raise ValueError("offset must be a nonnegative integer and limit must be a positive integer")
+    limit = min(requested_limit, MAX_PAGE_ITEMS)
     members = list(value.items()) if isinstance(value, dict) else list(enumerate(value)) if isinstance(value, list) else [(None, value)]
     lookup = {}
     continuation_filters = {}
@@ -772,6 +852,9 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                            "resultRef": ref, "source": source, "sourceStep": step["index"], "sourceTool": step["tool"],
                            "jsonPointer": pointer, "offset": offset, "totalItems": len(members),
                            "items": [], "redactedFields": 0, "hasMore": False, "previewTruncated": False}
+    if limit != requested_limit:
+        page.update(requestedLimit=requested_limit, effectiveLimit=limit,
+                    maxPageItems=MAX_PAGE_ITEMS, limitReducedBy=requested_limit - limit)
     if lookup:
         page["lookup"] = lookup
     if source == "result" and host_verification is not None:
@@ -815,21 +898,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
                     "limit": limit, "textOffset": end}}
             return candidate
 
-        if len(text) - start <= MAX_PAGE_CHARS:
-            complete = text_page(len(text))
-            if _size(complete) <= MAX_PAGE_CHARS:
-                return complete
-        low, high = start, min(len(text), start + MAX_PAGE_CHARS)
-        while low < high:
-            middle = (low + high + 1) // 2
-            if _size(text_page(middle)) <= MAX_PAGE_CHARS:
-                low = middle
-            else:
-                high = middle - 1
-        result = text_page(low)
-        if _size(result) > MAX_PAGE_CHARS or low == start < len(text):
-            raise ValueError("Text page metadata exceeds the page budget; select a narrower field")
-        return result
+        return _fit_text_page(start, len(text), text_page)
     cursor = offset
     for key, child in members[offset:]:
         if len(page["items"]) >= limit:

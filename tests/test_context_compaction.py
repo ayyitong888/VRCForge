@@ -431,6 +431,29 @@ class ContextCompactionTests(unittest.TestCase):
 
 
 class ContextCompactionRouteTests(unittest.TestCase):
+    @patch("dashboard_server.request_llm_plan_with_metadata")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_manual_fallback_grounds_goal_in_original_user_message(self, mock_settings, mock_provider) -> None:
+        mock_settings.return_value = SimpleNamespace(llm_provider="deepseek", llm_api_key="fixture", llm_model="fixture")
+        mock_provider.return_value = SimpleNamespace(text='{"nodes":{}}')
+        original = "  Use the pinned attachment.\r\n"
+        request = dashboard_server.AgentCompactRequest(history=[
+            {"role": "user", "text": original.strip() + "\nAttachment listing", "sourceText": original,
+             "messageId": "source-user", "handoffAttachments": [
+                 {"name": "material.png", "type": "image/png", "size": 128, "payloadHash": "fixture"},
+             ]},
+            {"role": "agent", "text": "Earlier inspection."},
+        ])
+        result = dashboard_server.app_agent_compact(request)
+        self.assertTrue(result["ok"], result.get("fallbackReason"))
+        prompt = mock_provider.call_args.args[1]
+        inputs = json.loads(prompt.split("\nTASK_INPUTS=", 1)[1].split("\nPRIOR_HANDOFF=", 1)[0])
+        self.assertEqual(inputs[0]["id"], "source-user")
+        self.assertTrue(inputs[0]["text"].startswith(original))
+        self.assertIn('vrcforge_read_tool_result(messageId="source-user")', inputs[0]["text"])
+        graph = json.loads(result["summary"])
+        self.assertEqual(graph["nodes"]["original-objective"]["text"], original)
+
     @patch("dashboard_server.load_dashboard_settings")
     def test_manual_route_without_api_key_keeps_original_history(self, mock_load_settings) -> None:
         mock_load_settings.return_value = SimpleNamespace(
