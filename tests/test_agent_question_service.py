@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,33 @@ def _service(root: Path, lock: threading.RLock, resolved: list[tuple[str, str]])
             or {"ok": True, "questionId": question_id}
         ),
     )
+
+
+def test_retired_tool_loop_pause_is_read_only_history_and_does_not_block(tmp_path: Path) -> None:
+    original = os.environ.get("VRCFORGE_OLD_LOOP_QUESTION_REPLAY")
+    old = json.loads(Path(original).read_text(encoding="utf-8-sig"))["questions"][0] if original else {
+        "event": "question_created", "questionId": "legacy-pause", "status": "pending",
+        "sourceTool": "runtime_tool_loop", "blocking": True, "question": "Runtime diagnostic",
+        "sessionId": "session", "projectRoot": r"E:\Project", "originClientTurnId": "turn",
+    }
+    answered = {**old, "questionId": "answered", "event": "question_answered",
+                "status": "answered", "answer": "Genuine recorded answer"}
+    live = {**old, "questionId": "live", "sourceTool": "vrcforge_ask_user", "question": "Genuine question"}
+    service = _service(tmp_path, threading.RLock(), [])
+    service.log_path.write_text("".join(json.dumps(row) + "\n" for row in [old, answered, live]), encoding="utf-8")
+    before = service.log_path.read_bytes()
+    scope = {"session_id": old["sessionId"], "project_root": old["projectRoot"]}
+    assert [row["questionId"] for row in service.list(limit=0, include_answered=True, keep_active=True, **scope)["questions"]] == ["live"]
+    history = {row["questionId"]: row for row in service.list(include_answered=True, **scope)["questions"]}
+    retired = history[old["questionId"]]
+    assert retired["retiredLoopPause"] is True
+    assert retired["status"] == "cancelled" and not retired["needsUserAction"]
+    assert retired["originClientTurnId"] == old["originClientTurnId"]
+    assert "question" not in retired and "options" not in retired
+    assert history["answered"]["answer"] == "Genuine recorded answer"
+    with pytest.raises(AgentQuestionServiceError, match="stopped"):
+        service.answer(old["questionId"], {**scope, "answer": "continue"})
+    assert service.log_path.read_bytes() == before
 
 
 def test_question_service_is_a_narrow_independent_owner(tmp_path: Path) -> None:

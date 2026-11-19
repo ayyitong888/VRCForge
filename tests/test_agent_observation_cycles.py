@@ -2,11 +2,14 @@
 
 from contextlib import nullcontext
 import json
-import threading
+from threading import Event
 
 import pytest
 
 from agent_gateway import AgentGateway
+from agent_general_no_progress import LOOP_REMINDER
+from agent_runtime_session_state import NATIVE_RUNTIME_STATE_PREFIX
+from responses_native_protocol import build_responses_input
 from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata, RuntimePlannerService
 from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntimePlannerDesktop
 
@@ -134,31 +137,38 @@ def _run(gateway, tmp_path):
     })
 
 
-def _assert_paused_question(gateway, result):
+def _assert_stalled_without_question(gateway, result, *, session_id="observation-cycle-session"):
     plan = result["plan"]
-    assert plan["nextStep"] == "paused", result
+    assert plan["nextStep"] == "loop_suppressed", result
     assert plan["reason"] == "tool_loop_repeated", result
-    question_id = plan["loopPause"]["questionId"]
-    questions = gateway.questions.list(session_id="observation-cycle-session", include_answered=True)["questions"]
-    question = next(item for item in questions if item["questionId"] == question_id)
-    assert question["status"] == "pending"
-    assert question["sourceTool"] == "runtime_tool_loop"
-    assert [option["id"] for option in question["options"]] == ["continue", "stop"]
+    assert "loopPause" not in plan
+    assert result["turnStatus"]["status"] == "failed"
+    assert result["turnStatus"]["error"]["code"] == "tool_loop_repeated"
+    questions = gateway.questions.list(session_id=session_id, include_answered=True)["questions"]
+    assert not questions
 
 
 def _assert_reminder(native, model, request_index):
-    reminder = "最近几次调用结果没有变化，可能在原地打转。请检查写入是否生效，或换一种方法。"
     request = model.requests[request_index]
     if native:
-        hidden = [message for message in request["messages"]
-                  if message.get("role") == "user" and message.get("hidden") is True]
-        assert [message["content"] for message in hidden].count(reminder) == 1
+        messages = request["messages"]
+        reminders = [message for message in messages if LOOP_REMINDER in str(message.get("content") or "")]
+        assert len(reminders) == 1
+        assert reminders[0]["role"] == "system"
+        assert json.loads(reminders[0]["content"].removeprefix(NATIVE_RUNTIME_STATE_PREFIX))["toolLoopReminder"] == LOOP_REMINDER
+        for role in ("developer", "system"):
+            wire = build_responses_input(messages, system_role=role)
+            projected = [item for item in wire if LOOP_REMINDER in str(item.get("content") or "")]
+            assert len(projected) == 1 and projected[0]["role"] == role
     else:
-        assert request.count(reminder) == 1
+        state_line = next(line for line in request.splitlines() if line.startswith("Current operation state (data): "))
+        assert json.loads(state_line.removeprefix("Current operation state (data): "))["toolLoopReminder"] == LOOP_REMINDER
+        assert request.count(LOOP_REMINDER) == 1
+        assert f"用户: {LOOP_REMINDER}" not in request
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
-def test_ab_cycle_reminds_on_fifth_read_and_pauses_on_sixth(tmp_path, native):
+def test_ab_cycle_reminds_on_fifth_read_and_stops_on_sixth(tmp_path, native):
     paths = ("a.txt", "b.txt") * 3
     gateway, model, calls = _gateway_case(tmp_path, native=native, paths=paths, changing_results=False)
 
@@ -175,7 +185,7 @@ def test_ab_cycle_reminds_on_fifth_read_and_pauses_on_sixth(tmp_path, native):
     ]
     assert len(model.requests) == 6
     _assert_reminder(native, model, 5)
-    _assert_paused_question(gateway, result)
+    _assert_stalled_without_question(gateway, result)
     if native:
         for call_index in range(1, 6):
             call_id = f"read-{call_index}"
@@ -193,7 +203,7 @@ def test_ab_cycle_reminds_on_fifth_read_and_pauses_on_sixth(tmp_path, native):
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
-def test_abc_cycle_reminds_on_seventh_read_and_pauses_on_eighth(tmp_path, native):
+def test_abc_cycle_reminds_on_seventh_read_and_stops_on_eighth(tmp_path, native):
     paths = ("a.txt", "b.txt", "c.txt") * 2 + ("a.txt", "b.txt")
     gateway, model, calls = _gateway_case(tmp_path, native=native, paths=paths, changing_results=False)
 
@@ -210,7 +220,7 @@ def test_abc_cycle_reminds_on_seventh_read_and_pauses_on_eighth(tmp_path, native
     ]
     assert len(model.requests) == 8
     _assert_reminder(native, model, 7)
-    _assert_paused_question(gateway, result)
+    _assert_stalled_without_question(gateway, result)
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
@@ -235,50 +245,25 @@ def test_alternating_reads_with_new_results_are_allowed_to_finish(tmp_path, nati
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
-def test_loop_pause_stop_does_not_dispatch_another_model_request(tmp_path, native):
+def test_llm_child_reports_stalled_work_to_its_parent_without_asking_the_user(tmp_path, native):
+    session_id = "loop-child-session"
     paths = ("a.txt", "b.txt") * 3
     gateway, model, calls = _gateway_case(tmp_path, native=native, paths=paths, changing_results=False)
-
     try:
-        paused = _run(gateway, tmp_path)
-        question_id = paused["plan"]["loopPause"]["questionId"]
-        answered = gateway.questions.answer(question_id, {
-            "sessionId": "observation-cycle-session",
-            "selectedOptionId": "stop",
-        })
+        child = gateway.run_sub_agent_llm(
+            task="Check the supplied files.",
+            child_session_id=session_id,
+            system_prompt="Use the available read-only evidence.",
+            project_path=str(tmp_path),
+            max_steps=12,
+            cancel_event=Event(),
+        )
     finally:
         gateway.shutdown_runtime_continuations(0)
 
     assert calls == list(paths)
     assert len(model.requests) == 6
-    assert answered["question"]["selectedOptionId"] == "stop"
-    assert answered["question"]["runtimeContinuationStatus"] == "settled_without_dispatch"
-
-
-@pytest.mark.parametrize("native", [False, True], ids=["legacy", "native"])
-def test_loop_pause_continue_dispatches_one_turn_without_replaying_reads(tmp_path, native):
-    paths = ("a.txt", "b.txt") * 3
-    gateway, model, calls = _gateway_case(tmp_path, native=native, paths=paths, changing_results=False)
-    completed = []
-    completed_event = threading.Event()
-    gateway._runtime_turn_completed = lambda payload: (completed.append(payload), completed_event.set())
-
-    try:
-        paused = _run(gateway, tmp_path)
-        question_id = paused["plan"]["loopPause"]["questionId"]
-        answered = gateway.questions.answer(question_id, {
-            "sessionId": "observation-cycle-session",
-            "selectedOptionId": "continue",
-        })
-        assert answered["question"]["runtimeContinuationStatus"] in {"queued", "claimed", "delivered"}
-        assert completed_event.wait(5), gateway.questions.list(
-            session_id="observation-cycle-session", include_answered=True,
-        )
-        assert gateway.shutdown_runtime_continuations(5)["ok"]
-    finally:
-        gateway.shutdown_runtime_continuations(0)
-
-    assert calls == list(paths)
-    assert len(model.requests) == 7
-    assert completed and completed[0]["continuationSource"] == "question_answered"
-    assert completed[0]["plan"]["nextStep"] == "done"
+    _assert_reminder(native, model, 5)
+    _assert_stalled_without_question(gateway, child["rawResult"], session_id=session_id)
+    assert child["ok"] is False and child["status"] == "failed"
+    assert child["finalReport"] == child["rawResult"]["plan"]["reply"]

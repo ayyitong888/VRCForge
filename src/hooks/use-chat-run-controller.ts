@@ -1446,6 +1446,7 @@ export function useChatRunController({
         attachments: turn.attachments,
         clientTurnId: turn.id,
         createdAt: new Date(startedAt).toISOString(),
+        ...(turn.goalDelivery ? { goalDeliveryId: turn.goalDelivery.deliveryId } : {}),
         ...(presentingFollowup ? {
           queuedFrom: true,
           composerQueued: true,

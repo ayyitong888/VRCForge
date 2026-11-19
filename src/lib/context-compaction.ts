@@ -1,5 +1,6 @@
 import type { ConversationItem } from "./chat-types";
 import type { AgentContextUsage, CompactionRecoveryEntry } from "./api/types";
+import type { ChatHistoryEntry } from "./api/agent-runtime";
 
 export function normalizeCompactionRecovery(value: unknown): CompactionRecoveryEntry[] {
   const candidates = Array.isArray(value) ? value : value ? [value] : [];
@@ -112,6 +113,7 @@ export type CompactionFingerprintAttachment = {
 
 export type CompactionHistoryEntry = {
   role: "user" | "agent";
+  authorRole?: ChatHistoryEntry["authorRole"];
   text: string;
   attachments?: readonly CompactionFingerprintAttachment[];
 };
@@ -619,6 +621,7 @@ export function fingerprintCompactionSource(
   };
   history.forEach((entry, entryIndex) => {
     write(`${entryIndex}\u001f${entry.role}\u001f${entry.text.length}\u001f${entry.text}\u001e`);
+    if (entry.authorRole) write(`author\u001f${entry.authorRole}\u001e`);
     (entry.attachments || []).forEach((attachment, attachmentIndex) => {
       write(
         `${attachmentIndex}\u001f${attachment.name || ""}\u001f${attachment.type || ""}\u001f` +

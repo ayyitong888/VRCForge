@@ -13,6 +13,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
+from agent_runtime_input import RuntimeInputSource, classify_history, legacy_goal_input_ids
 from channel_turn_coordinator import ChannelRuntimePort, ChannelTurnCoordinator, ChannelTurnMetadata
 from channel_session_controls import ChannelSessionControls, SessionControlError
 
@@ -199,7 +200,7 @@ class ChannelRuntimeAdapter:
         chats, _ = await self._load_snapshot()
         chat = self._find_chat(chats, chat_id, project_root=self._require_project(project_root))
         return [
-            {"role": "user" if row["role"] == "user" else "assistant", "content": row["text"]}
+            {"role": "user" if classify_history(row).is_human else "assistant", "content": row["text"]}
             for row in self._runtime_history(chat.get("items") or [])
         ]
 
@@ -586,6 +587,7 @@ class ChannelRuntimeAdapter:
     @staticmethod
     def _runtime_history(items: list[Any]) -> list[dict[str, str]]:
         history: list[dict[str, str]] = []
+        goal_input_ids = legacy_goal_input_ids(items)
         summarized_item_ids = {
             item_id
             for item in items
@@ -600,10 +602,24 @@ class ChannelRuntimeAdapter:
             if isinstance(item.get("id"), str) and item["id"] in summarized_item_ids:
                 continue
             item_type = str(item.get("type") or "")
-            if item_type == "user" and isinstance(item.get("text"), str):
+            if item_type in {"user", "question_answer"} and isinstance(item.get("text"), str):
                 text = ChannelRuntimeAdapter._user_history_text(item)
                 if text:
-                    history.append({"role": "user", "text": text})
+                    entry = {"role": "user", "text": text}
+                    if item_type == "user":
+                        forwarded = item.get("forwardedFrom")
+                        source = classify_history({
+                            "role": "user",
+                            "forwardedByAgent": item.get("forwardedByAgent") is True
+                            or (isinstance(forwarded, dict)
+                                and isinstance(forwarded.get("sourceChatId"), str)
+                                and bool(forwarded["sourceChatId"].strip())),
+                            "goalDeliveryId": item.get("goalDeliveryId")
+                            or (isinstance(item.get("id"), str) and item["id"] in goal_input_ids),
+                        })
+                        if source in {RuntimeInputSource.AGENT_RELAY, RuntimeInputSource.GOAL}:
+                            entry["authorRole"] = source.value
+                    history.append(entry)
             elif item_type == "agent":
                 response = item.get("response") if isinstance(item.get("response"), dict) else {}
                 plan = response.get("plan") if isinstance(response.get("plan"), dict) else {}

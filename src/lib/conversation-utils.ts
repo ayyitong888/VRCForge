@@ -7,7 +7,7 @@ import type {
   ProviderModelInfo,
 } from "./api";
 import { formatAttachmentSize } from "./chat-format";
-import { userMessageTextForHistory } from "./chat-relay-presentation";
+import { agentRelaySource, userMessageTextForHistory } from "./chat-relay-presentation";
 import type { ChatAttachment, ChatThread, ContextUsage, ConversationItem } from "./chat-types";
 import { isSelectedTextAttachment, SELECTED_TEXT_ATTACHMENT_NAME } from "./chat-types";
 import {
@@ -216,10 +216,14 @@ export function latestAgentContextUsage(items: ConversationItem[]): AgentContext
   return latestContextWindowUsage(items);
 }
 
-export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatHistoryEntry[] {
+export function buildChatHistory(items: ConversationItem[], t: TFunction, sourceItems = items): ChatHistoryEntry[] {
   const history: ChatHistoryEntry[] = [];
   const summarizedItemIds = new Set(items.flatMap((item) => (
     item.type === "compact" ? item.summarizedItemIds || [] : []
+  )));
+  const goalInputIds = new Set(sourceItems.flatMap((item) => (
+    item.type === "agent" && item.response.goalDeliveryId
+      ? [`goal-user-${item.response.goalDeliveryId}`] : []
   )));
   for (const item of items) {
     if (summarizedItemIds.has(item.id)) {
@@ -228,7 +232,14 @@ export function buildChatHistory(items: ConversationItem[], t: TFunction): ChatH
     if (item.type === "user") {
       const text = appendAttachmentSummary(userMessageTextForHistory(item), item.attachments || [], t).trim();
       if (text) {
-        history.push({ role: "user", text });
+        const authorRole = agentRelaySource(item) !== undefined ? "agent_relay"
+          : item.goalDeliveryId || goalInputIds.has(item.id) ? "goal" : undefined;
+        history.push({
+          role: "user",
+          text,
+          ...(authorRole ? { authorRole } : {}),
+          ...(authorRole === "agent_relay" && item.clientTurnId ? { clientTurnId: item.clientTurnId } : {}),
+        });
       }
     } else if (item.type === "question_answer") {
       const text = appendAttachmentSummary(item.text, item.attachments || [], t).trim();

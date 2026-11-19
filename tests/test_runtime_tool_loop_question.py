@@ -57,48 +57,22 @@ def _create(service: AgentQuestionService) -> dict[str, object]:
     })["question"]
 
 
-def test_tool_loop_continue_dispatches_existing_task_seed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("option_id", ["continue", "stop", "custom", "skip", "other"])
+def test_retired_tool_loop_question_cannot_dispatch_or_record_an_answer(tmp_path: Path, option_id: str) -> None:
     dispatches: list[tuple[str, dict[str, object], str]] = []
     service = _service(tmp_path, dispatches)
     question = _create(service)
 
-    answered = service.answer(str(question["questionId"]), {
-        "sessionId": "session-1", "selectedOptionId": "continue",
-    })
-
-    assert answered["runtimeContinuation"]["status"] == "queued"
-    assert len(dispatches) == 1
-    question_id, seed, prompt = dispatches[0]
-    assert question_id == question["questionId"]
-    assert seed["_toolLoopPause"] is True
-    assert seed["_authenticatedUserAnswer"] == "Continue"
-    assert "same read" in prompt
-    assert answered["question"]["runtimeContinuationStatus"] == "queued"
-
-
-def test_tool_loop_stop_settles_without_dispatch(tmp_path: Path) -> None:
-    dispatches: list[tuple[str, dict[str, object], str]] = []
-    service = _service(tmp_path, dispatches)
-    question = _create(service)
-
-    stopped = service.answer(str(question["questionId"]), {
-        "sessionId": "session-1", "selectedOptionId": "stop",
-    })
-
-    assert stopped["question"]["status"] == "answered"
-    assert stopped["question"]["runtimeContinuationStatus"] == "settled_without_dispatch"
-    assert dispatches == []
-
-
-@pytest.mark.parametrize("option_id", ["custom", "skip", "other"])
-def test_tool_loop_rejects_custom_skip_and_unlisted_answers(tmp_path: Path, option_id: str) -> None:
-    service = _service(tmp_path, [])
-    question = _create(service)
-
-    with pytest.raises(AgentQuestionServiceError, match="Choose Continue or Stop"):
+    before = service.log_path.read_bytes()
+    assert question["retiredLoopPause"] is True
+    assert service.list()["questions"] == []
+    with pytest.raises(AgentQuestionServiceError, match="stopped") as error:
         service.answer(str(question["questionId"]), {
             "sessionId": "session-1", "selectedOptionId": option_id, "answer": "anything",
         })
+    assert error.value.status_code == 409
+    assert dispatches == []
+    assert service.log_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("seed", [None, {"_toolLoopPause": False}, {"taskId": "ordinary"}])

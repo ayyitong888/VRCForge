@@ -16,7 +16,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun } from "../../lib/api";
 import { resolveAttachmentPayloadReferences, type AttachmentPayloadVault } from "../../lib/attachment-payloads";
-import { chatRunErrorKey, isFinalAssistantTimelineEvent, projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
+import { chatRunErrorKey, isFinalAssistantTimelineEvent, projectRuntimeResponseForDisplay, runtimeToolLoopMessageKey } from "../../lib/chat-timeline-presentation";
 import { agentRelaySource, displayedUserMessageText } from "../../lib/chat-relay-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
 import { isSelectedTextAttachment } from "../../lib/chat-types";
@@ -46,6 +46,8 @@ export function ConversationCard({
   steeringRevealSequence,
   initialUserContent,
   sharedProcess,
+  retiredLoopPause,
+  userMessageAuthor,
   agentReplySupplement,
   agentProcessSupplement,
   compactAgentReply = false,
@@ -87,6 +89,8 @@ export function ConversationCard({
   steeringRevealSequence?: number;
   initialUserContent?: ReactNode;
   sharedProcess?: SharedTurnProcess;
+  retiredLoopPause?: boolean;
+  userMessageAuthor?: string;
   agentReplySupplement?: ReactNode;
   agentProcessSupplement?: ReactNode;
   compactAgentReply?: boolean;
@@ -259,16 +263,18 @@ export function ConversationCard({
       );
     }
 
-    const sourceChatId = agentRelaySource(item);
-    const text = displayedUserMessageText(item);
+    const sourceChatId = userMessageAuthor ? undefined : agentRelaySource(item);
+    const text = userMessageAuthor ? item.text : displayedUserMessageText(item);
     return (
-      <div className="group flex min-w-0 justify-end" data-forwarded-by-agent={sourceChatId !== undefined ? "true" : undefined}>
-        <div className="relative flex min-w-0 max-w-[78%] flex-col items-end gap-1.5">
+      <div className={cn("group flex min-w-0", userMessageAuthor ? "justify-start" : "justify-end")} data-forwarded-by-agent={sourceChatId !== undefined ? "true" : undefined}>
+        <div className={cn("relative flex min-w-0 max-w-[78%] flex-col gap-1.5", userMessageAuthor ? "items-start" : "items-end")}>
+          {userMessageAuthor ? <span className="px-1 text-xs text-muted-foreground" data-user-message-author>{userMessageAuthor}</span> : null}
           <AgentRelayAttribution sourceChatId={sourceChatId} lookupChatTitle={lookupChatTitle} onOpenChatById={onOpenChatById} />
           {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} /> : null}
           <UserSelectedTextAttachments attachments={otherAttachments} />
           {text ? (
-            <div className="min-w-0 max-w-full rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20 [&_.chat-markdown]:[overflow-wrap:anywhere]" data-user-message-bubble data-chat-quote-content>
+            <div className={cn("min-w-0 max-w-full rounded-2xl px-4 py-2 text-chat-body text-foreground [&_.chat-markdown]:[overflow-wrap:anywhere]",
+              userMessageAuthor ? "bg-muted/70" : "bg-primary/[0.14] dark:bg-primary/20")} data-user-message-bubble data-chat-quote-content>
               <UserMessageText text={text} />
             </div>
           ) : null}
@@ -278,7 +284,7 @@ export function ConversationCard({
             </div>
           ) : null}
           <MessageActions
-            align="right"
+            align={userMessageAuthor ? "left" : "right"}
             createdAt={item.createdAt}
             metadata={deliveryMetadata}
             onCopy={onCopyItem ? () => onCopyItem({ ...item, text }) : undefined}
@@ -493,7 +499,8 @@ export function ConversationCard({
     );
   }
 
-  const response = projectRuntimeResponseForDisplay(item.response, (key) => t(key));
+  const loopStop = runtimeToolLoopMessageKey(item.response, retiredLoopPause);
+  const response = projectRuntimeResponseForDisplay(item.response, (key) => t(key), retiredLoopPause);
   const sessionId = response.sessionId || response.session_id;
   const clientTurnId = response.clientTurnId || "";
   const resourceImageContext = chatResourceImageContext && sessionId && clientTurnId
@@ -510,7 +517,7 @@ export function ConversationCard({
   // backend does not report an actual model.
   const approvalWaitWithoutReply = response.plan.completionGate?.reason === "approval_pending"
     && !response.plan.reply?.trim() && !response.timeline?.some(isFinalAssistantTimelineEvent);
-  const providerLine = compactAgentReply || approvalWaitWithoutReply ? "" : formatRuntimeModelLine("", response.model);
+  const providerLine = compactAgentReply || approvalWaitWithoutReply || loopStop ? "" : formatRuntimeModelLine("", response.model);
   const replySource = providerLine;
   const showReplyActions = !sharedProcess || sharedProcess.last;
   const awaitingApproval = shell?.status === "pending_approval";

@@ -1078,6 +1078,7 @@ export type AgentQuestion = {
   status?: "pending" | "answered" | "cancelled" | string;
   /** Server-derived authority that this question currently blocks its agent run. */
   needsUserAction?: boolean;
+  retiredLoopPause?: boolean;
   answer?: string;
   selectedOptionId?: string;
   attachments?: AgentMessageAttachment[];

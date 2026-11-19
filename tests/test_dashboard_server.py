@@ -7487,9 +7487,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(calls, [tool] * 4)
         self.assertEqual(planner_calls, 4)
         self.assertEqual(len(payload["steps"]), 4)
-        self.assertEqual(payload["plan"]["nextStep"], "paused")
+        self.assertEqual(payload["plan"]["nextStep"], "loop_suppressed")
         self.assertEqual(payload["plan"]["reason"], "tool_loop_repeated")
-        self.assertTrue(payload["plan"]["loopPause"]["questionId"])
+        self.assertNotIn("loopPause", payload["plan"])
 
     def test_runtime_loop_distinguishes_two_write_tools_with_same_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7593,7 +7593,7 @@ class DashboardServerTests(unittest.TestCase):
             payload = gateway.runtime_message({"message": "exercise bounded failure"})
 
         self.assertEqual(len(payload["steps"]), 4)
-        self.assertEqual(payload["plan"]["nextStep"], "paused")
+        self.assertEqual(payload["plan"]["nextStep"], "loop_suppressed")
         self.assertEqual(payload["plan"]["reason"], "tool_loop_repeated")
         self.assertTrue(all(step["status"] == "failed" for step in payload["steps"]))
 

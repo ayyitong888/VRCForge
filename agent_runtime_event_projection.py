@@ -306,7 +306,9 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
             for item in public_messages[:256]
             if isinstance(item, Mapping) and isinstance(item.get("text"), str)
         ]
-    if plan.get("reason") in ("native_final_answer_missing", "sub_agent_pending"):
+    if (plan.get("reason") in ("native_final_answer_missing", "sub_agent_pending")
+            or plan.get("nextStep") == "loop_suppressed" and plan.get("reason") in (
+                "tool_loop_repeated", "tool_loop_no_progress", "tool_loop_write_unverified")):
         result["plan"]["reason"] = plan["reason"]
     if source == "foreground_interrupted":
         result["status"] = "blocked" if completion.get("status") == "waiting_user" else "interrupted"

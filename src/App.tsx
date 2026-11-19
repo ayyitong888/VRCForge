@@ -1301,6 +1301,7 @@ export default function App() {
             {
               id: delivery.userItemId,
               type: "user",
+              goalDeliveryId: delivery.deliveryId,
               text: resumePrompt,
               attachments: [],
               ...(delivery.createdAt ? { createdAt: delivery.createdAt } : {}),

@@ -293,16 +293,47 @@ export function projectApprovalWaitDialogue(response: AgentRuntimeResponse): Age
   };
 }
 
-/**
- * Replace app-owned terminal prose using the structured failure code. The final
- * assistant event is the visible/copyable projection; earlier execution evidence
- * remains untouched and raw provider/model text is never used to classify it.
- */
+export function runtimeToolLoopMessageKey(
+  response: AgentRuntimeResponse,
+  retiredLoopPause?: boolean,
+): string | undefined {
+  if (retiredLoopPause && response.plan.nextStep === "paused") return "chat.runtimeTerminal.loopStoppedMessage";
+  if (response.plan.nextStep !== "loop_suppressed") return undefined;
+  if (response.plan.reason === "tool_loop_write_unverified") return "chat.runtimeTerminal.loopWriteUnverifiedMessage";
+  if (response.plan.reason === "tool_loop_repeated" || response.plan.reason === "tool_loop_no_progress") {
+    return "chat.runtimeTerminal.loopStoppedMessage";
+  }
+  return undefined;
+}
+
+/** Project app-owned terminal messages while preserving model dialogue and execution evidence. */
 export function projectRuntimeResponseForDisplay(
   response: AgentRuntimeResponse,
   translate: RuntimePresentationTranslator,
+  retiredLoopPause?: boolean,
 ): AgentRuntimeResponse {
   response = projectApprovalWaitDialogue(response);
+  const loopStop = runtimeToolLoopMessageKey(response, retiredLoopPause);
+  if (loopStop) {
+    const displayText = translate(loopStop);
+    return {
+      ...response,
+      plan: { ...response.plan, reply: displayText, summary: "" },
+      timeline: response.timeline?.map((event) => {
+        if (isFinalAssistantTimelineEvent(event) && !event.payload?.messageId
+          && event.payload?.status === response.plan.nextStep) {
+          return { ...event, payload: { ...event.payload, summary: displayText } };
+        }
+        if (retiredLoopPause && event.kind === "tool_result"
+          && /^when[- ]to[- ]use\s*:/i.test(event.payload?.summary || "")) {
+          // Older loop stops copied a registry tool description into the
+          // receipt summary. Retain the invocation and the actual result.
+          return { ...event, payload: { ...event.payload, summary: "" } };
+        }
+        return event;
+      }),
+    };
+  }
   // Older turns persisted the automatic wait as a final assistant event.
   if (response.plan.nextStep === "waiting_for_tool" && response.plan.completionGate?.reason === "action_not_terminal") {
     return {

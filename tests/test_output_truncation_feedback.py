@@ -1,6 +1,6 @@
 import json
 
-from agent_output_truncation import OutputTruncation
+from agent_output_truncation import OUTPUT_FEEDBACK_PREFIX, OutputTruncation
 
 
 class _State:
@@ -34,7 +34,7 @@ def test_truncated_batch_feedback_includes_completed_call_identity_arguments_and
 
     truncation.flush_feedback(turn)
 
-    feedback = json.loads(turn.hidden[0].split("：", 1)[1])
+    feedback = json.loads(turn.hidden[0].removeprefix(OUTPUT_FEEDBACK_PREFIX))
     settled = feedback["settledCalls"][0]
     assert settled == {
         "id": "c1", "name": "vrcforge_read_text_file", "arguments": '{"path":"E:/notes.txt"}',
@@ -57,7 +57,7 @@ def test_truncated_batch_completed_failure_has_safe_reason_suggestion_and_fronte
 
     truncation.flush_feedback(turn)
 
-    feedback = json.loads(turn.hidden[0].split("：", 1)[1])
+    feedback = json.loads(turn.hidden[0].removeprefix(OUTPUT_FEEDBACK_PREFIX))
     settled = feedback["settledCalls"][0]
     assert settled["name"] == "vrcforge_read_text_file"
     assert settled["arguments"] == '{"path":"E:/notes.txt"}'
@@ -83,7 +83,7 @@ def test_truncated_batch_unwraps_completed_call_tool_arguments_for_feedback():
 
     truncation.flush_feedback(turn)
 
-    feedback = json.loads(turn.hidden[0].split("：", 1)[1])
+    feedback = json.loads(turn.hidden[0].removeprefix(OUTPUT_FEEDBACK_PREFIX))
     settled = feedback["settledCalls"][0]
     assert settled["name"] == "vrcforge_read_text_file"
     assert json.loads(settled["arguments"]) == {"path": "E:/notes.txt"}
@@ -99,7 +99,7 @@ def test_truncated_batch_failure_uses_nonempty_safe_fallback_when_diagnostics_mi
 
     truncation.flush_feedback(turn)
 
-    feedback = json.loads(turn.hidden[0].split("：", 1)[1])
+    feedback = json.loads(turn.hidden[0].removeprefix(OUTPUT_FEEDBACK_PREFIX))
     settled = feedback["settledCalls"][0]
     assert settled["status"] == "error"
     assert settled["reason"]

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
+import {readFileSync} from 'node:fs';
 const user=(id)=>({id:'user-'+id,type:'user',clientTurnId:id,text:id});
 const owner={id:'opaque-owner',sessionId:'runtime-owner',title:'Existing owner',projectPath:'',items:[user('parent')]};
 const other={id:'active-other',sessionId:'runtime-other',title:'Other visible chat',projectPath:'',items:[]};
@@ -10,6 +11,11 @@ const pending={...entry,sessionId:'opaque-owner',clientTurnId:'input',status:'pe
 const restoredUser={...user('input'),queuedFrom:true,composerQueued:true,queueStatus:'delivery_unverified',queueEnvelope:{queueId:pending.queueId,sessionId:owner.sessionId,laneId:owner.id}};
 const nextUser={...user('next'),queuedFrom:true,composerQueued:true,queueStatus:'paused',queueEnvelope:{...restoredUser.queueEnvelope,queueId:'next-queue'}};
 const withNext={...owner,items:[...owner.items,restoredUser,nextUser]};
+const legacyReplay=process.env.VRCFORGE_OLD_LOOP_QUESTION_REPLAY;
+const oldLoop=legacyReplay ? JSON.parse(readFileSync(legacyReplay,'utf8')).questions[0] : {
+  sourceTool:'runtime_tool_loop',status:'pending',blocking:true,needsUserAction:true,
+};
+const retired={...oldLoop,sessionId:owner.sessionId,status:'cancelled',blocking:false,needsUserAction:false,retiredLoopPause:true};
 const scenarios=[
  {name:'rejection',chats:[owner,other],entries:[pending]},
  {name:'unknown',chats:[owner,other],entries:[pending]},
@@ -17,6 +23,8 @@ const scenarios=[
  {name:'questions-race',chats:[withNext,other],entries:[]},
  {name:'queue-race',chats:[withNext,other],entries:[]},
  {name:'waiting-child',chats:[owner,other],entries:[pending]},
+ {name:'retired-loop',chats:[owner,other],entries:[pending],questions:[retired]},
+ {name:'active-question',chats:[owner,other],entries:[pending],questions:[{...oldLoop,sessionId:owner.sessionId,sourceTool:'vrcforge_ask_user'}]},
 ];
 const api=`
 export const listAgentRunFollowups=async()=>({ok:true,items:window.fixture.entries});
@@ -25,7 +33,7 @@ const holdBoundary=async(name)=>{
 };
 export const fetchAgentQuestions=async()=>{
   await holdBoundary('questions-race');
-  return {ok:true,questions:[]};
+  return {ok:true,questions:window.fixture.questions||[]};
 };
 export const cancelAgentRunFollowup=async()=>({ok:true,status:'cancelled'});
 export const issueComputerUseTurnGrant=async()=>null;
@@ -38,7 +46,7 @@ export const recordAgentRunQueued=async()=>{
 export const sendAgentMessage=async(_e,_m,sessionId,_h,_a,options)=>{
   window.sends.push({sessionId,clientTurnId:options.clientTurnId});
   if(window.fixture.name==='unknown')throw new Error('Transport response lost');
-  if(window.sends.length===1&&window.fixture.name!=='waiting-child')throw new window.ApiError('HTTP 409',409,{code:'followup_admission_rejected',message:'not admitted'});
+  if(window.sends.length===1&&!['waiting-child','retired-loop'].includes(window.fixture.name))throw new window.ApiError('HTTP 409',409,{code:'followup_admission_rejected',message:'not admitted'});
   return {ok:true,sessionId,clientTurnId:options.clientTurnId,turnId:'successful-retry',startedAt:new Date().toISOString(),observe:{},plan:{reply:'done',summary:'done',nextStep:'done',planner:'fixture',shellNeeded:false},timeline:[]};
 };`;
 const bundle=await build({stdin:{resolveDir:process.cwd(),loader:'tsx',contents:`
@@ -70,6 +78,19 @@ try {
  await page.evaluate(()=>{window.childDelivered=true;return window.controller.resumeQueuedTurns();});
  await page.waitForFunction(()=>window.sends.length===1&&window.chats.some(c=>c.items.some(i=>i.type==='agent')));
  assert.equal(await page.evaluate(()=>window.controller.queued.length),0);
+
+ for(const name of ['retired-loop','active-question']) {
+   await page.goto(`http://127.0.0.1:${server.address().port}/?case=${name}`);
+   await page.waitForFunction(()=>window.controller);
+   if(name==='retired-loop'){
+     await page.waitForFunction(()=>window.sends.length===1&&window.chats.some(c=>c.items.some(i=>i.type==='agent')));
+     assert.equal(await page.evaluate(()=>window.controller.queued.length),0);
+   }else{
+     await page.waitForFunction(()=>window.controller.queued.length===1);
+     await page.evaluate(()=>window.controller.resumeQueuedTurns());
+     assert.equal(await page.evaluate(()=>window.sends.length),0);
+   }
+ }
 
  for(const name of ['unknown','recovered']) {
    await page.goto(`http://127.0.0.1:${server.address().port}/?case=${name}`);

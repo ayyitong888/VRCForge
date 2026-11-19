@@ -74,6 +74,29 @@ def test_child_uses_real_runtime_loop_for_two_readonly_tools_then_final(tmp_path
     assert result["stepCount"] <= 4
 
 
+@pytest.mark.parametrize("source", ["parent_agent", "user", "retry"])
+def test_child_input_credits_its_author_and_keeps_selected_materials_separate(tmp_path, source):
+    gateway, model, _ = _child_gateway(tmp_path, [{"role": "assistant", "content": "Reviewed."}])
+    task = "Review the reference from the selected folder."
+    reference = "Example excerpt from the project."
+    result = _run(gateway, tmp_path, task=task, task_source=source,
+                  selected_materials=[{"text": reference}])
+    assert result["ok"]
+    messages = model.requests[0]["messages"]
+    task_message = next(item for item in messages if item["role"] == "user" and task in item["content"])
+    with gateway.runtime_planner.bind_turn({"model": "fixture-child-model", "projectRoot": str(tmp_path)}):
+        binding = gateway.runtime_planner.native_conversation_binding(str(tmp_path))
+    snapshot = gateway._runtime_session_state.native_conversation("child-session-1", binding=binding)
+    human = [snapshot["messages"][index]["content"] for index in snapshot["humanUserMessageIndices"]]
+    assert human == ([task] if source == "user" else [])
+    if source == "user":
+        assert task_message["content"] == task
+    else:
+        assert json.loads(task_message["content"].split(": ", 1)[1]) == {"source": source, "text": task}
+    assert reference not in task_message["content"]
+    assert any(item["role"] == "user" and reference in item["content"] for item in messages)
+
+
 @pytest.mark.parametrize("has_project", [True, False])
 def test_native_child_project_read_rejects_foreign_alias_or_missing_parent_project(tmp_path, has_project):
     from agent_gateway import AgentGatewayError
@@ -161,10 +184,12 @@ def test_delegated_child_uses_parent_general_read_scope_not_model_text(tmp_path,
         "vrcforge_delegate_subagent", "Delegate scoped read.", "plan/preview", server.delegate_sub_agent_runtime,
     )
     try:
-        gateway.runtime_message({
+        import asyncio
+        from dashboard_api_models import AgentRuntimeMessageRequest
+        asyncio.run(server._execute_app_agent_runtime_message(AgentRuntimeMessageRequest(**{
             "message": f"Delegate reading files under {outside}" if granted else "Delegate a bounded read.",
             "sessionId": "parent-session", "projectRoot": str(project),
-        })
+        }), human_user_message=True))
         task_id = service.list_tasks()["tasks"][0]["id"]
         service._registry._threads[task_id].join(5)
         assert not service._registry._threads[task_id].is_alive()
@@ -219,6 +244,7 @@ def test_parent_omitting_role_runs_general_readonly_child_without_project(tmp_pa
         task = service.list_tasks()["tasks"][0]
         service._registry._threads[task["id"]].join(5)
         detail = service.get_task(task["id"])
+        assert detail["task"]["taskSource"] == task["taskSource"] == "parent_agent"
         assert detail["task"]["role"] == SubAgentCreateRequest(**request).role == "llm_readonly"
         assert detail["task"]["projectPath"] == ""
         assert detail["task"]["status"] == "completed", detail["task"]

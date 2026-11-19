@@ -11,6 +11,8 @@ export type ChatHistoryEntry = {
   role: "user" | "agent";
   text: string;
   subAgentTaskId?: string;
+  clientTurnId?: string;
+  authorRole?: "agent_relay" | "goal";
 };
 
 export type AgentHistoryContextBudget = {

@@ -218,7 +218,7 @@ def test_no_progress_loop_lands_terminal(tmp_path: Path) -> None:
         })
 
     assert planner_calls == 4
-    assert result["plan"]["nextStep"] == "paused"
+    assert result["plan"]["nextStep"] == "loop_suppressed"
     assert result["plan"]["reason"] == "tool_loop_repeated"
 
     gateway, model, _invoked = _write_gateway_for_mode(project, [
@@ -236,7 +236,7 @@ def test_no_progress_loop_lands_terminal(tmp_path: Path) -> None:
 
 
 def test_identical_successful_calls_trip_the_general_no_progress_guard(tmp_path: Path) -> None:
-    """An identical successful web read also pauses after a reminder."""
+    """An identical successful web read also terminates after a reminder."""
     from unittest.mock import patch
 
     from tests.test_native_permission_modes import _write_gateway_for_mode
@@ -273,7 +273,7 @@ def test_identical_successful_calls_trip_the_general_no_progress_guard(tmp_path:
             "_projectContextActive": True,
         })
 
-    assert result["plan"]["nextStep"] == "paused"
+    assert result["plan"]["nextStep"] == "loop_suppressed"
     assert result["plan"]["reason"] == "tool_loop_repeated"
     assert planner_calls == 4
 

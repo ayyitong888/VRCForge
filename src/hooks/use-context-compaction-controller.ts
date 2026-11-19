@@ -214,7 +214,7 @@ export function useContextCompactionController({
     const summarizedIds = new Set(sourceMarker?.type === "compact" ? sourceMarker.summarizedItemIds || [] : []);
     const summarySourceItems = snapshotItems.filter((item) => summarizedIds.has(item.id));
     const summaryHistory = [
-      ...buildChatHistory(summarySourceItems, t),
+      ...buildChatHistory(summarySourceItems, t, snapshotItems),
       ...buildDurableCompactionStateEntries(summarySourceItems),
     ];
     const summaryTargetTokens = (decision.targetAfterTokens ?? 0)

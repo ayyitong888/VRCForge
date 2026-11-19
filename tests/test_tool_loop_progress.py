@@ -5,10 +5,10 @@ from agent_general_no_progress import ToolLoopProgress, tool_result_digest
 from agent_task_loop import canonical_action_id
 
 
-def record(progress, tool, args, result, effect="read"):
+def record(progress, tool, args, result, effect="read", *, committed=False):
     return progress.record(
-        action_id=canonical_action_id(effect, tool, args), tool=tool,
-        arguments=args, result_digest=tool_result_digest(result), status="ok", summary="", effect=effect,
+        action_id=canonical_action_id(effect, tool, args), arguments=args,
+        result_digest=tool_result_digest(result), effect=effect, committed=committed,
     )
 
 
@@ -30,6 +30,12 @@ def test_ten_unchanged_results_with_distinct_arguments_are_no_progress():
     assert not record(progress, "read", {"path": "11"}, "new evidence")
 
 
+def test_revisiting_same_index_between_distinct_findings_is_not_a_cycle():
+    progress = ToolLoopProgress()
+    for path in ("index", "coat", "index", "shirt", "index", "skirt", "index"):
+        assert not record(progress, "read", {"path": path}, {"text": path})
+
+
 def test_repeats_outside_twenty_call_window_do_not_count():
     progress = ToolLoopProgress()
     for _ in range(2):
@@ -37,6 +43,31 @@ def test_repeats_outside_twenty_call_window_do_not_count():
     for index in range(19):
         assert not record(progress, "read", {"path": str(index)}, index)
     assert not record(progress, "read", {"path": "a"}, "old")
+
+
+def test_committed_progress_starts_a_fresh_observation_cycle():
+    progress = ToolLoopProgress()
+    target = {"path": "avatar"}
+    for _ in range(2):
+        assert not record(progress, "read", target, "same avatar key")
+    assert record(progress, "read", target, "same avatar key") == "tool_loop_repeated"
+    progress.reminded_reason = "tool_loop_repeated"
+    assert not record(progress, "write", {"path": "new asset"}, {"committed": True}, "write", committed=True)
+    assert not progress.reminded_reason
+    for _ in range(2):
+        assert not record(progress, "read", target, "same avatar key")
+    assert record(progress, "read", target, "same avatar key") == "tool_loop_repeated"
+
+
+def test_replayed_commit_cannot_reset_a_genuine_repetition():
+    progress = ToolLoopProgress()
+    target = {"path": "asset"}
+    result = {"committed": True}
+    assert not record(progress, "write", target, result, "write", committed=True)
+    progress.reminded_reason = "tool_loop_repeated"
+    assert not record(progress, "write", target, result, "write", committed=True)
+    assert progress.reminded_reason == "tool_loop_repeated"
+    assert record(progress, "write", target, result, "write", committed=True) == "tool_loop_repeated"
 
 
 def test_different_writes_need_matching_readback_to_infer_no_effect():
@@ -102,7 +133,7 @@ def test_gateway_uses_readback_to_distinguish_changed_and_unchanged_writes(tmp_p
         assert [entry["value"] for entry in writes] == [1, 2, 3], result["plan"]
         outcomes.append((result["plan"]["nextStep"], result["plan"].get("reason")))
         assert len(model.requests) == (7 if changed else 6)
-    assert outcomes == [("paused", "tool_loop_write_unverified"), ("done", None)]
+    assert outcomes == [("loop_suppressed", "tool_loop_write_unverified"), ("done", None)]
 
 
 def test_marked_poll_stops_at_wait_deadline_without_reexecuting(tmp_path, monkeypatch):
@@ -134,8 +165,9 @@ def test_marked_poll_stops_at_wait_deadline_without_reexecuting(tmp_path, monkey
     assert len(invoked) == 1 and len(model.requests) == 2
 
 
-def test_native_batch_delivers_reminder_after_pairing_results_and_settles_pause(tmp_path):
+def test_native_batch_delivers_reminder_after_pairing_results_and_settles_remaining_calls(tmp_path):
     import json
+    from agent_general_no_progress import LOOP_REMINDER
     from tests.test_native_runtime_gateway import call, run, setup_gateway
 
     def batch(index):
@@ -146,7 +178,7 @@ def test_native_batch_delivers_reminder_after_pairing_results_and_settles_pause(
 
     gateway, model, invoked = setup_gateway(tmp_path, [batch(i) for i in range(4)])
     result = run(gateway, tmp_path, maxAgenticTurns=6)
-    assert result["plan"]["nextStep"] == "paused"
+    assert result["plan"]["nextStep"] == "loop_suppressed"
     assert len(invoked) == 7
     messages = next(iter(gateway.runtime_sessions._native_conversations.values()))["messages"]
     calls = {call["id"] for message in messages for call in message.get("tool_calls", [])}
@@ -154,7 +186,8 @@ def test_native_batch_delivers_reminder_after_pairing_results_and_settles_pause(
                 for message in messages if message["role"] == "tool"}
     assert calls == outcomes.keys()
     assert outcomes["b-3"]["status"] == "not_executed"
-    assert any(message.get("hidden") for message in model.requests[3]["messages"])
+    assert any(message["role"] == "system" and LOOP_REMINDER in message.get("content", "")
+               for message in model.requests[3]["messages"])
 
 
 def test_identical_completed_write_reuses_its_result_digest(tmp_path, monkeypatch):
@@ -183,7 +216,7 @@ def test_identical_completed_write_reuses_its_result_digest(tmp_path, monkeypatc
     _set_mode(gateway, "auto")
     gateway.approval_transactions.auto_approval_reviewer = lambda _: "allow_auto"
     result = run(gateway, project, maxAgenticTurns=6, message="Update the fixture once.")
-    assert result["plan"]["nextStep"] == "paused"
+    assert result["plan"]["nextStep"] == "loop_suppressed"
     assert result["plan"]["reason"] == "tool_loop_repeated"
     assert len(writes) == 1
     assert len(serialized_receipts) == 1
@@ -229,7 +262,7 @@ def test_gateway_connectivity_compares_business_facts_without_discarding_elapsed
         assert [receipt["httpStatus"] for receipt in receipts] == sent_statuses
         assert [receipt["elapsedMs"] for receipt in receipts] == list(range(100, 100 + len(receipts)))
         if root == "unchanged":
-            assert result["plan"]["nextStep"] == "paused"
+            assert result["plan"]["nextStep"] == "loop_suppressed"
             assert result["plan"]["reason"] == "tool_loop_repeated"
             assert sent_statuses == [200] * 4
         else:

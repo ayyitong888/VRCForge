@@ -34,11 +34,6 @@ class ParentChildFixtureModel:
         return request["messages"] if isinstance(request, dict) else request.messages
 
     @staticmethod
-    def _first_user_text(messages):
-        message = next((item for item in messages if item.get("role") == "user"), {})
-        return str(message.get("content") or "")
-
-    @staticmethod
     def _instructions(request):
         return str(request.get("instructions", "") if isinstance(request, dict)
                    else getattr(request, "instructions", ""))
@@ -48,7 +43,7 @@ class ParentChildFixtureModel:
         self.requests.append(snapshot)
         messages = self._messages(request)
         wire = json.dumps(messages, ensure_ascii=False)
-        child_turn = self._first_user_text(messages).startswith("Inspect both scan fixture files")
+        child_turn = "Child-only instructions" in self._instructions(request)
         if child_turn:
             assert self.parent_returned.wait(5), "parent runtime did not yield before child inference"
             index = self.child_count
@@ -198,10 +193,8 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
         assert "RAW_CHILD_SCAN_SENTINEL_" in json.dumps(sidecar, ensure_ascii=False)
         assert len(json.dumps(sidecar, ensure_ascii=False).encode("utf-8")) > 100_000
 
-        parent_requests = [request for request in model.requests
-                           if model._first_user_text(model._messages(request)).startswith("Please use the read-only specialist")]
-        child_requests = [request for request in model.requests
-                          if model._first_user_text(model._messages(request)).startswith("Inspect both scan fixture files")]
+        parent_requests = [request for request in model.requests if "Child-only instructions" not in model._instructions(request)]
+        child_requests = [request for request in model.requests if "Child-only instructions" in model._instructions(request)]
         assert len(parent_requests) >= 2
         assert len(child_requests) == 3
         parent_initial_bytes = _serialized_message_bytes(parent_requests[0])
@@ -211,6 +204,9 @@ def test_parent_runtime_receives_child_summary_while_full_scan_stays_in_sidecar(
         assert parent_added_bytes < len(large_scan.encode("utf-8"))
         assert "RAW_CHILD_SCAN_SENTINEL_" not in json.dumps(parent_requests, ensure_ascii=False)
         assert "SPECIALIST_REPORT:" in json.dumps(parent_requests[-1], ensure_ascii=False)
+        report = next(item for item in model._messages(parent_requests[-1])
+                      if item["role"] == "tool" and "SPECIALIST_REPORT:" in item["content"])
+        assert report["tool_call_id"] == "parent-delegate"
 
         parent_instructions = json.dumps([model._instructions(item) for item in parent_requests], ensure_ascii=False)
         child_instructions = json.dumps([model._instructions(item) for item in child_requests], ensure_ascii=False)

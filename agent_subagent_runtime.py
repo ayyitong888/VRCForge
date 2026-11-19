@@ -82,6 +82,7 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
                       system_prompt: str, max_steps: int, project_path: str,
                       selected_materials: list[dict], cancel_event: Event,
                       client_turn_id: str = "", is_resume: bool = False,
+                      task_source: str = "parent_agent",
                       allowed_tools: list[str] | tuple[str, ...] | None = None,
                       provider: str = "",
                       general_read_roots: tuple[str, ...] | None = None) -> dict:
@@ -89,13 +90,11 @@ def run_child_runtime(gateway: Any, *, task: str, child_session_id: str, model: 
         return {"ok": False, "status": "cancelled", "childSessionId": child_session_id,
                 "finalReport": "Request cancelled.", "rawResult": {}, "stepCount": 0}
     client_turn_id = str(client_turn_id or "").strip() or child_session_id + ":initial"
-    message = task
-    if selected_materials:
-        message += "\n\nSelected materials (quoted task data):\n" + json.dumps(selected_materials, ensure_ascii=False)
     params = {
-        "message": message, "session_id": child_session_id,
+        "message": task, "session_id": child_session_id,
         "clientTurnId": client_turn_id, "projectRoot": project_path,
         "model": model, "maxAgenticTurns": max_steps,
+        "_subAgentInputSource": task_source, "_subAgentSelectedMaterials": selected_materials,
     }
     if provider:
         params["provider"] = provider

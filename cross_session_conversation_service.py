@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 from agent_runtime_followup_queue import AGENT_RELAY_INPUT_PREFIX
+from agent_runtime_input import RuntimeInputSource, classify_history, legacy_goal_input_ids
 from background_goal_runtime import classify_runtime_plan_outcome
 
 MAX_CROSS_SESSION_AGENTIC_TURNS = 25
@@ -725,6 +726,7 @@ class CrossSessionConversationService:
     @classmethod
     def _history_before(cls, chat: Mapping[str, Any], client_turn_id: str) -> list[dict[str, Any]]:
         items = chat.get("items") if isinstance(chat.get("items"), list) else []
+        goal_input_ids = legacy_goal_input_ids(items)
         history: list[dict[str, Any]] = []
         for item in items:
             if isinstance(item, Mapping) and item.get("type") == "user" and item.get("clientTurnId") == client_turn_id:
@@ -740,9 +742,19 @@ class CrossSessionConversationService:
                     if item.get("deliveryMode") == "queue_only":
                         text = cls._note_with_source(text, source.get("sourceChatId"))
                     history.append({"role": "user", "text": text,
-                                    "authorRole": "agent_relay", "forwardedFrom": source})
+                                    "authorRole": "agent_relay", "forwardedFrom": source,
+                                    "clientTurnId": str(item.get("clientTurnId") or "")})
                 else:
-                    history.append({"role": public["role"], "text": public["text"]})
+                    entry = {"role": public["role"], "text": public["text"]}
+                    if public["role"] == "user" and item.get("type") == "user":
+                        source = classify_history({
+                            "role": "user",
+                            "goalDeliveryId": item.get("goalDeliveryId")
+                            or (isinstance(item.get("id"), str) and item["id"] in goal_input_ids),
+                        })
+                        if source is RuntimeInputSource.GOAL:
+                            entry["authorRole"] = source.value
+                    history.append(entry)
         return history
 
     def _run(self) -> None:

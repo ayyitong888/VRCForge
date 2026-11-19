@@ -14,6 +14,9 @@ from tests.test_dashboard_server import _TestRuntimePlannerCatalog, _TestRuntime
 from agent_gateway import AgentGateway
 from runtime_planner_service import PlannerModelResult, RuntimePlannerService
 from agent_runtime_native_turn import NativeRuntimeTurn
+from agent_runtime_session_state import (
+    NATIVE_RUNTIME_CONTEXT_PREFIX, NATIVE_RUNTIME_STATE_PREFIX, project_native_runtime_state_history,
+)
 
 
 def _write_gateway(tmp_path, replies, invoked):
@@ -370,6 +373,36 @@ def test_native_question_answer_continuation_keeps_pending_call_and_matches_answ
     assert results
 
 
+def test_old_question_history_keeps_answers_in_quoted_context_on_reopen():
+    task = {"objective": "fixture", "priorAnswers": [{"answer": "prior answer"}]}
+    stored = {"role": "system", "content": NATIVE_RUNTIME_STATE_PREFIX + json.dumps({
+        "questionTask": task, "executionMode": "approval"})}
+    projected = project_native_runtime_state_history([stored])
+    assert [item["role"] for item in projected] == ["system", "user"]
+    assert json.loads(projected[0]["content"].removeprefix(NATIVE_RUNTIME_STATE_PREFIX)) == {"executionMode": "approval"}
+    assert json.loads(projected[1]["content"].removeprefix(NATIVE_RUNTIME_CONTEXT_PREFIX)) == {"questionTask": task}
+    assert project_native_runtime_state_history(projected) == projected
+    assert "prior answer" in stored["content"]
+
+
+def test_model_request_restores_old_host_reminder_without_relabeling_identical_human_words(tmp_path):
+    from agent_general_no_progress import LOOP_REMINDER
+
+    gateway, model, _ = setup_gateway(tmp_path, [{"role": "assistant", "content": "Done"}] * 2)
+    params = {"sessionId": "native-session", "projectRoot": str(tmp_path), "message": LOOP_REMINDER}
+    gateway.runtime_message({**params, "clientTurnId": "first", "_humanUserMessageSource": {
+        "source": "app_user_message", "sessionId": "native-session", "clientTurnId": "first",
+        "projectRoot": str(tmp_path), "message": LOOP_REMINDER}})
+    binding = gateway.runtime_sessions._native_conversations["native-session"]["binding"]
+    gateway.runtime_sessions.append_native_user("native-session", binding=binding, message=LOOP_REMINDER, human=False, hidden=True)
+    gateway.runtime_sessions.append_native_user("native-session", binding=binding, message="fixture feedback", human=False, hidden=True)
+    gateway.runtime_message({**params, "message": "another task", "clientTurnId": "next"})
+    messages = model.requests[-1]["messages"]
+    assert [m["role"] for m in messages if m.get("content") == LOOP_REMINDER] == ["user", "system"]
+    feedback = next(m for m in messages if "fixture feedback" in str(m.get("content")))
+    assert '"source":"runtime"' in feedback["content"]
+
+
 def test_question_handoff_recovers_earlier_scope_and_continues_after_prerequisite(tmp_path):
     session = "native-session"
     scope = {"sessionId": session, "projectRoot": str(tmp_path)}
@@ -377,7 +410,12 @@ def test_question_handoff_recovers_earlier_scope_and_continues_after_prerequisit
     results = []
 
     def next_action(request):
-        task = runtime_state(request)["questionTask"]
+        assert "questionTask" not in runtime_state(request)
+        context = [json.loads(item["content"][len(NATIVE_RUNTIME_CONTEXT_PREFIX):])
+                   for item in request["messages"] if item["role"] == "user"
+                   and isinstance(item.get("content"), str)
+                   and item["content"].startswith(NATIVE_RUNTIME_CONTEXT_PREFIX)]
+        task = next(item["questionTask"] for item in reversed(context) if "questionTask" in item)
         assert task["objective"] == "Continue configuring the project"
         assert task["priorAnswers"] == [
             {"question": "Which deliverables?", "answer": "Configure the avatar and all three outfits."}

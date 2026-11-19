@@ -106,6 +106,17 @@ function withRecordedResult(turn: SubAgentTask, stored?: SubAgentTask): SubAgent
   return { ...turn, result: stored.result };
 }
 
+function taskSourceLabel(turn: SubAgentTask, t: TFunction): string | undefined {
+  if (turn.taskSource === "parent_agent") return t("subagent.parentTaskSource");
+  if (turn.taskSource === "retry") return t("subagent.retryTaskSource");
+  if (turn.taskSource === "user") return undefined;
+  if (turn.retryOf) return t("subagent.retryTaskSource");
+  if (turn.parentChatId && turn.parentSessionId && turn.parentTurnId && turn.parentClientTurnId) {
+    return t("subagent.parentTaskSource");
+  }
+  return undefined;
+}
+
 export function subAgentConversationCopyItem(turn: SubAgentTask, t: TFunction): ConversationItem | undefined {
   const item = turnItems(turn, t)[1];
   if (item.type !== "agent") return;
@@ -273,7 +284,9 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
                 </div>
               ) : undefined}
               compactAgentReply developerOptionsEnabled={developerOptionsEnabled}
-              initialUserContent={user ? <div data-subagent-user-message><ConversationCard item={user} onCopyItem={onCopyItem} /></div> : undefined} />
+              initialUserContent={user ? <div data-subagent-user-message>
+                <ConversationCard item={user} userMessageAuthor={taskSourceLabel(turn, t)} onCopyItem={onCopyItem} />
+              </div> : undefined} />
             {item.type === "streaming" ? <StreamingPhaseStatus item={item} nowMs={Date.now()} showElapsed={false} /> : null}
             {developerOptionsEnabled && (turn.result || turn.events?.length || turn.parentContinuationStatus || turn.error || turn.errorCode || turnReadError)
               ? <TurnTechnicalDetails turn={turn} readError={turnReadError} /> : null}

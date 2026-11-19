@@ -3305,7 +3305,7 @@ async def _execute_app_agent_runtime_message(
     browser_requested = False
     browser_adult_confirmed = False
     agent_relay = str(runtime_request.client_turn_id or "").startswith(AGENT_RELAY_INPUT_PREFIX)
-    if human_user_message and not agent_relay:
+    if human_user_message and not agent_relay and not runtime_request.goal_delivery_id:
         # A relay keeps its provenance when the visible chat drains its queue.
         # Only the authenticated App route creates owner authorization. Internal
         # agent-forwarded dispatch reuses this runner without minting that marker.
@@ -3317,7 +3317,7 @@ async def _execute_app_agent_runtime_message(
             "projectRoot": str(runtime_request.project_root or runtime_request.project_path or "").strip(),
         }
         command = re.fullmatch(r"/browser(?:\s+(.*))?", runtime_request.message.strip(), flags=re.DOTALL)
-        if command and not runtime_request.goal_delivery_id:
+        if command:
             task = (command[1] or "").strip()
             adult = re.fullmatch(r"--18-plus(?:\s+(.*))?", task, flags=re.DOTALL)
             if adult:
@@ -10589,7 +10589,7 @@ def agent_runtime_message(request: Request, runtime_request: AgentRuntimeMessage
     authenticate_agent_request(request, allow_disabled=False)
     try:
         return AGENT_GATEWAY.runtime_message(
-            agent_runtime_request_payload(runtime_request),
+            {**agent_runtime_request_payload(runtime_request), "_runtimeExternalAgent": True},
             agent_name=runtime_request.agent_name,
         )
     except AgentGatewayError as exc:
@@ -28429,7 +28429,15 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         lambda params: AGENT_GATEWAY.goal.update_agent_goal_from_agent(params or {}),
     )
-    AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview",
+        lambda params: AGENT_GATEWAY.runtime_message(
+            {**{key: value for key, value in params.items()
+                if key not in {"_humanUserMessageSource", "_subAgentInputSource"}},
+             "_runtimeExternalAgent": True},
+            agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent"),
+        ),
+    )
     AGENT_GATEWAY.register_tool(
         "vrcforge_browser",
         "when-to-use: In an App conversation, use the built-in browser when the user's task requires a rendered page, JavaScript, or interacting with a website. Open an HTTP(S) URL with operation=open. The App handles site access confirmation and returns the exact request to repeat if approved. Use operation=read to refresh the same tab, or pass nextOffset as offset. Use operation=click with the exact target ref for a visible control. Cookie choices, account authorization, and age confirmation go through the App. If approved, repeat only that exact click once. Ask the user to handle credential entry in the same tab, then read again. Use operation=disconnect when finished. when-NOT-to-use: Do not use this for background work, entering credentials, solving CAPTCHA, or desktop actions. For plain HTTP documents, use web_fetch. Negative example: do not present a confirmation page as the requested document.",

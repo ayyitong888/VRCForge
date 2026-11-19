@@ -91,6 +91,8 @@ const historyStart = conversationSource.indexOf("export function buildChatHistor
 const historyEnd = conversationSource.indexOf("/** Recovery is sent", historyStart);
 const historyHarness = `${conversationSource.slice(historyStart, historyEnd)}
 const appendAttachmentSummary = (text) => text;
+const userMessageTextForHistory = (item) => item.text;
+const agentRelaySource = (item) => item.forwardedFrom?.sourceChatId ?? (item.forwardedByAgent ? "" : undefined);
 const visibleAgentDialogueText = (response) => String(response?.plan?.reply || response?.plan?.summary || "");
 const subAgentAdoptedHistoryText = () => "";
 export { buildChatHistory };

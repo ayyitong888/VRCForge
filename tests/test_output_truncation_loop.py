@@ -1,6 +1,8 @@
 import json
 from copy import deepcopy
 
+from agent_output_truncation import CONTINUE_MESSAGE, OUTPUT_FEEDBACK_PREFIX
+from responses_native_protocol import build_responses_input
 from runtime_planner_service import PlannerModelResult
 from tests.test_native_runtime_gateway import setup_gateway, run, call
 
@@ -27,13 +29,19 @@ def test_text_continuation_is_hidden_durable_and_one_final(tmp_path):
     result = run(gateway, tmp_path)
     assert result['plan']['reply'] == '第一段第二段'
     assert len(model.requests) == 2
-    hidden = [m for m in model.requests[1]['messages'] if m.get('hidden')]
-    assert [m['content'] for m in hidden] == ['上条回复因长度上限中断，请从断点直接继续，不要重复已写内容。']
+    followup = model.requests[1]['messages']
+    assert [m for m in followup if m.get('content') == CONTINUE_MESSAGE] == [
+        {'role': 'system', 'content': CONTINUE_MESSAGE},
+    ]
+    wire = build_responses_input(followup)
+    assert [m for m in wire if m.get('content') == CONTINUE_MESSAGE] == [
+        {'role': 'developer', 'content': CONTINUE_MESSAGE},
+    ]
     assert not any('上条回复因' in str(e) for e in result['timeline'])
     snapshot = next(iter(gateway.runtime_sessions._native_conversations.values()))
     from tests.test_native_history_storage import owner
     restored = owner(gateway.audit_dir / 'native-history').native_conversation('native-session', binding=snapshot['binding'])
-    assert restored and any(m.get('hidden') is True for m in restored['messages'])
+    assert restored and {'role': 'system', 'content': CONTINUE_MESSAGE} in restored['messages']
 
 
 def test_fourth_truncation_stops_after_three_continuations(tmp_path):
@@ -73,7 +81,10 @@ def test_complete_tools_execute_discarded_call_never_enters_history(tmp_path):
     ids = [c['id'] for m in messages for c in m.get('tool_calls', [])]
     results = [m['tool_call_id'] for m in messages if m['role'] == 'tool']
     assert set(ids) == set(results) == {'0', '1'}
-    feedback = next(m['content'] for m in messages if m.get('hidden'))
+    feedback_message = next(m for m in messages if m.get('hidden'))
+    assert feedback_message['role'] == 'user'
+    feedback = feedback_message['content']
+    assert feedback.startswith(OUTPUT_FEEDBACK_PREFIX)
     assert 'third' in feedback and '未执行' in feedback and 'fixture-body' in feedback
     assert result['plan']['reply'] == '已读两个文件'
 

@@ -87,9 +87,9 @@ def general_read_observation_key(
 
 LOOP_REMINDER = "最近几次调用结果没有变化，可能在原地打转。请检查写入是否生效，或换一种方法。"
 LOOP_REASONS = {
-    "tool_loop_repeated": "同一工具调用和结果已重复出现三次。",
-    "tool_loop_no_progress": "连续十次工具调用都没有带来新的结果。",
-    "tool_loop_write_unverified": "写入参数已改变，但同一对象的读回结果没有变化，写入可能未生效。",
+    "tool_loop_repeated": "本轮已停止。重复尝试仍得到相同结果，任务尚未完成。",
+    "tool_loop_no_progress": "本轮已停止。多次尝试都未取得新进展，任务尚未完成。",
+    "tool_loop_write_unverified": "本轮已停止。多次核对后仍无法确认修改生效，任务尚未完成。",
 }
 
 
@@ -99,9 +99,7 @@ class _Call:
     result_digest: str
     target: dict[str, Any]
     effect: str
-    tool: str
-    status: str
-    summary: str
+    progress_epoch: int
 
 
 def tool_result_digest(result: Any, *, diagnostic_fields: tuple[str, ...] = ()) -> str:
@@ -118,18 +116,31 @@ class ToolLoopProgress:
         self._project_root = project_root.replace("\\", "/")
         self._calls: deque[_Call] = deque(maxlen=20)
         self._unchanged = 0
-        self.reminded = False
+        self._progress_epoch = 0
+        self.reminded_reason = ""
 
     def reset(self) -> None:
         self._calls.clear()
         self._unchanged = 0
-        self.reminded = False
+        self._progress_epoch = 0
+        self.reminded_reason = ""
 
-    def record(self, *, action_id: str, tool: str, arguments: Any, result_digest: str,
-               status: str, summary: str, effect: str) -> str:
-        self._unchanged = self._unchanged + 1 if any(
-            row.result_digest == result_digest for row in self._calls
-        ) else 0
+    def record(self, *, action_id: str, arguments: Any, result_digest: str,
+               effect: str, committed: bool = False) -> str:
+        if committed and not any(
+            row.effect == "write" and row.action_id == action_id and row.result_digest == result_digest
+            for row in self._calls
+        ):
+            self._progress_epoch += 1
+            if self.reminded_reason != "tool_loop_write_unverified":
+                self.reminded_reason = ""
+        seen_result = any(
+            row.progress_epoch == self._progress_epoch and row.result_digest == result_digest
+            for row in self._calls
+        )
+        if not seen_result and effect == "read" and self.reminded_reason != "tool_loop_write_unverified":
+            self.reminded_reason = ""
+        self._unchanged = self._unchanged + 1 if seen_result else 0
         target = {key.casefold(): value for key, value in action_target(arguments).items()}
         if isinstance(arguments, Mapping):
             for name, value in arguments.items():
@@ -139,10 +150,14 @@ class ToolLoopProgress:
         scope = target.pop("projectroot", target.pop("projectpath", self._project_root))
         if target and scope:
             target["projectroot"] = scope
-        self._calls.append(_Call(action_id, result_digest, target, effect, tool, status, summary))
+        self._calls.append(_Call(action_id, result_digest, target, effect, self._progress_epoch))
         if effect == "read" and target and self._unchanged_write():
             return "tool_loop_write_unverified"
-        if sum(row.action_id == action_id and row.result_digest == result_digest for row in self._calls) >= 3:
+        # A-B-A-B-A repeats a cycle. A-B-A-C-A keeps finding different evidence.
+        calls = [(row.action_id, row.result_digest) for row in self._calls
+                 if row.progress_epoch == self._progress_epoch]
+        if any(calls[-1] == calls[-2 * period - 1] and calls[-period:] == calls[-2 * period:-period]
+               for period in range(1, (len(calls) - 1) // 2 + 1)):
             return "tool_loop_repeated"
         if self._unchanged >= 10:
             return "tool_loop_no_progress"
@@ -165,7 +180,3 @@ class ToolLoopProgress:
                                       if prior.effect == "write" and prior.target == current.target), None)
                 return earlier_write is not None and earlier_write.action_id != latest_write.action_id
         return False
-
-    def recent_calls(self) -> list[dict[str, str]]:
-        return [{"tool": row.tool, "status": row.status, "summary": row.summary}
-                for row in list(self._calls)[-5:]]

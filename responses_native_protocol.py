@@ -137,16 +137,19 @@ def flat_function_tools(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, An
 
 
 def is_hidden_continuation(messages: Sequence[Mapping[str, Any]]) -> bool:
-    """Return whether history ends in the exact internal continuation instruction."""
-    from agent_output_truncation import CONTINUE_MESSAGE
+    """Recognize the output continuation control before the next model reply."""
+    from agent_output_truncation import CONTINUE_MESSAGE, is_output_continuation_control
 
     for message in reversed(messages):
         if not isinstance(message, Mapping):
             continue
+        if is_output_continuation_control(message):
+            return True
         role = str(message.get("role") or "")
         if role in {"system", "developer"}:
             continue
         return (
+            # Existing snapshots can hold this exact hidden, nonhuman marker.
             role == "user"
             and message.get("hidden") is True
             and message.get("content") == CONTINUE_MESSAGE

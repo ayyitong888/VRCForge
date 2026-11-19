@@ -94,7 +94,8 @@ def _run_auto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outputs: list, *,
     configured = _configured_service(config_path, base_url, "auto")
     invoked: list[tuple[str, dict]] = []
 
-    def execute_skill(_owner, tool, params, agent_name=None, owner_id=""):
+    def execute_skill(_owner, tool, params, agent_name=None, owner_id="", *,
+                      read_scope=None, restored_absent_paths=frozenset()):
         invoked.append((tool, deepcopy(params)))
         return {
             "ok": True, "tool": tool, "status": "executed", "result": {"ok": True, "marker": tool},
@@ -146,13 +147,13 @@ def test_auto_binding_continuation_is_hidden_restorable_and_telegram_shows_one_r
     assert result["plan"]["nextStep"] == "done", result["plan"]
     assert result["plan"]["reply"] == "第一段第二段"
     assert [entry["api_type"] for entry in calls] == ["responses", "responses", "responses"]
-    hidden = [message for message in calls[2]["native_messages"] if message.get("hidden")]
-    assert [message["content"] for message in hidden] == [CONTINUE]
-    assert restored and any(message.get("hidden") and message["content"] == CONTINUE for message in restored["messages"])
+    control = {"role": "system", "content": CONTINUE}
+    assert [message for message in calls[2]["native_messages"] if message.get("content") == CONTINUE] == [control]
+    assert restored and control in restored["messages"]
     assert any(message.get("provider_protocol") == "responses" for message in restored["messages"]
                if message.get("role") == "assistant")
     wire = build_responses_input(calls[2]["native_messages"])
-    assert CONTINUE in json.dumps(wire, ensure_ascii=False)
+    assert {"role": "developer", "content": CONTINUE} in wire
     assert '"hidden"' not in json.dumps(wire, ensure_ascii=False)
 
     async def telegram_projection():

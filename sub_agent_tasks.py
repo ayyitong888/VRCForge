@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
 from agent_command_safety import normalize_filesystem_path
+from agent_runtime_input import child_task_source
 from agent_subagent_runtime import project_child_budget_pause
 from background_goal_runtime import RuntimeLaneBudget
 from runtime_planner_service import public_runtime_payload
@@ -102,6 +103,10 @@ class SubAgentTask:
     merged_chat_id: str = ""
     merge_decision: str = ""
     parent_continuation_status: str = ""
+
+    @property
+    def task_source(self) -> str:
+        return child_task_source(delegated=isinstance(self.params.get("_taskSeed"), dict), retry_of=self.retry_of).value
 
 
 class SubAgentTaskRegistry:
@@ -1154,6 +1159,7 @@ class SubAgentTaskRegistry:
             payload.update(
                 taskId=task.id,
                 task=task.task,
+                taskSource=task.task_source,
                 childSessionId=task.child_session_id,
                 model=task.model,
                 systemPrompt=task.system_prompt,
@@ -1198,6 +1204,7 @@ class SubAgentTaskRegistry:
     def _serialize_task(self, task: SubAgentTask, include_events: bool = False) -> dict[str, Any]:
         payload = self._task_snapshot(task, params={})
         payload["schema"] = SUB_AGENT_SCHEMA
+        payload["taskSource"] = task.task_source
         payload["result"] = copy.deepcopy(task.result)
         seed = task.params.get("_taskSeed")
         if (isinstance(seed, dict) and task.parent_session_id

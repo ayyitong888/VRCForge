@@ -3001,9 +3001,9 @@ class AgentLoopP0Tests(unittest.TestCase):
             })
 
         self.assertEqual(calls, 4, result)
-        self.assertEqual(result["plan"]["nextStep"], "paused", result)
+        self.assertEqual(result["plan"]["nextStep"], "loop_suppressed", result)
         self.assertEqual(result["plan"]["reason"], "tool_loop_repeated")
-        self.assertTrue(result["plan"]["loopPause"]["questionId"])
+        self.assertNotIn("loopPause", result["plan"])
 
     def test_nonzero_shell_exit_without_error_text_never_gets_success_summary(self) -> None:
         gateway = self.gateway

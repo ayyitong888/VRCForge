@@ -25,7 +25,7 @@ def test_telegram_completion_uses_only_the_merged_reply(tmp_path):
         merged = "第一段第二段"
         assert result["plan"]["reply"] == merged
         assert len(model.requests) == 2
-        assert any(item.get("hidden") and item.get("content") == CONTINUE_MESSAGE
+        assert any(item.get("role") == "system" and item.get("content") == CONTINUE_MESSAGE
                    for item in model.requests[1]["messages"])
         snapshot = next(iter(gateway.runtime_sessions._native_conversations.values()))
         from tests.test_native_history_storage import owner
@@ -33,7 +33,7 @@ def test_telegram_completion_uses_only_the_merged_reply(tmp_path):
             "native-session", binding=snapshot["binding"],
         )
         assert restored_native and any(
-            item.get("hidden") is True and item.get("content") == CONTINUE_MESSAGE
+            item.get("role") == "system" and item.get("content") == CONTINUE_MESSAGE
             for item in restored_native["messages"]
         )
 

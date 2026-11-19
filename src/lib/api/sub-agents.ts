@@ -14,6 +14,7 @@ export type SubAgentTask = {
   role: string;
   displayName: string;
   task: string;
+  taskSource?: "parent_agent" | "retry" | "user";
   parentChatId?: string;
   parentSessionId?: string;
   parentTurnId?: string;

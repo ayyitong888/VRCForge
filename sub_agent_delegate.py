@@ -36,7 +36,7 @@ class RuntimeSkillGateway(Protocol):
 
     def run_sub_agent_llm(self, *, task: str, child_session_id: str, provider: str, model: str,
                           system_prompt: str, max_steps: int, project_path: str,
-                          selected_materials: list[dict[str, Any]], client_turn_id: str,
+                          selected_materials: list[dict[str, Any]], client_turn_id: str, task_source: str,
                           is_resume: bool, allowed_tools: list[str] | tuple[str, ...] | None,
                           cancel_event: Any, general_read_roots: tuple[str, ...] | None) -> dict[str, Any]: ...
 
@@ -480,6 +480,7 @@ def run_readonly_llm_agent(
     read_roots = payload.get("_generalReadRoots")
     response = gateway.run_sub_agent_llm(
         task=task,
+        task_source=payload.get("taskSource", "parent_agent"),
         child_session_id=child_session_id,
         provider=str(payload.get("provider") or ""),
         model=str(payload.get("model") or "").strip(),

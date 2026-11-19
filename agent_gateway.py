@@ -94,7 +94,6 @@ from agent_question_service import (
     AgentQuestionScopePorts,
     AgentQuestionService,
     GoalQuestionResolutionPort,
-    RUNTIME_TOOL_LOOP_SOURCE,
     RuntimeQuestionResolutionPort,
 )
 from desktop_computer_use_service import DesktopComputerUsePorts, DesktopComputerUseService
@@ -106,6 +105,7 @@ from optimization_service import (
 )
 from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO_SKILL_WRITE_INPUT_SCHEMA
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_runtime_input import classify_history, classify_steer, resolve_turn_source
 from agent_runtime_turn_identity import (
     MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH, continuation_client_turn_id, continuation_identity,
 )
@@ -162,7 +162,7 @@ from external_tool_result_contract import (
 )
 from agent_budget_policy import freeze_agent_budget_policy
 from agent_general_no_progress import (
-    LOOP_REASONS, LOOP_REMINDER, ToolLoopProgress, general_read_observation_key, tool_result_digest,
+    LOOP_REASONS, ToolLoopProgress, general_read_observation_key, tool_result_digest,
 )
 from general_agent_tools import (
     _authorized_path as _general_authorized_path,
@@ -2119,6 +2119,7 @@ class AgentGateway:
             result = {} if attachments else self._runtime_session_state.submit_steer(
                 session_id=session_id, target_client_turn_id=origin,
                 input_id=input_id, message=prompt, followup_lane_id=lane,
+                authenticated_answer=str(seed.get("_authenticatedUserAnswer") or ""),
             )
             if result.get("accepted") is True:
                 if seed.get("_questionKind") == "visual_checkpoint":
@@ -5343,6 +5344,7 @@ class AgentGateway:
                           system_prompt: str = "", max_steps: int = 4,
                           project_path: str = "", selected_materials: list[dict] | None = None,
                           cancel_event: threading.Event, client_turn_id: str = "", is_resume: bool = False,
+                          task_source: str = "parent_agent",
                           allowed_tools: list[str] | tuple[str, ...] | None = None, provider: str = "",
                           general_read_roots: tuple[str, ...] | None = None) -> dict[str, Any]:
         from agent_subagent_runtime import run_child_runtime
@@ -5350,6 +5352,7 @@ class AgentGateway:
                                  system_prompt=system_prompt, max_steps=max_steps, project_path=project_path,
                                  selected_materials=selected_materials or [], cancel_event=cancel_event,
                                  client_turn_id=client_turn_id, is_resume=is_resume,
+                                 task_source=task_source,
                                  allowed_tools=allowed_tools, provider=provider,
                                  general_read_roots=general_read_roots)
 
@@ -6265,6 +6268,10 @@ class AgentGateway:
             client_turn_id=client_turn_id,
         )
         history = [entry for entry in ensure_list(params.get("history")) if isinstance(entry, dict)]
+        history = [
+            {**entry, "role": "runtime"} if entry.get("role") == "user" and not classify_history(entry).is_human else entry
+            for entry in history
+        ]
         history = self._resolve_adopted_subagent_history(history, session_id=session_id, chat_id=chat_id)
         attachments = normalize_runtime_attachments(params.get("attachments"))
         params["_runtimeAttachments"] = attachments
@@ -6277,11 +6284,24 @@ class AgentGateway:
             if "_projectContextActive" in params
             else bool(project_root)
         )
+        user_source = ensure_dict(params.get("_humanUserMessageSource"))
+        authenticated_app_input = user_source.get("source") == "app_user_message" and (
+            str(user_source.get("sessionId") or "") == str(params.get("session_id") or params.get("sessionId") or "")
+            and str(user_source.get("clientTurnId") or "") == str(params.get("client_turn_id") or params.get("clientTurnId") or "")
+            and str(user_source.get("projectRoot") or "") == project_root
+        )
+        input_source = resolve_turn_source(
+            child=child_read_only, child_source=str(params.get("_subAgentInputSource") or ""),
+            goal_delivery_id=goal_delivery_id, client_turn_id=client_turn_id,
+            continuation=task_continuation is not None and not question_reply_turn,
+            authenticated_user=authenticated_app_input,
+            external_agent=params.get("_runtimeExternalAgent") is True,
+        )
+        if not input_source.is_human:
+            params.pop("_humanUserMessageSource", None)
         general_allowed_roots: list[str] = []
         root_candidates = [
             project_root,
-            str(params.get("workspace_root") or params.get("workspaceRoot") or "").strip(),
-            str(params.get("cwd") or "").strip(),
         ]
         # Explicit user paths grant narrow General read access in every chat.
         # These roots are never registered as Unity write/project authority.
@@ -6289,10 +6309,18 @@ class AgentGateway:
             # Child instructions and selected materials are task data. Only the
             # server-owned parent scope can authorize local filesystem access.
             root_candidates = list(child_read_roots) if child_read_roots is not None else [project_root]
-        elif not client_turn_id.startswith(AGENT_RELAY_INPUT_PREFIX):
-            # A forwarded message inherits the target's scope. Its quoted
-            # references cannot establish new user-owned filesystem roots.
+        elif input_source.is_human:
+            root_candidates.extend((
+                str(params.get("workspace_root") or params.get("workspaceRoot") or "").strip(),
+                str(params.get("cwd") or "").strip(),
+            ))
             root_candidates.extend(extract_explicit_local_roots(message))
+        elif continuation_source == "question_answered":
+            # The saved answer may grant read scope. The surrounding
+            # continuation objective and host instructions cannot.
+            answer = ensure_dict(continuation.get("authenticatedQuestionAnswer"))
+            if answer.get("sessionId") == session_id and answer.get("projectRoot") == project_root:
+                root_candidates.extend(extract_explicit_local_roots(str(answer.get("answer") or "")))
         seen_general_roots: set[str] = set()
         for candidate in root_candidates:
             if not candidate:
@@ -6575,6 +6603,7 @@ class AgentGateway:
                 native_binding, message, loop_state, continuation_context,
                 continuation_completion, continuation_observation,
                 initial_history=history, client_turn_id=client_turn_id,
+                input_source=input_source,
                 project_context_active=project_context_active,
                 subagent_batch=([*batch_continuations, continuation] if "_subAgentBatch" in continuation else None),
                 on_steer_consumed=lambda ids: (self._settle_async_question_steers(ids, session_id=session_id, client_turn_id=client_turn_id, turn_id=turn_id), self._runtime_status_changed({
@@ -6942,6 +6971,9 @@ class AgentGateway:
             observe["compactionRecoveryInformation"] = [retain_compaction_recovery_catalog(accepted_recovery)] if accepted_recovery else []
         except ValueError as exc:
             raise AgentGatewayError(str(exc), status_code=400) from exc
+        if child_read_only and params.get("_subAgentSelectedMaterials"):
+            observe["turn"] = {**ensure_dict(observe.get("turn")),
+                               "childSelectedMaterials": params["_subAgentSelectedMaterials"]}
         context_information = self.runtime_planner.complete_runtime_context_information(
             observe,
             exposure_layer=EXPOSURE_LAYER_PLANNING if task_loop.plan_mode else task_loop.exposure_layer,
@@ -7119,7 +7151,7 @@ class AgentGateway:
             )
         repeated_failure_guard = RepeatedFailureGuard()
         tool_loop_progress = ToolLoopProgress(project_root)
-        loop_reminder_pending = False
+        loop_reminder_pending = ""
         last_directory: tuple[str, str, str] | None = None
         last_effect_receipt: tuple[str, str | None] | None = None
         if continuation_completion.get("status") == "completed" and continuation_context.get("requestedKind") in {"write", "shell"}:
@@ -7131,12 +7163,11 @@ class AgentGateway:
             reason = tool_loop_progress.record(**call)
             if not reason:
                 return None
-            if not tool_loop_progress.reminded:
-                loop_reminder_pending = True
+            if not tool_loop_progress.reminded_reason:
+                loop_reminder_pending = reason
                 return None
-            return {**plan, "nextStep": "paused", "continueLoop": False,
-                    "reason": reason, "reply": LOOP_REASONS[reason],
-                    "loopPause": {"recentCalls": tool_loop_progress.recent_calls()}}
+            return {**plan, "nextStep": "loop_suppressed", "continueLoop": False,
+                    "reason": reason, "reply": LOOP_REASONS[reason]}
 
         poll_times: dict[tuple[str, str], tuple[float, float]] = {}
         shell_scope_denials = 0
@@ -7186,11 +7217,29 @@ class AgentGateway:
         pending_legacy_steer_ids: list[str] = []
         consumed_steer_seen: set[str] = set()
         params["_runtimeFailureProgress"]["consumedSteerInputIds"] = consumed_steer_input_ids
-        memory_request_text = message
-        memory_user_texts = [message, *(str(item.get("text") or item.get("message") or "") for item in history if item.get("role") == "user")]
+        memory_request_text = message if input_source.is_human else str(
+            ensure_dict(continuation.get("authenticatedQuestionAnswer")).get("answer") or ""
+        )
+        memory_user_texts = [
+            *([memory_request_text] if memory_request_text else []),
+            *(str(item.get("text") or item.get("message") or "") for item in history if item.get("role") == "user"),
+        ]
         required_memory_tool = requested_memory_tool(memory_request_text)
         if required_memory_tool:
             task_loop.require_action(kind="write", tool=required_memory_tool)
+
+        def legacy_runtime_steer_history(item: Mapping[str, Any]) -> list[dict[str, str]]:
+            source = classify_steer(str(item.get("inputId") or ""))
+            now = utc_now_iso()
+            entries = [{
+                "role": "user" if source.is_human else "runtime",
+                "text": str(item.get("message") or ""),
+                **({"authorRole": source.value} if not source.is_human else {}),
+                "createdAt": now,
+            }]
+            if answer := str(item.get("authenticatedAnswer") or ""):
+                entries.append({"role": "user", "text": answer, "createdAt": now})
+            return entries
 
         def record_consumed_steers(items: list[dict[str, Any]]) -> None:
             nonlocal loop_reminder_pending
@@ -7221,7 +7270,14 @@ class AgentGateway:
             native_turn.queue_steers(items)
             if items:
                 tool_loop_progress.reset()
-                loop_reminder_pending = False
+                loop_reminder_pending = ""
+                human = any(classify_steer(str(item.get("inputId") or "")).is_human
+                            or item.get("authenticatedAnswer") for item in items)
+                loop_state.append({
+                    "tool": "user_steer" if human else "runtime_steer",
+                    "kind": "user_interjection" if human else "runtime_input",
+                    "status": "received", "result": {"count": len(items)},
+                })
             nonlocal memory_request_text
             for item in items:
                 input_id = str(item.get("inputId") or "").strip()
@@ -7229,7 +7285,9 @@ class AgentGateway:
                     consumed_steer_seen.add(input_id)
                     if not native_binding:
                         pending_legacy_steer_ids.append(input_id)
-                    memory_request_text = str(item.get("message") or "")
+                    if not classify_steer(input_id).is_human and not item.get("authenticatedAnswer"):
+                        continue
+                    memory_request_text = str(item.get("authenticatedAnswer") or item.get("message") or "")
                     memory_user_texts.append(memory_request_text)
                     required_memory_tool = requested_memory_tool(memory_request_text)
                     if required_memory_tool:
@@ -7490,13 +7548,6 @@ class AgentGateway:
             iteration_started = time.perf_counter()
             settle_started = time.perf_counter()
             native_turn.settle(flush_steers=False)
-            if loop_reminder_pending and not native_turn.has_queued_calls:
-                if native_binding:
-                    native_turn.append_hidden(LOOP_REMINDER)
-                else:
-                    history.append({"role": "user", "text": LOOP_REMINDER, "hidden": True})
-                tool_loop_progress.reminded = True
-                loop_reminder_pending = False
             settled_at = time.perf_counter()
             if handoff_terminal is not None:
                 last_plan = handoff_terminal
@@ -7588,22 +7639,8 @@ class AgentGateway:
                 steer_inputs = self._drain_runtime_steers(session_id, turn_id, client_turn_id)
                 if steer_inputs:
                     record_consumed_steers(steer_inputs)
-                    history.extend(
-                        {
-                            "role": "user",
-                            "text": str(item.get("message") or ""),
-                            "createdAt": utc_now_iso(),
-                        }
-                        for item in steer_inputs
-                    )
-                    loop_state.append(
-                        {
-                            "tool": "user_steer",
-                            "kind": "user_interjection",
-                            "status": "received",
-                            "result": {"count": len(steer_inputs)},
-                        }
-                    )
+                    for item in steer_inputs:
+                        history.extend(legacy_runtime_steer_history(item))
             self._emit_runtime_status(
                 "waiting_for_model",
                 session_id=session_id,
@@ -7613,6 +7650,7 @@ class AgentGateway:
             # Keep the caller's observation immutable; publish current authority
             # and capabilities without host-owned budget counters.
             planner_observe = dict(observe) if isinstance(observe, dict) else {}
+            planner_observe["runtimeInputSource"] = input_source
             planner_observe["planMode"] = task_loop.plan_mode
             if child_read_only:
                 planner_observe["childReadOnly"] = True
@@ -7645,6 +7683,11 @@ class AgentGateway:
                              "planner": "runtime", **budget_decision}
                 self._cancel_turn_questions_at_pause(session_id, turn_id, client_turn_id)
                 break
+            # The loop detector is host state, never a message from the user.
+            planner_observe["toolLoopDetected"] = bool(loop_reminder_pending and not queued_native_action)
+            if planner_observe["toolLoopDetected"]:
+                tool_loop_progress.reminded_reason = loop_reminder_pending
+                loop_reminder_pending = ""
             if native_binding and not queued_native_action:
                 planner_observe["skippedNativeQuestions"] = self.questions.skipped_native_questions(
                     session_id=session_id, project_root=project_root, binding=native_binding,
@@ -7800,22 +7843,8 @@ class AgentGateway:
             steer_inputs = self._drain_runtime_steers(session_id, turn_id, client_turn_id)
             if steer_inputs:
                 record_consumed_steers(steer_inputs)
-                history.extend(
-                    {
-                        "role": "user",
-                        "text": str(item.get("message") or ""),
-                        "createdAt": utc_now_iso(),
-                    }
-                    for item in steer_inputs
-                )
-                loop_state.append(
-                    {
-                        "tool": "user_steer",
-                        "kind": "user_interjection",
-                        "status": "received",
-                        "result": {"count": len(steer_inputs)},
-                    }
-                )
+                for item in steer_inputs:
+                    history.extend(legacy_runtime_steer_history(item))
                 continue
 
             planner_argument_validation = ensure_dict(plan.get("argumentValidation"))
@@ -8240,9 +8269,9 @@ class AgentGateway:
                         )
                         last_effect_receipt = (planned_action_id, receipt_digest)
                 pause_plan = detect_tool_loop(
-                    plan, action_id=loop_action_id, tool=planned_tool, arguments=execution_arguments,
+                    plan, action_id=loop_action_id, arguments=execution_arguments,
                     result_digest=receipt_digest,
-                    status="suppressed", summary=summary, effect="",
+                    effect="",
                 )
                 if pause_plan:
                     last_plan = pause_plan
@@ -9302,11 +9331,13 @@ class AgentGateway:
                     receipt_digest = tool_result_digest(result_value, diagnostic_fields=diagnostic_fields)
                 pause_plan = detect_tool_loop(
                     plan,
-                    action_id=loop_action_id, tool=step_tool, arguments=execution_arguments,
+                    action_id=loop_action_id, arguments=execution_arguments,
                     result_digest=receipt_digest or tool_result_digest(step_payload.get("error") or step_outcome_status),
-                    status=result_status,
-                    summary=planner_policy.sanitize_planner_observation_text(result_summary, 90),
                     effect=effect,
+                    committed=effect == "write" and (
+                        ensure_dict(result_value).get("committed") is True
+                        or ensure_dict(step_outcome.get("verification")).get("state") == "passed"
+                    ),
                 )
                 if pause_plan:
                     last_plan = pause_plan
@@ -9388,7 +9419,6 @@ class AgentGateway:
             handoff_terminal is not None
             or last_plan.get("scopeDenied") is True
             or last_plan.get("restoreFailureTurnStop") is True
-            or "loopPause" in last_plan
             or last_plan.get("reason") == "tool_poll_timeout"
             or str(last_plan.get("nextStep") or "") in {
                 "plan_mode_blocked",
@@ -9580,29 +9610,6 @@ class AgentGateway:
         if native_binding:
             top_plan = native_turn.output_truncation.finish(top_plan)
         native_turn.settle(top_plan)
-        if top_plan.get("nextStep") == "paused" and top_plan.get("loopPause"):
-            pause = top_plan["loopPause"]
-            recent = "\n".join(
-                f"{call['tool'][:64]} · {call['status'][:24]} · {call['summary'][:80]}"
-                for call in pause["recentCalls"]
-            )
-            seed = runtime_approval_seed(
-                requested_tool="vrcforge_ask_user", requested_kind="skill",
-                tool_calls_used=tool_calls_used, exposure_layer=runtime_exposure_layer,
-                provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
-                provider_usage=task_seed_provider_usage(),
-            )
-            seed["_toolLoopPause"] = True
-            question = self.questions.create({
-                "sourceTool": RUNTIME_TOOL_LOOP_SOURCE, "sessionId": session_id, "projectRoot": project_root,
-                "question": f"{top_plan['reply']}\n\n最近的调用记录\n{recent}"[:1000],
-                "options": [{"id": "continue", "label": "继续", "value": "继续任务，请换一种方法。"},
-                            {"id": "stop", "label": "停止"}],
-                "_runtimeTaskSeed": seed, "_runtimeSessionId": session_id,
-                "_runtimeClientTurnId": client_turn_id,
-            })["question"]
-            pause["questionId"] = question["questionId"]
-
         # Non-analyzed image state is rendered by the structured vision step.
         if (
             vision_payload is not None
@@ -10995,6 +11002,8 @@ class AgentGateway:
             error = runtime_error_from_exception(code or "turn_failed", turn_error)
         elif code:
             error = runtime_error(code, retryable=retryable)
+        elif next_step == "loop_suppressed" and (reason := str(plan.get("reason") or "")) in LOOP_REASONS:
+            error = runtime_error(reason, message=LOOP_REASONS[reason])
         elif next_step in {"failed", "planner_failed", "tool_failed", "loop_suppressed", "context_compaction_required"}:
             error = runtime_error("turn_failed", retryable=None)
         else:

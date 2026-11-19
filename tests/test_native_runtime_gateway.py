@@ -453,13 +453,14 @@ def test_native_gateway_repeated_identical_read_failure_is_suppressed(tmp_path):
         invoked.append(arguments) or {"ok": False, "error": "same-read-failure"}
     )
     result = run(gateway, tmp_path, maxAgenticTurns=6)
-    assert result["plan"]["nextStep"] == "paused", result
+    assert result["plan"]["nextStep"] == "loop_suppressed", result
     assert result["plan"]["reason"] == "tool_loop_repeated", result
-    assert result["plan"]["loopPause"]["questionId"]
+    assert "loopPause" not in result["plan"]
     assert len(invoked) == 4
-    reminder = "最近几次调用结果没有变化，可能在原地打转。请检查写入是否生效，或换一种方法。"
-    assert [message["content"] for message in model.requests[3]["messages"]
-            if message.get("role") == "user" and message.get("hidden") is True].count(reminder) == 1
+    from agent_general_no_progress import LOOP_REMINDER
+    reminders = [message for message in model.requests[3]["messages"]
+                 if LOOP_REMINDER in str(message.get("content") or "")]
+    assert len(reminders) == 1 and reminders[0]["role"] == "system"
 
 
 def test_native_selection_failure_with_explicit_next_action_is_correctable():

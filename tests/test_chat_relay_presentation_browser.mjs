@@ -20,11 +20,18 @@ const sourceChatId = "source!中文";
 const message = "First **line**\\n\\nSecond paragraph.  ";
 const forwarded = {
   id: "new", type: "user", deliveryMode: "queue_only", forwardedByAgent: true, forwardedFrom: { sourceChatId },
+  clientTurnId: "agent-forward-original",
   text: notice + " Source conversation: " + chatDeepLink(sourceChatId) + "]\\n\\n" + message,
 };
-const oldItem = { ...forwarded, id: "legacy", text: oldNotice + legacy, forwardedFrom: { sourceChatId: "legacy" } };
+const oldItem = { ...forwarded, id: "legacy", clientTurnId: undefined, text: oldNotice + legacy, forwardedFrom: { sourceChatId: "legacy" } };
 const typedItem = { id: "typed", type: "user", text: forwarded.text };
 window.historyProjection = buildChatHistory([forwarded, oldItem, typedItem], text => text);
+const legacyGoal = { id: "goal-user-owned-delivery", type: "user", text: "Resume the wardrobe Goal." };
+const goalReply = { id: "goal-agent-owned-delivery", type: "agent",
+  response: { goalDeliveryId: "owned-delivery", plan: { reply: "Wardrobe Goal still running." } } };
+window.manualCompactionProjection = buildChatHistory(
+  [forwarded, legacyGoal, typedItem], text => text, [forwarded, legacyGoal, goalReply, typedItem],
+);
 window.expectedHistory = [forwarded.text.trim(), notice + " Source conversation: vrcforge://chat/legacy]\\n\\n" + legacy, typedItem.text.trim()];
 const props = {
   lookupChatTitle: id => id === sourceChatId ? "Source chat" : undefined,
@@ -72,6 +79,13 @@ try {
   assert.equal(await page.locator("#typed [data-forwarded-agent-attribution]").count(), 0);
   assert.deepEqual(await page.evaluate(() => window.historyProjection.map(entry => entry.text)),
     await page.evaluate(() => window.expectedHistory));
+  assert.deepEqual(await page.evaluate(() => window.historyProjection.map(entry => entry.authorRole ?? null)),
+    ["agent_relay", "agent_relay", null], "only authenticated relay metadata changes history provenance");
+  assert.deepEqual(await page.evaluate(() => window.historyProjection.map(entry => entry.clientTurnId ?? null)),
+    ["agent-forward-original", null, null]);
+  assert.deepEqual(await page.evaluate(() => window.manualCompactionProjection.map(entry => [entry.role, entry.authorRole ?? null])),
+    [["user", "agent_relay"], ["user", "goal"], ["user", null]]);
+  assert.equal(await page.evaluate(() => window.manualCompactionProjection[1].text), "Resume the wardrobe Goal.");
   const embedded = page.locator("[data-chat-steering-message=embedded]");
   for (const bubble of [current, page.locator("#initial"), embedded]) {
     assert.equal(await bubble.locator("[data-forwarded-agent-attribution]").count(), 1);

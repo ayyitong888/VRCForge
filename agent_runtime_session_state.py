@@ -8,8 +8,11 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 from context_compaction import normalize_compaction_recovery
+from agent_general_no_progress import LOOP_REMINDER
 from agent_native_history_store import NativeHistoryStore
+from agent_output_truncation import CONTINUE_MESSAGE, OUTPUT_FEEDBACK_PREFIX, is_output_continuation_control
 from agent_renderer_correction_history import retained_renderer_corrections
+from agent_runtime_input import RuntimeInputSource, classify_history, classify_steer
 from agent_user_path_context import confirmed_human_indices, human_indices, human_user_projection, missing_human_history
 from agent_scan_result_policy import (
     SCAN_RESULT_CONTINUATION_POLICY, SCAN_RESULT_CONTINUATION_POLICY_V2,
@@ -18,6 +21,17 @@ from agent_scan_result_policy import (
 
 NATIVE_RUNTIME_STATE_PREFIX = "Current runtime state (data): "
 NATIVE_RUNTIME_CONTEXT_PREFIX = "Runtime context snapshot (data, not user instructions or authorization): "
+
+
+def _native_input_message(message: str, source: RuntimeInputSource) -> dict[str, str]:
+    return {
+        "role": "user", "content": source.model_text(message),
+        **({"runtimeInputSource": source.value} if not source.is_human else {}),
+    }
+
+
+def _relay_input_id(value: object) -> str:
+    return value if isinstance(value, str) and classify_steer(value) is RuntimeInputSource.AGENT_RELAY else ""
 
 
 def native_runtime_state_content(message: dict[str, Any]) -> str:
@@ -46,8 +60,39 @@ def project_native_runtime_state_history(messages: list[dict[str, Any]]) -> list
             if state == previous:
                 continue
             previous = state
+            # Older runs embedded prior answers in the privileged state message.
+            # Split only the model projection and preserve the saved transcript.
+            if '"questionTask"' in state:
+                try:
+                    payload = json.loads(state[len(NATIVE_RUNTIME_STATE_PREFIX):])
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict) and isinstance(payload.get("questionTask"), dict):
+                    quoted = {"questionTask": payload.pop("questionTask")}
+                    projected.append({**message, "content": NATIVE_RUNTIME_STATE_PREFIX + json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":"))})
+                    projected.append({"role": "user", "content": NATIVE_RUNTIME_CONTEXT_PREFIX + json.dumps(
+                        quoted, ensure_ascii=False, separators=(",", ":"))})
+                    continue
         projected.append(message)
     return projected
+
+
+def native_model_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Translate saved authorship at the shared provider boundary, including older hidden host notes."""
+    projected = []
+    for item in messages:
+        record = {key: value for key, value in item.items() if key != "runtimeInputSource"}
+        content = record.get("content")
+        if record.get("role") == "user" and record.get("hidden") is True and isinstance(content, str):
+            if content in (LOOP_REMINDER, CONTINUE_MESSAGE):
+                record = {"role": "system", "content": content}
+            elif not content.startswith(OUTPUT_FEEDBACK_PREFIX):
+                record.pop("hidden")
+                if not item.get("runtimeInputSource"):
+                    record["content"] = RuntimeInputSource.RUNTIME.model_text(content)
+        projected.append(record)
+    return project_native_runtime_state_history(projected)
 
 
 @dataclass(frozen=True)
@@ -452,7 +497,7 @@ class AgentRuntimeSessionState:
         cls, snapshot: dict[str, Any], *, binding: str,
     ) -> dict[str, Any]:
         required = {"binding", "turnId", "messages", "activeTurnStart"}
-        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices", "activeDispatchCallId", "adoptedSubAgentTaskIds"}:
+        if not isinstance(snapshot, dict) or not required <= set(snapshot) or set(snapshot) - required - {"toolOrder", "compactionRecovery", "toolBlockIds", "bindingToolDefinition", "humanUserMessageIndices", "activeDispatchCallId", "adoptedSubAgentTaskIds", "relayInputIds"}:
             raise ValueError("native snapshot fields are invalid")
         if "activeDispatchCallId" in snapshot and not isinstance(snapshot["activeDispatchCallId"], str):
             raise ValueError("native dispatch marker must be a string")
@@ -497,10 +542,16 @@ class AgentRuntimeSessionState:
                 raise ValueError("native snapshot message must be an object")
             role = message.get("role")
             if role == "user":
-                if (set(message) - {"role", "content", "hidden"} or not {"role", "content"} <= set(message)
+                if (set(message) - {"role", "content", "hidden", "runtimeInputSource"}
+                        or not {"role", "content"} <= set(message)
                         or ("hidden" in message and message["hidden"] is not True)
                         or not isinstance(message["content"], str) or not message["content"].strip()):
                     raise ValueError("native user message shape is invalid")
+                if "runtimeInputSource" in message and (
+                    not isinstance(message["runtimeInputSource"], str)
+                    or RuntimeInputSource(message["runtimeInputSource"]).is_human
+                ):
+                    raise ValueError("native runtime input source is invalid")
                 if pending:
                     raise ValueError("native snapshot has pending tool calls before user message")
                 normalized_messages.append(copy.deepcopy(message))
@@ -524,6 +575,11 @@ class AgentRuntimeSessionState:
                 pending.remove(call_id)
                 normalized_messages.append(copy.deepcopy(message))
             elif role == "system":
+                if is_output_continuation_control(message):
+                    if pending:
+                        raise ValueError("output continuation cannot interrupt pending tool calls")
+                    normalized_messages.append(copy.deepcopy(message))
+                    continue
                 if cls._is_native_runtime_state_message(message):
                     if pending:
                         raise ValueError("native runtime state cannot interrupt pending tool calls")
@@ -548,10 +604,16 @@ class AgentRuntimeSessionState:
         if "humanUserMessageIndices" in snapshot:
             indices = snapshot["humanUserMessageIndices"]
             if (not isinstance(indices, list) or any(type(index) is not int or index < 0
-                    or index >= len(messages) or messages[index].get("role") != "user" for index in indices)
+                    or index >= len(messages) or messages[index].get("role") != "user"
+                    or "runtimeInputSource" in messages[index] for index in indices)
                     or indices != sorted(set(indices))):
                 raise ValueError("native human user provenance is invalid")
             normalized["humanUserMessageIndices"] = list(indices)
+        relay_ids = snapshot.get("relayInputIds", [])
+        if not isinstance(relay_ids, list) or any(not _relay_input_id(item) for item in relay_ids):
+            raise ValueError("native relay input identities are invalid")
+        if relay_ids:
+            normalized["relayInputIds"] = sorted(set(relay_ids))
         if "bindingToolDefinition" in snapshot:
             normalized["bindingToolDefinition"] = copy.deepcopy(snapshot["bindingToolDefinition"])
         if "toolOrder" in snapshot:
@@ -602,11 +664,15 @@ class AgentRuntimeSessionState:
     def begin_native_turn(
         self, session_id: str, *, binding: str, turn_id: str, message: str,
         initial_history: list[dict[str, Any]] | None = None,
+        input_source: RuntimeInputSource = RuntimeInputSource.USER,
+        input_id: str = "",
     ) -> dict[str, Any]:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
         turn_id = self._native_required(turn_id, "turn id")
         message = self._native_required(message, "message")
+        input_message = _native_input_message(message, input_source)
+        current_relay_id = _relay_input_id(input_id) if input_source is RuntimeInputSource.AGENT_RELAY else ""
         with self._ports.shared_state_lock:
             self._load_native(session_id, binding)
             existing = self._native_conversations.get(session_id)
@@ -623,6 +689,9 @@ class AgentRuntimeSessionState:
                     return copy.deepcopy(existing)
                 if existing["binding"] == binding:
                     candidate = copy.deepcopy(existing)
+                    relay_ids = set(candidate.get("relayInputIds", []))
+                    if current_relay_id and current_relay_id in relay_ids:
+                        raise ValueError("Agent relay was already delivered to this session.")
                     indices = confirmed_human_indices(candidate, initial_history or [])
                     missing_prefix, missing_tail = missing_human_history(
                         initial_history or [], [candidate["messages"][index] for index in indices],
@@ -637,19 +706,37 @@ class AgentRuntimeSessionState:
                         human_indices.extend(range(tail_start, tail_start + len(missing_tail)))
                     candidate["humanUserMessageIndices"] = sorted([*range(offset), *human_indices])
                     adopted_ids = candidate.get("adoptedSubAgentTaskIds", [])
+                    new_relay_notes = []
                     for item in initial_history or []:
-                        if isinstance(item, dict) and (report := self._new_adopted_subagent_message(item, adopted_ids)):
+                        if not isinstance(item, dict):
+                            continue
+                        if classify_history(item) is RuntimeInputSource.AGENT_RELAY:
+                            relay_id = _relay_input_id(item.get("clientTurnId"))
+                            text = item.get("text")
+                            if (relay_id and relay_id != current_relay_id and relay_id not in relay_ids
+                                    and isinstance(text, str) and text.strip()):
+                                new_relay_notes.append(_native_input_message(text, RuntimeInputSource.AGENT_RELAY))
+                                relay_ids.add(relay_id)
+                        if report := self._new_adopted_subagent_message(item, adopted_ids):
                             candidate["messages"].append(report)
                     if adopted_ids:
                         candidate["adoptedSubAgentTaskIds"] = adopted_ids
                     candidate["turnId"] = turn_id
                     candidate["activeTurnStart"] = len(candidate["messages"])
-                    candidate["humanUserMessageIndices"].append(len(candidate["messages"]))
-                    candidate["messages"].append({"role": "user", "content": message})
+                    if input_source.is_human:
+                        candidate["humanUserMessageIndices"].append(len(candidate["messages"]))
+                    candidate["messages"].append(input_message)
+                    candidate["messages"].extend(new_relay_notes)
+                    if current_relay_id:
+                        relay_ids.add(current_relay_id)
+                    if relay_ids:
+                        candidate["relayInputIds"] = sorted(relay_ids)
                     self._native_size_ok(candidate)
                     self._save_native(session_id, candidate)
                     return copy.deepcopy(candidate)
             history_messages: list[dict[str, Any]] = []
+            history_humans: list[int] = []
+            relay_ids: set[str] = set()
             adopted_ids: list[str] = []
             for item in initial_history or []:
                 if not isinstance(item, dict):
@@ -663,7 +750,16 @@ class AgentRuntimeSessionState:
                     continue
                 role = item.get("role")
                 if role == "user":
+                    history_humans.append(len(history_messages))
                     history_messages.append({"role": "user", "content": text})
+                elif role == "runtime":
+                    source = classify_history(item)
+                    relay_id = _relay_input_id(item.get("clientTurnId")) if source is RuntimeInputSource.AGENT_RELAY else ""
+                    if relay_id:
+                        if relay_id == current_relay_id or relay_id in relay_ids:
+                            continue
+                        relay_ids.add(relay_id)
+                    history_messages.append(_native_input_message(text, source))
                 elif role == "agent":
                     history_messages.append({"role": "assistant", "content": text})
                 else:
@@ -671,13 +767,16 @@ class AgentRuntimeSessionState:
             candidate = {
                 "binding": binding,
                 "turnId": turn_id,
-                "messages": history_messages + [{"role": "user", "content": message}],
+                "messages": history_messages + [input_message],
                 "activeTurnStart": len(history_messages),
-                "humanUserMessageIndices": [index for index, item in enumerate(history_messages)
-                                            if item["role"] == "user"] + [len(history_messages)],
+                "humanUserMessageIndices": history_humans + ([len(history_messages)] if input_source.is_human else []),
             }
             if adopted_ids:
                 candidate["adoptedSubAgentTaskIds"] = adopted_ids
+            if current_relay_id:
+                relay_ids.add(current_relay_id)
+            if relay_ids:
+                candidate["relayInputIds"] = sorted(relay_ids)
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
             return copy.deepcopy(candidate)
@@ -771,21 +870,33 @@ class AgentRuntimeSessionState:
         if cls._native_pending(snapshot):
             raise ValueError("native compaction has pending calls")
         start = snapshot["activeTurnStart"]
-        retained = []
-        for index in human_indices(snapshot):
-            item = snapshot["messages"][index]
-            projected = human_user_projection(item)
-            if projected is not None:
-                retained.append(projected)
         known_humans = set(human_indices(snapshot))
+        active = snapshot["messages"][start]
+        active_program_input = bool(active.get("runtimeInputSource"))
+        active_runtime_indices = {
+            index for index in range(start, len(snapshot["messages"]))
+            if snapshot["messages"][index].get("runtimeInputSource") == RuntimeInputSource.AGENT_RELAY
+        }
+        if active_program_input:
+            active_runtime_indices.add(start)
+        retained = []
+        for index, item in enumerate(snapshot["messages"]):
+            if index in active_runtime_indices:
+                retained.append(copy.deepcopy(item))
+            elif index in known_humans and (projected := human_user_projection(item)) is not None:
+                retained.append(projected)
         source = project_native_runtime_state_history([
-            copy.deepcopy(item) for index, item in enumerate(snapshot["messages"])
-            if index < start or index not in known_humans
+            {**copy.deepcopy(item), **({"humanUser": True} if index in known_humans else {})}
+            for index, item in enumerate(snapshot["messages"])
+            if index < start or (index not in known_humans and index not in active_runtime_indices)
         ])
         if not retained or not source:
             raise ValueError("native compaction source is unavailable")
         retained.extend(restored_scan_result_policy(snapshot["messages"], retained))
         retained.extend(retained_renderer_corrections(snapshot["messages"]))
+        from responses_native_protocol import is_hidden_continuation
+        if is_hidden_continuation(snapshot["messages"]):
+            retained.append({"role": "system", "content": CONTINUE_MESSAGE})
         return source, retained
 
     def replace_native_compacted_history(
@@ -806,17 +917,18 @@ class AgentRuntimeSessionState:
             if current is None or current["binding"] != binding or current != expected:
                 raise ValueError("native snapshot compare-and-replace mismatch")
             _source, retained_messages = self.native_compaction_projection(current)
+            known_humans = human_indices(current)
+            active_turn_start = 1 + sum(index < current["activeTurnStart"]
+                and human_user_projection(current["messages"][index]) is not None for index in known_humans)
             candidate = {
                 "binding": binding,
                 "turnId": current["turnId"],
                 "messages": [{"role": "assistant", "content": summary}] + retained_messages,
-                "activeTurnStart": 1 + sum(index < current["activeTurnStart"]
-                                           and human_user_projection(current["messages"][index]) is not None
-                                           for index in human_indices(current)),
+                "activeTurnStart": active_turn_start,
                 "humanUserMessageIndices": [index + 1 for index, item in enumerate(retained_messages)
-                                            if item["role"] == "user"],
+                    if item["role"] == "user" and not item.get("runtimeInputSource")],
             }
-            for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition", "adoptedSubAgentTaskIds"):
+            for key in ("toolOrder", "toolBlockIds", "bindingToolDefinition", "adoptedSubAgentTaskIds", "relayInputIds"):
                 if key in current:
                     candidate[key] = copy.deepcopy(current[key])
             if recovery is not None or "compactionRecovery" in current:
@@ -826,25 +938,46 @@ class AgentRuntimeSessionState:
             self._save_native(session_id, normalized)
             return copy.deepcopy(normalized)
 
-    def append_native_user(self, session_id: str, *, binding: str, message: str, human: bool = True, hidden: bool = False) -> int:
+    def append_native_user(self, session_id: str, *, binding: str, message: str, human: bool = True,
+                           hidden: bool = False, input_source: RuntimeInputSource | None = None,
+                           input_id: str = "") -> int | None:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
         message = self._native_required(message, "message")
+        record = _native_input_message(message, input_source) if input_source is not None else {
+            "role": "user", "content": message,
+        }
+        if input_source is not None:
+            human = input_source.is_human
+        relay_id = _relay_input_id(input_id) if input_source is RuntimeInputSource.AGENT_RELAY else ""
         with self._ports.shared_state_lock:
             snapshot = self._native_conversations.get(session_id)
             if snapshot is None or snapshot["binding"] != binding:
                 raise ValueError("native conversation binding mismatch")
             if self._native_pending(snapshot):
                 raise ValueError("native conversation has pending tool calls")
+            if relay_id and relay_id in snapshot.get("relayInputIds", []):
+                return None
             candidate = copy.deepcopy(snapshot)
             candidate["humanUserMessageIndices"] = human_indices(snapshot)
             if human and not hidden:
                 candidate["humanUserMessageIndices"].append(len(candidate["messages"]))
             index = len(candidate["messages"])
-            candidate["messages"].append({"role": "user", "content": message, **({"hidden": True} if hidden else {})})
+            candidate["messages"].append({**record, **({"hidden": True} if hidden else {})})
+            if relay_id:
+                candidate["relayInputIds"] = sorted([*candidate.get("relayInputIds", []), relay_id])
             self._native_size_ok(candidate)
             self._save_native(session_id, candidate)
             return index
+
+    def append_native_output_continuation(self, session_id: str, *, binding: str) -> None:
+        with self._ports.shared_state_lock:
+            snapshot = self._native_conversations.get(session_id)
+            if snapshot is None or snapshot["binding"] != binding:
+                raise ValueError("native conversation binding mismatch")
+            candidate = copy.deepcopy(snapshot)
+            candidate["messages"].append({"role": "system", "content": CONTINUE_MESSAGE})
+            self._save_native(session_id, self._validate_native_snapshot(candidate, binding=binding))
 
     @staticmethod
     def _is_native_runtime_state_message(message: dict[str, Any]) -> bool:
@@ -859,7 +992,7 @@ class AgentRuntimeSessionState:
             return False
         required = {"exposureLayer", "projectContextActive", "allowedRuntimeActions", "availableToolNames"}
         optional = {"planMode", "modeConstraint", "projectPath", "loadedToolBlocks", "shellExecutor",
-                    "compactionRecoveryInformation", "checkpointChoice", "executionMode", "questionTask"}
+                    "compactionRecoveryInformation", "checkpointChoice", "executionMode", "questionTask", "toolLoopReminder"}
         if not isinstance(state, dict) or not required <= state.keys() or state.keys() - required - optional:
             return False
         if not isinstance(state["exposureLayer"], str) or state["exposureLayer"] not in {"planning", "execution"} or not isinstance(state["projectContextActive"], bool):
@@ -871,6 +1004,7 @@ class AgentRuntimeSessionState:
                 and ("planMode" not in state or isinstance(state["planMode"], bool))
                 and ("executionMode" not in state or state["executionMode"] in ("approval", "auto", "roslyn_full_auto"))
                 and ("questionTask" not in state or isinstance(state["questionTask"], dict))
+                and ("toolLoopReminder" not in state or state["toolLoopReminder"] == LOOP_REMINDER)
                 and ("checkpointChoice" not in state or (
                     isinstance(state["checkpointChoice"], dict)
                     and state["checkpointChoice"].get("mode") in {"skip", "require"}
@@ -1176,7 +1310,7 @@ class AgentRuntimeSessionState:
                 if not text:
                     continue
                 role = str(entry.get("role") or "user").strip().lower()
-                if role not in ("user", "agent"):
+                if role not in ("user", "agent", "runtime"):
                     role = "user"
                 turns.append(
                     {
@@ -1548,6 +1682,7 @@ class AgentRuntimeSessionState:
         followup_lane_id: str = "",
         reserve: Callable[[str], dict[str, Any]] | None = None,
         plan_mode: bool | None = None,
+        authenticated_answer: str = "",
     ) -> dict[str, Any]:
         session_id = str(session_id or "").strip()[:180]
         target_client_turn_id = str(target_client_turn_id or "").strip()[:240]
@@ -1582,6 +1717,8 @@ class AgentRuntimeSessionState:
                 "inputId": input_id,
                 "message": message,
             }
+            if authenticated_answer:
+                mailbox_item["authenticatedAnswer"] = authenticated_answer
             if attachments:
                 mailbox_item["attachments"] = copy.deepcopy(attachments)
             normalized_lane_id = str(followup_lane_id or "").strip()[:180]

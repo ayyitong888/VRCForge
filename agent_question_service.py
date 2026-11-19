@@ -777,10 +777,12 @@ class AgentQuestionService:
             return int(item.get("runtimeContinuationStatus") in {"queued", "claimed", "running", "cancelling"})
 
         questions.sort(key=lambda item: (priority(item), str(item.get("updatedAt") or item.get("createdAt") or "")), reverse=True)
+        retired = [item for item in questions if item.get("retiredLoopPause")] if include_answered and limit > 0 else []
+        questions = [item for item in questions if not item.get("retiredLoopPause")]
         history_budget = max(0 if keep_active else 1, min(int(limit), AGENT_QUESTION_MAX_ITEMS))
         if keep_active:
             history_budget += sum(priority(item) > 0 for item in questions)
-        questions = questions[:history_budget]
+        questions = questions[:history_budget] + retired
         return {
             "ok": True,
             "schema": "vrcforge.agent_questions.v1",
@@ -823,7 +825,23 @@ class AgentQuestionService:
         return receipts
 
     def _project(self, *, include_answered: bool = False) -> dict[str, dict[str, object]]:
-        return self._persistence.project(include_answered=include_answered)
+        questions = self._persistence.project(include_answered=include_answered)
+        for question_id, item in list(questions.items()):
+            if item.get("sourceTool") != RUNTIME_TOOL_LOOP_SOURCE or item.get("status") != "pending":
+                continue
+            if not include_answered:
+                del questions[question_id]
+                continue
+            # Legacy loop stops were recorded as blocking questions. Keep the
+            # origin for display without changing the journal or inventing an answer.
+            questions[question_id] = {
+                **{key: item[key] for key in ("questionId", "sourceTool", "sessionId", "projectRoot",
+                                            "originClientTurnId", "originTurnId", "createdAt") if key in item},
+                "status": "cancelled",
+                "blocking": False,
+                "retiredLoopPause": True,
+            }
+        return questions
 
     def _require_scope(self, existing: Mapping[str, object], values: Mapping[str, object]) -> None:
         requested_session = self._scope_text(values, "sessionId", "session_id")

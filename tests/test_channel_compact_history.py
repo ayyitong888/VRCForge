@@ -43,6 +43,45 @@ def test_legacy_compact_and_uncovered_history_remain_in_projection():
     ]
 
 
+def test_actual_relay_and_goal_transcript_sources_survive_channel_and_compaction(request):
+    from context_compaction import compact_context
+    from test_agent_goal_store import AgentGoalStoreTests
+    from test_cross_session_conversation_service import Harness, trusted_context
+
+    harness = Harness()
+    harness.service().send_message({**trusted_context(), "chatId": "offscreen", "message": "Keep the blue outfit."})
+    relay = harness.chats["offscreen"]["items"][-1]
+    goal_fixture = AgentGoalStoreTests()
+    goal_fixture.setUp()
+    request.addfinalizer(goal_fixture.tearDown)
+    _, delivery = goal_fixture.start_delivery(goal_fixture.make_store())
+    goal_text = delivery["resumePrompt"]
+    items = [
+        relay,
+        {"id": delivery["userItemId"], "type": "user", "text": goal_text},
+        {"id": delivery["agentItemId"], "type": "agent",
+         "response": {"goalDeliveryId": delivery["deliveryId"], "plan": {"reply": "Goal still in progress."}}},
+        {"type": "question_answer", "text": "Use navy blue."},
+    ]
+    history = ChannelRuntimeAdapter._runtime_history(items)
+    assert history == [
+        {"role": "user", "authorRole": "agent_relay", "text": relay["text"]},
+        {"role": "user", "authorRole": "goal", "text": goal_text},
+        {"role": "agent", "text": "Goal still in progress."},
+        {"role": "user", "text": "Use navy blue."},
+    ]
+    pages = []
+    result = compact_context(history, summarizer=lambda prompt: pages.append(prompt) or {"summary": "Test summary"})
+    entries = json.loads(pages[0].split("REDACTED_ENTRIES=", 1)[1])
+    assert entries == [
+        {"role": "runtime", "text": relay["text"]},
+        {"role": "runtime", "text": goal_text},
+        {"role": "assistant", "text": "Goal still in progress."},
+        {"role": "user", "text": "Use navy blue."},
+    ]
+    assert result["recovery"]["sourceEntries"] == entries
+
+
 def test_control_context_keeps_recovery_separate_from_compact_model_history():
     items = compacted_items()
     context = ChannelRuntimeAdapter._control_context({"id": "chat", "items": items}, "")

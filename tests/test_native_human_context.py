@@ -151,6 +151,7 @@ def test_both_real_generated_user_producers_record_nonhuman_provenance():
     turn._planner = SimpleNamespace(native_result_observation=lambda item, **kwargs: item)
     turn._project_context_active = True
     turn._queued_calls, turn._native_steers = [], []
+    turn._parked_subagent_calls = False
     turn.settle()
     snapshot = turn.snapshot()
     assert snapshot['humanUserMessageIndices'] == [0]

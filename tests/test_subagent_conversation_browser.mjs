@@ -12,14 +12,14 @@ const baseline = process.argv.includes("--baseline");
 const evidence = process.env.VRCFORGE_SUBAGENT_EVIDENCE_DIR ? resolve(process.env.VRCFORGE_SUBAGENT_EVIDENCE_DIR) : null;
 if (evidence) await mkdir(evidence, { recursive: true });
 const tasks = [
-  { id: "first", childSessionId: "child-a", role: "llm_readonly", displayName: "Wardrobe review", task: "Read the original wardrobe layers.", status: "completed", summary: "Short first summary.", createdAt: "2026-10-28T10:00:00Z", canResume: true },
+  { id: "first", childSessionId: "child-a", role: "llm_readonly", displayName: "Wardrobe review", task: "Read the original wardrobe layers.", taskSource: "user", status: "completed", summary: "Short first summary.", createdAt: "2026-10-28T10:00:00Z", canResume: true },
   { id: "second", resumeOf: "first", childSessionId: "child-a", role: "llm_readonly", displayName: "Wardrobe review", task: "Compare the second outfit.", status: "completed", summary: "Short second summary.", createdAt: "2026-10-28T10:01:00Z", canResume: true },
-  { id: "failed", childSessionId: "child-b", role: "llm_readonly", displayName: "Failed inspection", task: "Read the unavailable file.", status: "failed",
+  { id: "failed", childSessionId: "child-b", role: "llm_readonly", displayName: "Failed inspection", task: "Read the unavailable file.", taskSource: "retry", status: "failed",
     error: "OSError: invalid handle at fixture-internal-path", summary: "OSError: invalid handle at fixture-internal-path",
     result: { finalReport: "The source didn’t include a test scene. I checked the material list.", providerRoute: { model: "unverified-route" } },
     createdAt: "2026-10-28T10:02:00Z" },
   { id: "live", childSessionId: "child-c", role: "outfit_package_inspection", handler: "llm_readonly", model: "requested-role-model", displayName: "Live inspection", task: "Inspect the remaining sleeve.", status: "running", createdAt: "2026-10-28T10:03:00Z" },
-  { id: "fixed", role: "outfit_package_inspection", handler: "outfit_package_inspection", parentModel: "original-parent-model", displayName: "Package inspection", task: "Check the package type.",
+  { id: "fixed", role: "outfit_package_inspection", handler: "outfit_package_inspection", parentModel: "original-parent-model", displayName: "Package inspection", task: "Check the package type.", taskSource: "parent_agent",
     status: "completed", summary: "Recorded package summary.", result: { packageKind: "unitypackage", proposedNextAction: "Use the package." },
     events: [{ event: "fixture-completed" }], createdAt: "2026-10-28T10:04:00Z",
     startedAt: "2026-10-28T10:04:01Z", stoppedAt: "2026-10-28T10:04:04Z" },
@@ -195,6 +195,7 @@ try {
   assert.doesNotMatch(await failedThread.innerText(), /OSError|fixture-internal-path/);
   await failedThread.click();
   const surface=page.locator('[data-vrcforge-subagent-workspace-surface]');
+  await surface.locator("[data-user-message-author]").getByText("Run again", { exact: true }).waitFor();
   assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model: Not recorded");
   assert.doesNotMatch(await surface.innerText(), /unverified-route/);
   await surface.getByText("The sub-agent couldn’t finish this task. Try running it again.",{exact:true}).waitFor();
@@ -212,6 +213,7 @@ try {
   await page.evaluate(()=>window.resetTasks());
   await page.locator('[data-vrcforge-open-subagent-thread="fixed"]').click();
   await surface.getByText("Recorded package summary.", { exact: true }).waitFor();
+  await surface.locator("[data-user-message-author]").getByText("Delegated by the main assistant", { exact: true }).waitFor();
   assert.equal(await surface.getByText("Recorded package summary.", { exact: true }).count(), 1);
   assert.equal(await surface.locator("details").count(), 0, "default child view has no native raw result disclosure");
   const technicalDetails = surface.locator("[data-subagent-technical-details]");
@@ -247,6 +249,10 @@ try {
         `Main conversation model: ${recordedInspection.parentModel}`);
     }
     const card = surface.locator(`[data-vrcforge-agent-client-turn="${id}"]`);
+    const source = card.locator("[data-subagent-user-message]");
+    await source.getByText("Delegated by the main assistant", { exact: true }).waitFor();
+    await source.getByRole("button", { name: "Copy", exact: true }).click();
+    assert.equal(await page.evaluate(() => window.copiedReply), task, "attribution stays out of the copied task text");
     const summary = inspection.summary;
     const answer = `Found ${summary.unityPackageCount} Unity packages, ${summary.prefabCandidateCount} prefab candidates, and ${summary.textureCount} textures.`;
     const process = card.locator("[data-agent-turn-process-group]");
@@ -299,6 +305,7 @@ try {
   await surface.getByText("Full second-turn report.",{exact:true}).waitFor();
   const parentCard = page.locator("[data-parent-parity] [data-vrcforge-agent-client-turn]");
   const childCard = surface.locator('[data-vrcforge-agent-client-turn="first"]');
+  assert.equal(await childCard.locator("[data-user-message-author]").count(), 0);
   const openButton = root => root.locator(":scope > div > button[aria-expanded]").first();
   const getProcessButton = card => openButton(card.locator("[data-agent-turn-process-group]"));
   assert.equal(await childCard.locator("[data-user-message-bubble]").innerText(), await parentCard.locator("[data-user-message-bubble]").innerText());

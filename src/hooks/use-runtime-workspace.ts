@@ -59,7 +59,7 @@ function isActiveAgentQuestion(question: AgentQuestion) {
 
 function retainRecentAgentQuestions(questions: AgentQuestion[]) {
   let history = 0;
-  return questions.filter((question) => isActiveAgentQuestion(question) || history++ < 8);
+  return questions.filter((question) => question.retiredLoopPause || isActiveAgentQuestion(question) || history++ < 8);
 }
 
 export function useRuntimeWorkspace({

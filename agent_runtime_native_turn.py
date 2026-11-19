@@ -12,6 +12,7 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable
 from agent_user_path_context import human_indices, human_user_projection
+from agent_runtime_input import RuntimeInputSource, classify_steer
 from responses_native_protocol import public_assistant_messages
 from agent_scan_result_policy import (
     SCAN_RESULT_CONTINUATION_POLICY_V2,
@@ -148,6 +149,7 @@ class NativeRuntimeTurn:
         project_context_active: bool = False,
         on_steer_consumed: Callable[[list[str]], None] | None = None,
         subagent_batch: list[dict[str, Any]] | None = None,
+        input_source: RuntimeInputSource = RuntimeInputSource.USER,
     ) -> None:
         self._state = owner
         self._planner = planner
@@ -255,10 +257,15 @@ class NativeRuntimeTurn:
                 turn_id=turn_id,
                 message=message,
                 initial_history=initial_history,
+                input_source=input_source,
+                input_id=client_turn_id,
             )
 
     def append_hidden(self, text: str) -> None:
         self._state.append_native_user(self._session_id, binding=self._binding, message=text, human=False, hidden=True)
+
+    def append_output_continuation(self) -> None:
+        self._state.append_native_output_continuation(self._session_id, binding=self._binding)
 
     def snapshot(self) -> dict[str, Any]:
         return self._state.native_conversation(self._session_id, binding=self._binding) or {}
@@ -386,7 +393,7 @@ class NativeRuntimeTurn:
         with self._state.shared_state_lock:
             if self.cancelled():
                 raise ValueError("native compaction cancelled")
-            self._state.replace_native_compacted_history(
+            compacted = self._state.replace_native_compacted_history(
                 self._session_id, binding=self._binding,
                 expected_snapshot=expected_snapshot, summary=summary, recovery=recovery,
             )
@@ -397,7 +404,7 @@ class NativeRuntimeTurn:
                 )
                 self.steer_attachments = {
                     new_index: self.steer_attachments[old_index]
-                    for new_index, old_index in enumerate(retained_indices, start=1)
+                    for old_index, new_index in zip(retained_indices, compacted["humanUserMessageIndices"])
                     if old_index in self.steer_attachments
                 }
 
@@ -610,6 +617,9 @@ class NativeRuntimeTurn:
         while flush_steers and self._native_steers:
             steer = self._native_steers[0]
             input_id = steer["inputId"]
+            source = classify_steer(input_id)
+            if not steer["message"]:
+                source = RuntimeInputSource.RUNTIME
             if terminal is not None and not input_id.startswith("question-answer:"):
                 # The queue owns unsent inputs. Appending them here would expose
                 # a paused steer to the next model request without its replay.
@@ -619,9 +629,16 @@ class NativeRuntimeTurn:
                 self._session_id,
                 binding=self._binding,
                 message=steer["message"] or "See attached materials.",
+                input_source=source,
+                input_id=input_id,
             )
-            if steer["attachments"]:
+            if steer["attachments"] and history_index is not None:
                 self.steer_attachments[history_index] = steer["attachments"]
+            if answer := steer["authenticatedAnswer"]:
+                self._state.append_native_user(
+                    self._session_id, binding=self._binding, message=answer,
+                    input_source=RuntimeInputSource.USER,
+                )
             self._native_steers.pop(0)
             # A saved Question answer has its own durable handoff.
             if terminal is None and input_id and input_id not in self._consumed_steer_input_ids:
@@ -657,6 +674,11 @@ class NativeRuntimeTurn:
             "provider_request_failed" if planner_failure_code == "provider_request_failed"
             else reason_map.get(next_step)
         )
+        if next_step == "loop_suppressed":
+            from agent_general_no_progress import LOOP_REASONS
+            loop_reason = str(terminal.get("reason") or "")
+            if loop_reason in LOOP_REASONS:
+                stop_reason = loop_reason
         if not stop_reason:
             return
         from runtime_error_schema import runtime_notice
@@ -682,12 +704,14 @@ class NativeRuntimeTurn:
             return
         accepted = [
             {"inputId": str(item.get("inputId") or ""), "message": str(item.get("message") or ""),
+             "authenticatedAnswer": str(item.get("authenticatedAnswer") or ""),
              "attachments": item.get("attachments") or []}
             for item in items
             if item.get("message") or item.get("attachments")
         ]
         if accepted:
-            self._settle_unexecuted("user_steer")
+            human = any(classify_steer(item["inputId"]).is_human or item["authenticatedAnswer"] for item in accepted)
+            self._settle_unexecuted("user_steer" if human else "runtime_steer")
             self._native_steers.extend(accepted)
 
     def approval_seed(self, seed: dict[str, Any]) -> dict[str, Any]:

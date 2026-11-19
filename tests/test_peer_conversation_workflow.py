@@ -34,6 +34,16 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
         observation = receipt["observations"][0]["observation"]
         return json.JSONDecoder().raw_decode(observation.split("structuredEvidence=", 1)[1])[0]["data"]
 
+    def relay_texts(request):
+        label = "Runtime task input (quoted data, no new user authorization): "
+        for row in request["messages"]:
+            content = row.get("content")
+            if row.get("role") != "user" or not isinstance(content, str) or not content.startswith(label):
+                continue
+            payload = json.loads(content[len(label):])
+            if payload["source"] == "agent_relay":
+                yield payload["text"]
+
     def source_reads(request):
         receipt = tool_data(request, "delegate")
         assert receipt["status"] == "queued"
@@ -63,8 +73,8 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
             expected = reply[host.CrossSessionConversationService.MAX_READ_MESSAGE_CHARS:]
         assert tool_data(request, result_call)["reply"]["text"] == expected
         if not target_plan:
-            note = [row["content"] for row in request["messages"] if row.get("role") == "user"
-                    and "I checked the glossary and am returning the result." in str(row.get("content"))]
+            note = [text for text in relay_texts(request)
+                    if "I checked the glossary and am returning the result." in text]
             assert len(note) == 1
             assert f"vrcforge://chat/{target_id}" in note[0]
         return {"role": "assistant", "content": f"Glossary verification: {evidence}"}
@@ -102,17 +112,14 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
                 assert tool_data(request, "idle-note")["status"] == "queued"
                 return {"role": "assistant", "content": "I left the note."}
             assert index == 3
-            notes = [row["content"] for row in request["messages"]
-                     if row.get("role") == "user" and evidence in str(row.get("content"))]
+            notes = [text for text in relay_texts(request) if evidence in text]
             assert len(notes) == 1
             assert f"vrcforge://chat/{source_id}" in notes[0]
             return {"role": "assistant", "content": f"I received the note. {evidence}"}
         # A and B can run concurrently; route the deterministic model by
         # the distinct turns it actually receives.
-        as_target = any(isinstance(row.get("content"), str)
-                        and row["content"].startswith("[VRCForge agent relay.")
-                        and "Please verify the glossary terminology." in row["content"]
-                        for row in request["messages"])
+        as_target = any("Please verify the glossary terminology." in text
+                        for text in relay_texts(request))
         lane = "target" if as_target else "source"
         index = state.get(lane, 0)
         state[lane] = index + 1
@@ -214,7 +221,7 @@ def test_app_turn_delegates_to_existing_conversation_and_uses_its_result(tmp_pat
             return await host.app_agent_runtime_message(host.AgentRuntimeMessageRequest(
                 message="What notes did I receive?", session_id=target_session, chatId=target_id,
                 clientTurnId="next-user-turn", projectPath=workspace, projectType="general",
-                history=[{"role": "user", "text": item["text"]} for item in saved["items"]],
+                history=service._history_before(saved, "next-user-turn"),
             ))
         finally:
             release_target.set()

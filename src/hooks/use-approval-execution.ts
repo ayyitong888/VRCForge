@@ -5,6 +5,7 @@ import type { ActiveView } from "../lib/app-view";
 import type { AgentApproval, AgentRuntimeResponse } from "../lib/api";
 import {
   approveAgentApproval,
+  fetchAgentApprovals,
   rejectAgentApproval,
   requestApprovalRevision,
 } from "../lib/api";
@@ -159,12 +160,15 @@ export function useApprovalExecution({
     const taskSessionId = pendingApproval?.taskContext?.sessionId || "";
     const ownerChatId = chatIdForSessionId(taskSessionId);
     const resultChatId = taskSessionId ? ownerChatId : "";
+    const externalApproval = externalApprovalItems.some((item) => item.id === approvalId);
+    let receivedApproval = false;
     try {
       const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
-      if (externalApprovalItems.some((item) => item.id === approvalId)) {
-        if (!payload.ok) {
-          throw new Error(t("approval.notificationFailed"));
-        }
+      if (!payload.ok) {
+        throw new Error(t("approval.decisionResultUnconfirmed"));
+      }
+      receivedApproval = true;
+      if (externalApproval) {
         await refresh();
         return;
       }
@@ -210,8 +214,31 @@ export function useApprovalExecution({
       if (shouldRefreshCheckpoints) {
         await loadCheckpoints();
       }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
+      if (receivedApproval) {
+        setError(t("approval.decisionResultRefreshFailed"));
+        return;
+      }
+      // Losing the reply does not tell us whether the write finished. Read
+      // back this exact approval; do not send the write request again.
+      const latest = externalApproval ? null : await fetchAgentApprovals(endpoint, {
+        projectRoot: approvalScope.expectedProjectRoot,
+        globalOnly: approvalScope.globalOnly,
+      }).catch(() => null);
+      const approval = latest?.ok ? latest.approvals.find((item) => item.id === approvalId) : undefined;
+      if (approval?.status === "applied") {
+        const targetTool = approval.targetTool || pendingTargetTool;
+        await Promise.allSettled([
+          refresh(),
+          refreshRuntimeRuns(false),
+          ...(targetTool === "vrcforge_repair_project_chat_store" ? [reloadChatStorageState()] : []),
+          ...(activeView === "checkpoints" || targetTool === "vrcforge_restore_checkpoint" ||
+            targetTool === "vrcforge_resolve_interrupted_apply_recovery" ? [loadCheckpoints()] : []),
+        ]);
+        setRuntimeNotice(t("approval.decisionResultApplied"));
+      } else {
+        setError(t("approval.decisionResultUnconfirmed"));
+      }
     } finally {
       clearApprovalAction(approvalId);
     }

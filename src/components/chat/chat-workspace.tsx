@@ -362,6 +362,9 @@ export function ChatWorkspace({
     [agentQuestions, runtimeRuns],
   );
   const pendingAgentQuestions = projectedAgentQuestions.filter((question) => questionContinuationDisplay(question) !== "settled");
+  const retiredLoopPauses = new Set(projectedAgentQuestions
+    .filter((question) => question.retiredLoopPause)
+    .map((question) => question.originClientTurnId));
   const activeQuestionContinuation = pendingAgentQuestions.find(
     (question) => questionContinuationDisplay(question) === "active",
   );
@@ -858,6 +861,7 @@ export function ChatWorkspace({
                 item={item}
                 developerOptionsEnabled={developerOptionsEnabled}
                 sharedProcess={sharedProcess}
+                retiredLoopPause={item.type === "agent" && Boolean(turnId) && retiredLoopPauses.has(turnId)}
                 onOpenSubAgent={onOpenSubAgent}
                 runtimeActive={itemRuntimeActive}
                 questionAlreadyShown={questionAlreadyShown}
