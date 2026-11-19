@@ -52,7 +52,7 @@ import { DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS, type AgentRuntimeFollowup } from 
 import { createSteerDeliveryTrace, type SteerDeliveryTraceEvent } from "../lib/chat-steer-delivery";
 import {
   applyGeneratedChatTitle,
-  chatTitleRunSucceeded,
+  canRequestChatTitleAfterTurn,
   shouldGenerateChatTitle,
 } from "../lib/chat-title";
 
@@ -510,23 +510,26 @@ export function useChatRunController({
   }
 
   async function maybeGenerateChatTitle(
+    targetEndpoint: string,
     chatId: string,
-    message: string,
-    provider: string,
-    model: string,
+    chatSessionId: string,
+    turn: QueuedTurn,
     fallbackTitle: string,
   ): Promise<void> {
+    const ownsTitleInput = (chat: ChatThread) => chat.sessionId === chatSessionId
+      && chat.items.some((item) => item.type === "user" && item.clientTurnId === turn.id && item.text === turn.text);
     const current = getChatById(chatId);
-    if (!current || current.titleSource === "manual" || current.title !== fallbackTitle) {
+    if (!current || current.titleSource === "manual" || current.title !== fallbackTitle || !ownsTitleInput(current)) {
       return;
     }
     if (titleGenerationAttemptedRef.current.has(chatId)) return;
     titleGenerationAttemptedRef.current.add(chatId);
     try {
-      const result = await requestChatTitle(endpoint, message, provider, model);
+      const result = await requestChatTitle(targetEndpoint, turn.text, turn.provider, turn.model);
       const generatedTitle = result.ok ? result.title.trim() : "";
       if (!generatedTitle) return;
-      updateChat(chatId, (current) => applyGeneratedChatTitle(current, fallbackTitle, generatedTitle));
+      updateChat(chatId, (current) => ownsTitleInput(current)
+        ? applyGeneratedChatTitle(current, fallbackTitle, generatedTitle) : current);
       await persistChatsNow?.().catch(() => undefined);
     } catch {
       // The first-message title remains the durable fallback when this
@@ -1720,9 +1723,10 @@ export function useChatRunController({
       updateChat(chatId, (current) => ({
         ...applyRuntimeResponseToChat(current),
       }));
-      if (shouldGenerateTitle && chatTitleRunSucceeded(response)) {
+      if (shouldGenerateTitle && !abortController.signal.aborted && !owner.stopAcknowledgement
+        && canRequestChatTitleAfterTurn(response)) {
         const fallbackTitle = message.length > 24 ? `${message.slice(0, 24)}...` : message;
-        void maybeGenerateChatTitle(chatId, message, turn.provider, turn.model, fallbackTitle);
+        void maybeGenerateChatTitle(targetEndpoint, chatId, chatSessionId, turn, fallbackTitle);
       }
       if (midTurnCompactionApplied && persistChatsNow) {
         void persistChatsNow().catch(reportChatSaveError);

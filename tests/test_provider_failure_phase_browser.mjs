@@ -52,6 +52,9 @@ withoutFinal.timeline = [
     payload: { phase: 'commentary', summary: 'Progress already reported.' } },
 ];
 const toolError = "HTTP 500 raw tool failure sentinel";
+const invalidAction = structuredClone(response);
+invalidAction.plan.plannerFailure = { code: 'planner_invalid_response', phase: 'post_tool' };
+invalidAction.plan.unresolvedArgumentValidation = { actionId: 'rejected-inspection' };
 const legacyTool = {
   ...response, plan: { nextStep: "done" }, timeline: [], steps: [],
   shell: { status: "failed", error: toolError },
@@ -71,18 +74,22 @@ void initializeI18n().then(()=>setLocale('zh-CN')).then(()=>{
   createRoot(document.getElementById('legacy')).render(<ConversationCard item={{id:'legacy',type:'error',text:'Runtime stack trace sentinel'}}/>);
   for (const [id, response, developerOptionsEnabled] of [
     ['legacy-tool', ${JSON.stringify(legacyTool)}, false],
+    ['invalid-action', ${JSON.stringify(invalidAction)}, false],
     ['native-tool', ${JSON.stringify(nativeTool)}, true],
   ]) {
     createRoot(document.getElementById(id)).render(<ConversationCard item={{id,type:'agent',response}} developerOptionsEnabled={developerOptionsEnabled}/>);
   }
 });
 `},bundle:true,write:false,format:'iife',jsx:'automatic',platform:'browser'});
-const server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end(`<div id="card"></div><div id="partial"></div><div id="legacy"></div><div id="legacy-tool"></div><div id="native-tool"></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`)});
+const server=createServer((_req,res)=>{res.setHeader('Content-Type','text/html');res.end(`<div id="card"></div><div id="partial"></div><div id="legacy"></div><div id="legacy-tool"></div><div id="native-tool"></div><div id="invalid-action"></div><script>${bundle.outputFiles[0].text.replaceAll('</script','<\\/script')}</script>`)});
 let browser;
 try{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));browser=await chromium.launch({headless:true,channel:'msedge'});
  const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(`http://127.0.0.1:${server.address().port}`);
  await page.locator('#card [data-vrcforge-terminal-status]').waitFor();
+ const invalidActionText = await page.locator('#invalid-action').innerText();
+ assert.ok(invalidActionText.includes(messages.chat.runtimeTerminal.previousResultsKept));
+ assert.match(invalidActionText, /助手没能修正下一步操作/);
  await page.locator('#partial [data-vrcforge-terminal-status]').waitFor();
  assert.equal(await page.locator('#partial [data-vrcforge-terminal-status]').count(),1,'commentary-only turns still get one error card');
  assert.ok((await page.locator('#legacy').innerText()).includes(messages.chat.runError));

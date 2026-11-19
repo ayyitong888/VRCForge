@@ -11,7 +11,7 @@ assert.match(api, /\/api\/app\/chat-title/);
 assert.match(types, /titleSource\?: "auto" \| "manual"/);
 assert.match(sessions, /titleSource: "manual"/);
 assert.match(controller, /titleGenerationAttemptedRef/);
-assert.match(controller, /requestChatTitle\(endpoint, message, provider, model\)/);
+assert.match(controller, /requestChatTitle\(targetEndpoint, turn\.text, turn\.provider, turn\.model\)/);
 assert.match(controller, /current\.titleSource === "manual"/);
 assert.match(controller, /shouldGenerateChatTitle\(chat, baseItems\.length, background\)/);
 

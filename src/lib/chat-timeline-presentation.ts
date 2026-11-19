@@ -283,9 +283,12 @@ export function projectRuntimeResponseForDisplay(
   const failureCode = String(response.plan.plannerFailure?.code || "");
   const interruptedQuestion = response.continuationSource === "question_answered"
     && (response.turnId || response.turn_id)?.startsWith("interrupted:question:");
-  const failureMessageKey = interruptedQuestion
-    ? "chat.runtimeTerminal.questionContinuationInterruptedMessage"
-    : RUNTIME_FAILURE_MESSAGE_KEYS[failureCode];
+  let failureMessageKey = RUNTIME_FAILURE_MESSAGE_KEYS[failureCode];
+  if (interruptedQuestion) {
+    failureMessageKey = "chat.runtimeTerminal.questionContinuationInterruptedMessage";
+  } else if (failureCode === "planner_invalid_response" && response.plan.unresolvedArgumentValidation?.actionId) {
+    failureMessageKey = "chat.runtimeTerminal.invalidActionMessage";
+  }
   if (!failureMessageKey) return response;
   const phase = response.plan.plannerFailure?.phase;
   const terminalResult = /^(ok|done|completed|success|succeeded|executed|failed|error|rejected)$/i;

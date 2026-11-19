@@ -224,6 +224,7 @@ RUNTIME_NATIVE_TOOL_PROTOCOL = (
     "enter_execution exposes write tools for authorized changes. Host Shell handles general commands; "
     "registered Unity project operations use supervised project tools. "
     "For correctable failures use action=correct with tool, arguments and the exact correction_for_action_id.\n"
+    "For a rejected native batch, resubmit ordinary tool calls directly.\n"
     'Use ordinary public assistant content for updates; use phase="commentary" only when the protocol supports it. '
     "When work remains, include the next tool call in the same response as the update. "
     "Do not use action=reply for a progress update.\n"
@@ -2045,7 +2046,8 @@ class RuntimePlannerService:
         result = ensure_dict(step.get("result"))
         outcome = ensure_dict(step.get("outcome"))
         observation = {**{key: sanitize_planner_observation_text(step[key], 180) for key in ("kind", "status", "actionId") if key in step},
-                "runtimeTool": sanitize_planner_observation_text(step.get("tool"), 180),
+                **({"runtimeTool": sanitize_planner_observation_text(step.get("tool"), 180)}
+                   if step.get("tool") != "native_batch" else {}),
                 **({"admissionError": sanitize_planner_observation_text(result.get("summary"), 600)}
                    if result.get("code") == "planner_invalid_response" else {}),
                 "outcome": {key: sanitize_planner_observation_text(outcome[key], 80)
@@ -3065,7 +3067,11 @@ class RuntimePlannerService:
                             if rejected_native_batch:
                                 native_turn.reject_queued_receipt()
                                 rejection = {"kind": "control", "tool": "native_batch", "arguments": None,
-                                    "summary": "This response called a tool not exposed in tools. No call in this response was executed. Use only the fixed tools; use call_tool for loaded tools, and wait for loader results before invoking newly loaded tools.",
+                                    "summary": (
+                                        "No call in this batch was executed. Resubmit using the current advertised "
+                                        "tools and wait for loader results before invoking newly loaded tools. "
+                                        "Send ordinary tool calls directly; native_batch is not callable."
+                                    ),
                                     "issues": [{"path": "tool_calls", "code": "tool_not_visible"}]}
                                 return self._planner_argument_error_plan(
                                     base={"planner": "llm", "nativeCallIds": native_call_ids,
@@ -3087,9 +3093,12 @@ class RuntimePlannerService:
                                 native_turn.reject_queued_receipt()
                                 rejection = {"kind": "control", "tool": "native_batch", "arguments": None,
                                     "summary": (
-                                        "No call in this batch was executed. " + str(invalid_proposal["summary"])
+                                        "No call in this batch was executed. Resubmit the corrected calls using "
+                                        "currently advertised tool names. Send ordinary tool calls directly; "
+                                        "native_batch is not callable. " + str(invalid_proposal["summary"])
                                         if invalid_proposal else
-                                        "Control actions require their own response. No call was executed."
+                                        "No call in this batch was executed. Submit the control action in its own "
+                                        "response. Send it directly; native_batch is not callable."
                                     ),
                                     "issues": (invalid_proposal.get("issues") or [{"path": "tool_calls", "code": "native_batch_not_admitted"}]) if invalid_proposal else [{"path": "tool_calls", "code": "native_batch_not_admitted"}]}
                                 return self._planner_argument_error_plan(
@@ -5320,8 +5329,8 @@ class RuntimePlannerService:
                     corrected["arguments"] = corrected.pop("parameters")
                     if validate_planner_tool_arguments(tool.input_schema, corrected)["ok"]:
                         validation["summary"] = (
-                            "Rename parameters to arguments in call_tool. "
-                            "Retry the call using the corrected envelope in the issue example."
+                            'Rename parameters to arguments in call_tool: '
+                            '{"tool":"<visible tool>","arguments":{...}}.'
                         )
                         for issue in validation["issues"]:
                             if issue["path"] == "parameters":

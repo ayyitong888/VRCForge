@@ -607,6 +607,7 @@ export type AgentRuntimeResponse = RuntimeTurnLineage & {
   backgroundGoalSkipped?: boolean;
   backgroundGoalDeferred?: boolean;
   status?: string;
+  turnStatus?: { status?: string };
   /** Provider-reported model actually used for this completed response. */
   model?: string;
   /** Ledger-backed terminal timestamp for the full runtime turn. */
@@ -637,6 +638,7 @@ export type AgentRuntimeResponse = RuntimeTurnLineage & {
     skillReason?: string;
     expectedResult?: string;
     nextStep?: string;
+    unresolvedArgumentValidation?: { actionId?: string };
     plannerFailure?: {
       code?: string;
       phase?: string;

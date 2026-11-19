@@ -14,15 +14,16 @@ export function shouldGenerateChatTitle(
     && chat?.titleSource !== "manual";
 }
 
-/** Failed, cancelled, or planner-rejected turns must not create a title request. */
-export function chatTitleRunSucceeded(response: {
-  ok?: boolean;
+/** Title delivery belongs to submitted input and is independent of the Agent result. */
+export function canRequestChatTitleAfterTurn(response: {
   status?: string;
-  plan?: { plannerFailure?: unknown };
+  turnStatus?: { status?: string };
+  dispatchStopped?: boolean;
 }): boolean {
-  return response.ok === true
-    && !response.plan?.plannerFailure
-    && !["failed", "cancelled", "blocked", "needs_user_action"].includes(response.status || "");
+  const untitledStatuses = ["cancelled", "canceled", "interrupted", "blocked", "needs_user_action"];
+  return !response.dispatchStopped
+    && !untitledStatuses.includes(response.status || "")
+    && !untitledStatuses.includes(response.turnStatus?.status || "");
 }
 
 /** Apply a result only while the auto fallback still owns the title. */

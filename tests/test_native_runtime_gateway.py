@@ -248,6 +248,32 @@ def test_native_gateway_rejects_every_call_without_dispatch(tmp_path, kind):
     assert all("failed" in m["content"] or "invalid" in m["content"] for m in results)
 
 
+def test_native_rejected_batch_can_resubmit_ordinary_calls_and_finish(tmp_path):
+    name = "vrcforge_read_text_file"
+    malformed = call("first-bad", "call_tool", {"tool": name, "parameters": {"path": "a.txt"}})
+    malformed["tool_calls"].extend(call("second-skipped", name, {"path": "b.txt"})["tool_calls"])
+    corrected = call("first-retry", name, {"path": "a.txt"})
+    corrected["tool_calls"].extend(call("second-retry", name, {"path": "b.txt"})["tool_calls"])
+
+    def resubmit(request):
+        assert not invoked
+        rejected_results = [m for m in request["messages"] if m["role"] == "tool"]
+        assert [m["tool_call_id"] for m in rejected_results] == ["first-bad", "second-skipped"]
+        for reply in rejected_results:
+            observation, = json.loads(reply["content"])["observations"]
+            assert "runtimeTool" not in observation
+            assert "Send ordinary tool calls directly" in observation["admissionError"]
+            assert '{"tool":"<visible tool>","arguments":{...}}' in observation["admissionError"]
+        return corrected
+
+    gateway, model, invoked = setup_gateway(tmp_path, [malformed, resubmit, finish])
+    result = run(gateway, tmp_path)
+    assert [entry["path"] for entry in invoked] == ["a.txt", "b.txt"]
+    assert len(model.requests) == 3
+    assert result["plan"]["nextStep"] == "done", result["plan"]
+    assert "unresolvedArgumentValidation" not in result["plan"]
+
+
 def test_native_unadvertised_tool_without_completed_correction_remains_failed(tmp_path):
     rejected = call("wrong-tool", "unity_agent_message", {"message": "not advertised here"})
     gateway, model, invoked = setup_gateway(tmp_path, [
