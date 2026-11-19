@@ -65,24 +65,13 @@ try {
   // The provider spotlight is separate from the project step under test.
   await page.getByRole("button", { name: "Test connection", exact: true }).evaluate((button) => button.click());
   await overlay.getByRole("button", { name: "Next", exact: true }).click();
-  const setup = overlay.getByRole("button", { name: "Ask for setup help" });
-  assert.ok(await overlay.getByRole("button", { name: "Select Project", exact: true }).isVisible());
-  await setup.click();
-  const composer = page.locator("[data-chat-composer-dock] textarea");
-  await composer.waitFor();
-  assert.match(await composer.inputValue(), /first-run guide.*install.*international Unity Hub.*VRChat Avatar project/);
-  assert.ok(await composer.isEnabled());
-  assert.equal(await overlay.count(), 0);
-
-  const resume = page.getByRole("button", { name: /continue.*step/i });
-  await composer.fill("My own unsent draft");
-  await resume.click();
-  await setup.click();
-  assert.equal(await composer.inputValue(), "My own unsent draft");
+  const selectProject = overlay.getByRole("button", { name: "Select Project", exact: true });
+  assert.ok(await selectProject.isVisible());
+  assert.equal(await overlay.getByRole("button", { name: "Ask for setup help" }).count(), 0);
+  await selectProject.click();
   assert.deepEqual(messages, []);
-  assert.notEqual(await page.evaluate(() => localStorage.getItem("vrcforge_onboarded")), "true");
   assert.deepEqual(pageErrors, []);
-  console.log("PASS onboarding project step opens an editable setup draft and preserves an existing draft");
+  console.log("PASS onboarding project step offers project selection without a setup prompt");
 } catch (error) {
   if (pageErrors.length) console.error(pageErrors);
   throw error;

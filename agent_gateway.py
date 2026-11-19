@@ -8644,6 +8644,11 @@ class AgentGateway:
                     self._material_scan_capture_context.set(material_capture_state)
                     if material_capture_state is not None else None
                 )
+                read_scope = None
+                if child_read_only and step_tool == "vrcforge_inspect_outfit_package":
+                    from sub_agent_delegate import child_outfit_read_scope
+
+                    read_scope = child_outfit_read_scope(project_root, tuple(general_allowed_roots))
                 try:
                     with self._bind_runtime_skill_scope(
                         task_loop, subagent_read_roots=scoped_general_roots if step_tool in SUB_AGENT_TASK_TOOLS else (),
@@ -8656,6 +8661,7 @@ class AgentGateway:
                             agent_name,
                             owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
                             restored_absent_paths=restored_absent_paths,
+                            read_scope=read_scope,
                         )
                 finally:
                     if material_capture_token is not None:

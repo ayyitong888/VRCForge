@@ -18,24 +18,28 @@ const tasks = [
     error: "OSError: invalid handle at fixture-internal-path", summary: "OSError: invalid handle at fixture-internal-path",
     result: { finalReport: "The source didn’t include a test scene. I checked the material list.", providerRoute: { model: "unverified-route" } },
     createdAt: "2026-10-28T10:02:00Z" },
-  { id: "live", childSessionId: "child-c", role: "llm_readonly", displayName: "Live inspection", task: "Inspect the remaining sleeve.", status: "running", createdAt: "2026-10-28T10:03:00Z" },
-  { id: "fixed", role: "outfit_package_inspection", displayName: "Package inspection", task: "Check the package type.",
+  { id: "live", childSessionId: "child-c", role: "outfit_package_inspection", handler: "llm_readonly", model: "requested-role-model", displayName: "Live inspection", task: "Inspect the remaining sleeve.", status: "running", createdAt: "2026-10-28T10:03:00Z" },
+  { id: "fixed", role: "outfit_package_inspection", handler: "outfit_package_inspection", parentModel: "original-parent-model", displayName: "Package inspection", task: "Check the package type.",
     status: "completed", summary: "Recorded package summary.", result: { packageKind: "unitypackage", proposedNextAction: "Use the package." },
     events: [{ event: "fixture-completed" }], createdAt: "2026-10-28T10:04:00Z",
     startedAt: "2026-10-28T10:04:01Z", stoppedAt: "2026-10-28T10:04:04Z" },
 ];
 const realSidecarPath = process.env.VRCFORGE_SUBAGENT_INSPECTION_SIDECAR;
+const realReplayPath = process.env.VRCFORGE_SUBAGENT_INSPECTION_REPLAY;
 const realSidecar = realSidecarPath
   ? JSON.parse(await readFile(realSidecarPath, "utf8"))
   : null;
-if (realSidecar) {
+let recordedInspection;
+if (realReplayPath) {
+  const { task } = JSON.parse(await readFile(realReplayPath, "utf8"));
+  recordedInspection = task;
+} else if (realSidecar) {
   const recovery = JSON.parse(await readFile(resolve(dirname(realSidecarPath), "../sub-agent-recovery.json"), "utf8"));
   const task = recovery.tasks.find((task) => task.id === realSidecar.taskId);
   assert(task, "recorded inspection task must match the result sidecar");
-  tasks.push({ id: "recorded-inspection", role: task.role, displayName: task.displayName, task: task.task,
-    createdAt: task.createdAt, startedAt: task.startedAt, stoppedAt: task.stoppedAt,
-    status: task.status, summary: realSidecar.summary, result: realSidecar.result });
+  recordedInspection = { ...task, summary: realSidecar.summary, result: realSidecar.result };
 }
+if (recordedInspection) tasks.push(recordedInspection);
 const actualModelPath = process.env.VRCFORGE_SUBAGENT_MODEL_SIDECAR;
 let realModelTask;
 if (actualModelPath) {
@@ -70,9 +74,20 @@ const firstResult = {
   ],
 };
 const firstDetails = { ...tasks[0], result: { rawResult: firstResult } };
+const inspectionTool = "vrcforge_inspect_outfit_package";
+const inspectionOutput = recordedInspection?.result.inspection ?? {
+  ok: true, source: { name: "Wardrobe package" }, summary: { unityPackageCount: 1 },
+  unityPackages: [{ path: "wardrobe.unitypackage", pathnames: [{ path: "Assets/Wardrobe.prefab" }] }],
+};
+const second = [
+  event(0, "tool_call", "Read package", { tool: inspectionTool, actionId: "inspect-package", status: "running" }),
+  event(1, "tool_result", "Package inspected", { tool: inspectionTool, actionId: "inspect-package", status: "success" }),
+  event(2, "assistant", "Full second-turn report.", { phase: "final_answer", status: "completed" }),
+];
 tasks[1].result = { rawResult: { ...firstResult, clientTurnId: "second", turnId: "runtime-second", turn_id: "runtime-second",
   startedAt: "2026-10-28T10:01:00Z", completedAt: "2026-10-28T10:01:01Z",
-  plan: { ...firstResult.plan, reply: "Full second-turn report." }, steps: [] }, providerRoute: { model: "fixture-requested-model" } };
+  plan: { ...firstResult.plan, reply: "Full second-turn report." },
+  steps: [{ actionId: "inspect-package", result: inspectionOutput }] }, providerRoute: { model: "fixture-requested-model" } };
 let liveReads = 0;
 let failFirstTimeline = false;
 let failFirstDetail = false;
@@ -136,11 +151,14 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (turn === "first" && failFirstTimeline) { failFirstTimeline = false; res.writeHead(503); res.end(); return; }
-    let events = turn === "first" ? first : turn === "second" ? [event(0,"assistant","Full second-turn report.",{phase:"final_answer",status:"completed"})] : [];
+    let events = turn === "first" ? first : turn === "second" ? second : [];
     if (turn === "live") { liveReads++;events = [event(0,"assistant","Inspecting the sleeve."),...(liveReads>1?[event(1,"assistant","Fresh running update arrived.",{phase:"final_answer",status:"completed"})]:[])]; }
     if (turn === "third") events = [event(0,"assistant","Third turn retains the same child context.",{phase:"final_answer",status:"completed"})];
     const after=Number(url.searchParams.get("afterSequence")||0),remaining=events.filter(e=>e.sequence>=after),page=remaining.slice(0,200);
-    res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({ok:true,run:{sessionId:url.searchParams.get("sessionId"),clientTurnId:turn},events:page,nextSequence:page.length?page.at(-1).sequence+1:after,hasMore:remaining.length>page.length}));return;
+    const mismatchedRun = turn === "live" && liveReads === 1;
+    const run = {sessionId:mismatchedRun ? "unrelated-session" : url.searchParams.get("sessionId"),clientTurnId:turn,
+      model:turn === "live" ? (mismatchedRun ? "unrelated-model" : "effective-child-model") : undefined};
+    res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({ok:true,run,events:page,nextSequence:page.length?page.at(-1).sequence+1:after,hasMore:remaining.length>page.length}));return;
   }
   if (req.method === "POST" && url.pathname === "/api/app/sub-agents/second/resume") {
     let body="";for await(const chunk of req)body+=chunk;
@@ -177,7 +195,7 @@ try {
   assert.doesNotMatch(await failedThread.innerText(), /OSError|fixture-internal-path/);
   await failedThread.click();
   const surface=page.locator('[data-vrcforge-subagent-workspace-surface]');
-  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model not recorded");
+  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model: Not recorded");
   assert.doesNotMatch(await surface.innerText(), /unverified-route/);
   await surface.getByText("The sub-agent couldn’t finish this task. Try running it again.",{exact:true}).waitFor();
   await surface.getByText("The source didn’t include a test scene. I checked the material list.", {exact:true}).waitFor();
@@ -210,8 +228,8 @@ try {
   await technicalDetails.waitFor({ state: "detached" });
   assert.equal(await surface.getByText("fixture-completed", { exact: false }).count(), 0);
   assert.equal(await surface.getByRole("button", { name: "Ask a follow-up", exact: true }).count(), 0);
-  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Local file inspection");
-  assert.match(await surface.locator("[data-subagent-model]").getAttribute("title"), /No AI model used/);
+  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model: No model used");
+  assert.equal(await surface.locator("[data-subagent-parent-model]").innerText(), "Main conversation model: original-parent-model");
   assert.match(await surface.locator("[data-subagent-duration]").innerText(), /3s/);
   assert.equal(await surface.locator("[data-agent-turn-metadata]").count(), 0);
   await surface.locator("header [data-subagent-copy-reply]").click();
@@ -220,22 +238,59 @@ try {
   assert.equal(await surface.getByRole("button", {name: "Use as input", exact: true}).count(), 0);
   assert.equal(requests.some(request => request.turn === "fixed"), false);
   await surface.locator('[data-vrcforge-subagent-back]').click();
-  if (realSidecar) {
-    await page.locator('[data-vrcforge-open-subagent-thread="recorded-inspection"]').click();
-    const card = surface.locator('[data-vrcforge-agent-client-turn="recorded-inspection"]');
-    const inspection = card.locator("[data-subagent-inspection-report]");
-    await inspection.waitFor();
-    assert.equal(await card.locator("[data-agent-turn-metadata]").count(), 0, "elapsed belongs in the panel header");
+  if (recordedInspection) {
+    const { id, task, startedAt, stoppedAt, result: { inspection } } = recordedInspection;
+    await page.locator(`[data-vrcforge-open-subagent-thread="${recordedInspection.childSessionId || id}"]`).click();
+    if (recordedInspection.parentModel) {
+      assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model: No model used");
+      assert.equal(await surface.locator("[data-subagent-parent-model]").innerText(),
+        `Main conversation model: ${recordedInspection.parentModel}`);
+    }
+    const card = surface.locator(`[data-vrcforge-agent-client-turn="${id}"]`);
+    const summary = inspection.summary;
+    const answer = `Found ${summary.unityPackageCount} Unity packages, ${summary.prefabCandidateCount} prefab candidates, and ${summary.textureCount} textures.`;
+    const process = card.locator("[data-agent-turn-process-group]");
+    const toggle = process.getByRole("button").first();
+    await card.getByText(answer, { exact: true }).waitFor();
+    const collapsedText = await card.innerText();
+    const elapsedTitle = await process.locator("[data-agent-turn-process-title]").innerText();
+    assert.match(elapsedTitle, new RegExp(`${Math.floor((Date.parse(stoppedAt) - Date.parse(startedAt)) / 1000)}s`));
+    assert(collapsedText.indexOf(task) < collapsedText.indexOf(elapsedTitle) && collapsedText.indexOf(elapsedTitle) < collapsedText.indexOf(answer));
+    assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(await card.locator("[data-subagent-inspection-activity]").count(), 0);
+    assert.equal(await card.getByText(answer, { exact: true }).count(), 1);
+    if (summary.truncated || summary.nestedPathnamesTruncated) {
+      await card.getByText("The scan covered only part of the source. The counts reflect the files it found.", { exact: true }).waitFor();
+    }
+    assert.equal(await card.locator("[data-agent-turn-metadata]").count(), 0);
     assert.equal(await card.locator("[data-chat-message-actions]").count(), 1, "only the user's timestamp remains in the thread");
-    assert.match(await surface.locator("header [data-subagent-duration]").innerText(), /1s/);
+    assert.equal(await surface.locator("header [data-subagent-duration]").count(), 0, "elapsed appears once in the shared process disclosure");
     assert.equal(await surface.locator("header [data-subagent-copy-reply]").count(), 1);
+    await surface.locator("header [data-subagent-copy-reply]").click();
+    assert.match(await page.evaluate(() => window.copiedReply), new RegExp(`${summary.unityPackageCount} Unity packages`));
+    await toggle.click();
+    const activity = process.locator("[data-subagent-inspection-activity]");
+    assert.equal(await activity.locator("[data-subagent-inspection-evidence]").count(), 0);
+    await activity.getByRole("button", { name: "Scan asset files" }).click();
+    await activity.locator("[data-subagent-inspection-source]").getByText(inspection.source.name, { exact: true }).waitFor();
+    const packages = activity.locator("summary").filter({ hasText: /^Unity packages/ });
+    await packages.click();
+    await activity.locator("summary").getByText(inspection.unityPackages[0].path, { exact: true }).waitFor();
     assert.equal(await card.locator("pre").count(), 0, "the real inspection receipt is not rendered as JSON");
     assert.equal(await surface.locator("[data-subagent-technical-details]").count(), 0);
+    if (evidence) {
+      await page.evaluate(() => window.setLanguage("zh-CN"));
+      await card.getByText(`共找到 ${summary.unityPackageCount} 个 Unity 包、${summary.prefabCandidateCount} 个预制体候选和 ${summary.textureCount} 张贴图。`, { exact: true }).waitFor();
+      await surface.screenshot({ path: resolve(evidence, "inspection-evidence.png") });
+      await toggle.click();
+      await surface.screenshot({ path: resolve(evidence, "inspection-collapsed.png") });
+      await page.evaluate(() => window.setLanguage("en-US"));
+    }
     await surface.locator('[data-vrcforge-subagent-back]').click();
   }
   if (realModelTask) {
     await page.locator(`[data-vrcforge-open-subagent-thread="${realModelTask.childSessionId}"]`).click();
-    assert.equal(await surface.locator("header [data-subagent-model]").innerText(), realModelTask.result.rawResult.model);
+    assert.equal(await surface.locator("header [data-subagent-model]").innerText(), `Model: ${realModelTask.result.rawResult.model}`);
     await surface.locator('[data-vrcforge-subagent-back]').click();
   }
   assert.equal(await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').count(),1,"resume turns must share one sidebar row");
@@ -247,7 +302,7 @@ try {
   const openButton = root => root.locator(":scope > div > button[aria-expanded]").first();
   const getProcessButton = card => openButton(card.locator("[data-agent-turn-process-group]"));
   assert.equal(await childCard.locator("[data-user-message-bubble]").innerText(), await parentCard.locator("[data-user-message-bubble]").innerText());
-  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "fixture-reported-model");
+  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model: fixture-reported-model");
   for (const card of [parentCard, childCard]) {
     const group = getProcessButton(card);
     assert.equal(await group.getAttribute("aria-expanded"), "false");
@@ -271,6 +326,15 @@ try {
   const childText = await childCard.innerText();
   contentOrder(parentText);
   contentOrder(childText);
+  const nativeInspection = surface.locator('[data-vrcforge-agent-client-turn="second"]');
+  await getProcessButton(nativeInspection).click();
+  const inspectionGroup = nativeInspection.locator("[data-agent-tool-call-group]");
+  await openButton(inspectionGroup).click();
+  await inspectionGroup.getByRole("button", { name: "Scan asset files", exact: true }).last().click();
+  const nativeOutput = inspectionGroup.locator("[data-agent-invocation-output-card]");
+  await nativeOutput.getByText(inspectionOutput.source.name, { exact: true }).waitFor();
+  assert.equal(await nativeOutput.locator("pre").count(), 0, "the native tool shows inventory evidence without raw diagnostics");
+  assert.equal(await nativeInspection.getByText("Full second-turn report.", { exact: true }).count(), 1);
   assert(requests.some(request => request.path === "/api/app/sub-agents/first"), "prior turn details are read when the list omits its result");
   for(const mode of ['light','dark','wallpaper']) {
     await page.evaluate(mode=>{
@@ -306,8 +370,10 @@ try {
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
   assert.equal(await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').count(),1);
   await page.locator('[data-vrcforge-open-subagent-thread="child-c"]').click();
-  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model pending");
+  await surface.getByText("Inspecting the sleeve.", { exact: true }).waitFor();
+  assert.equal(await surface.locator("[data-subagent-model]").innerText(), "Model: Pending");
   await surface.getByText("Fresh running update arrived.",{exact:true}).waitFor();
+  await surface.getByText("Model: effective-child-model", { exact: true }).waitFor();
   assert(liveReads>=2,"running conversation must refresh without reopening");
   await surface.locator('[data-vrcforge-subagent-back]').click();
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
@@ -320,6 +386,13 @@ try {
   await page.locator('[data-open-subagents]').click();
   await page.locator('[data-vrcforge-subagent-sidebar-list]').waitFor();
   if (evidence) await page.screenshot({path:resolve(evidence,"subagent-list-light.png"),fullPage:true});
+  if (recordedInspection?.parentModel) {
+    await page.locator(`[data-vrcforge-open-subagent-thread="${recordedInspection.childSessionId || recordedInspection.id}"]`).click();
+    await surface.getByText("模型：未使用模型", { exact: true }).waitFor();
+    await surface.getByText(`主对话模型：${recordedInspection.parentModel}`, { exact: true }).waitFor();
+    if (evidence) await page.screenshot({path:resolve(evidence,"rc6-original-model-identity.png"),fullPage:true});
+    await surface.locator('[data-vrcforge-subagent-back]').click();
+  }
   await page.locator('[data-vrcforge-open-subagent-thread="child-a"]').click();
   await surface.getByText("Full second-turn report.",{exact:true}).waitFor();
   if (evidence) await page.screenshot({path:resolve(evidence,"subagent-conversation-light.png"),fullPage:true});

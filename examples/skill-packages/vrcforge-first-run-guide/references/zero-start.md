@@ -1,6 +1,6 @@
 # 从空白 Windows 电脑连到 Unity 工程
 
-用户说“帮我装好并连上”时，在当前对话完成下载、安装和连接。用户只问用法就讲解，只要安装包就交付文件。用用户的语言说明当前正在装什么、哪里需要他们操作。
+从用户要完成的事确定起点。已有工程就读取其版本和依赖，要新建工程就根据目标选模板。检查电脑上已有的软件，自行补齐这条路径实际需要的依赖。用户只问用法就讲解，只要安装包就交付文件。用用户的语言说明当前正在装什么、哪里需要他们操作。
 
 ## 确认起点与目标版本
 
@@ -25,5 +25,6 @@
 - **已有工程**：从用户给的准确根目录登记、选中并打开。工具报告已在启动时，跟踪同一个 Editor。
 - **需要新工程**：确认用户要建的类型、名称与位置；从 `vrcforge_project_lifecycle_status` 返回的模板里确认类型，再用 `vrcforge_create_project`。如果没有合适模板，用选定管理器的创建工程流程取得正确模板（VRChat Avatar 选 Avatars，World 选 Worlds），再登记并选中生成的根目录。工具无法操作管理器界面时，只交接这一处。保留已有目录和工程。[VRChat SDK 入门](https://creators.vrchat.com/sdk/)
 - 如果内置 Agent 仍在临时对话里，登记成功后请用户从左栏打开刚登记的工程对话。给出实际工程名和接续语句，例如“连接这个工程并检查状态”。外部客户端使用已明确选定的工程路径。用 `vrcforge_open_unity_project` 打开该工程，等待首次包解析和编译。
+- 根据工程模板、包清单和实际解析错误判断缺少哪个包。沿用工程已有的包管理器和锁定版本；VPM 与 Unity 自身依赖分别按同一 Skill 的 `references/repair-guide.md` 的 Packages 部分处理。等待解析和编译后重新检查原来失败的步骤。
 - 需要 Core 时，在这个工程按现有审批流程执行 `vrcforge_install_unity_core`，然后读取安装和连接状态。若该版本没有安装工具，再在对应 Editor 导入同版 `VRCForge.unitypackage`。具体排障见同一 Skill 的 `references/repair-guide.md`。
 - **交付**：核对目标工程路径、实际 Editor 版本与实例，确认这个工程的 Core 已响应、编译已结束，并且该任务需要的工具可用。告诉用户连上了哪个工程。若仍在编译或等待许可，给出实际进度。仅在用户还要求处理 Avatar 时，再读目标模型和作者依赖，按资产审批流程继续。[首个 Avatar 指南](https://creators.vrchat.com/avatars/creating-your-first-avatar/)

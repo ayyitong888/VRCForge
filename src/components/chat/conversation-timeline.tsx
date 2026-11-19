@@ -32,6 +32,7 @@ import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ApprovalRevisionEditor } from "../approvals/approval-revision-editor";
+import { asOutfitInspectionResult, OutfitInspectionEvidence } from "../subagents/sub-agent-inspection-report";
 import { ChatCaptureResourcePreview, ChatCaptureThumbnail, ChatMarkdown } from "./chat-markdown";
 import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 
@@ -84,6 +85,7 @@ export function buildAgentTimelineRows({
   onOpenChatById,
   onOpenSubAgent,
   replySupplement,
+  processSupplement,
   renderQuestionActions,
   live = false,
   t,
@@ -109,6 +111,7 @@ export function buildAgentTimelineRows({
   onOpenChatById?: (chatId: string) => void;
   onOpenSubAgent?: (taskId: string) => void;
   replySupplement?: ReactNode;
+  processSupplement?: ReactNode;
   renderQuestionActions?: (reply: string) => ReactNode;
   live?: boolean;
   t: typeof i18n.t;
@@ -188,6 +191,7 @@ export function buildAgentTimelineRows({
       sharedProcess,
       providerLine,
       renderElapsed: true,
+      processSupplement,
       dropCancellationMarkers: cancelled,
       interleavedUserMessages,
       interleavedUsersExpanded,
@@ -465,6 +469,7 @@ export function buildDurableTimelineRows(
     live?: boolean;
     renderElapsed?: boolean;
     processTitleElapsed?: number;
+    processSupplement?: ReactNode;
     sharedProcess?: SharedTurnProcess;
     providerLine?: string;
     dropCancellationMarkers?: boolean;
@@ -484,7 +489,7 @@ export function buildDurableTimelineRows(
         || (event.kind === "assistant" && event.payload?.status === "completion_unverified")))),
     elapsedSeconds,
   );
-  if (!presentation.entries.length) {
+  if (!presentation.entries.length && options.processSupplement == null) {
     return (options.interleavedUserMessages || []).map((message) => options.renderInterleavedUserMessage?.(message) || (
       <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
         <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
@@ -543,7 +548,8 @@ export function buildDurableTimelineRows(
     );
   };
   const includeAssistant = options.includeAssistant !== false;
-  const turnElapsed = options.processTitleElapsed ?? presentation.elapsedSeconds;
+  const turnElapsed = options.processTitleElapsed ?? presentation.elapsedSeconds
+    ?? (options.processSupplement == null ? undefined : elapsedSeconds);
   const finalAssistant = [...presentation.entries].reverse().find((entry) => (
     (entry.type === "assistant" && entry.status !== "completion_unverified"
       && !entry.phase && Boolean(terminalFailureCode))
@@ -619,6 +625,9 @@ export function buildDurableTimelineRows(
         <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
       </div>
     ));
+  }
+  if (options.processSupplement != null) {
+    processRows.push(<Fragment key="agent-process-supplement">{options.processSupplement}</Fragment>);
   }
   if (processRows.length) {
     const group = options.sharedProcess ? (
@@ -709,6 +718,7 @@ function parseTimelineTime(value?: string): number {
 }
 
 const CONVERSATION_JUMP_TOOLS = ["vrcforge_send_message", "vrcforge_followup_task", "vrcforge_create_conversation"];
+const OUTFIT_INSPECTION_TOOL = "vrcforge_inspect_outfit_package";
 
 function conversationResultChatId(detail: unknown): string {
   if (!detail || typeof detail !== "object") return "";
@@ -781,6 +791,7 @@ function invocationTarget(detail: unknown): string {
 }
 
 function invocationOperationTitle(invocation: TimelineInvocation, t: typeof i18n.t, compact = false): string {
+  if (invocation.label === OUTFIT_INSPECTION_TOOL) return t("subagent.inspection.scanActivity");
   const tool = timelineInvocationDisplayLabel(invocation.label);
   const normalizedStatus = invocation.status.toLowerCase();
   if (!compact && normalizedStatus === "prepared") return t("agent.timeline.preparedTool", { tool });
@@ -856,8 +867,8 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
   const succeeded = ["ok", "done", "completed", "success", "succeeded", "applied", "executed"].includes(normalizedStatus);
   const shellOutput = danger ? asAgentShellResult(detail) : undefined;
   const detailValue = detail ?? invocation.summary;
-  const output = detail !== undefined ? formatPayload(detail)
-    : invocation.summary || (invocation.kind === "command" ? `$ ${invocation.label}` : "-");
+  const inspection = invocation.label === OUTFIT_INSPECTION_TOOL
+    ? asOutfitInspectionResult(detail) : null;
   const title = invocation.kind === "command"
     ? "Shell"
     : invocation.kind === "file_edit"
@@ -885,7 +896,13 @@ function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvo
             {shellOutput?.stdout ? <OutputBlock label={i18n.t("shell.output")} value={shellOutput.stdout} /> : null}
             {shellOutput?.stderr ? <OutputBlock label={i18n.t("shell.errorOutput")} value={shellOutput.stderr} danger /> : null}
           </>
-        ) : <pre className="mt-3 whitespace-pre">{output}</pre>}
+        ) : inspection ? (
+          <div className="mt-3 font-sans">
+            <OutfitInspectionEvidence inspection={inspection} />
+            <ToolDiagnostics value={detail} />
+          </div>
+        ) : <pre className="mt-3 whitespace-pre">{detail !== undefined ? formatPayload(detail)
+          : invocation.summary || (invocation.kind === "command" ? `$ ${invocation.label}` : "-")}</pre>}
       </div>
       <div
         className={cn(
@@ -1481,7 +1498,7 @@ export function RunRow({
   );
 }
 
-function WorkSegmentRow({
+export function WorkSegmentRow({
   kind,
   title,
   summaryMeta,

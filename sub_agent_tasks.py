@@ -1165,8 +1165,13 @@ class SubAgentTaskRegistry:
                 resumeOf=task.resume_of,
                 isResume=bool(task.resume_of),
             )
+            if task.role == "outfit_package_inspection":
+                with self._lock:
+                    source = self._tasks.get(task.resume_of)
+                    previous = source.result if source and source.child_session_id == task.child_session_id else None
+                    payload["_priorOutfitInspection"] = copy.deepcopy(previous.get("plannerEvidence")) if previous else None
         else:
-            # Preserve the seven fixed handler contracts; their arguments can
+            # Preserve the fixed handler contracts; their arguments can
             # still supply explicit per-task values as before.
             payload.setdefault("model", task.model)
             payload.setdefault("systemPrompt", task.system_prompt)
@@ -1194,6 +1199,14 @@ class SubAgentTaskRegistry:
         payload = self._task_snapshot(task, params={})
         payload["schema"] = SUB_AGENT_SCHEMA
         payload["result"] = copy.deepcopy(task.result)
+        seed = task.params.get("_taskSeed")
+        if (isinstance(seed, dict) and task.parent_session_id
+                and seed.get("sessionId") == task.parent_session_id
+                and seed.get("parentChatId") == task.parent_chat_id
+                and payload["parentTurnId"] and payload["parentClientTurnId"]):
+            model = seed.get("model")
+            if isinstance(model, str) and model.strip():
+                payload["parentModel"] = model.strip()[:300]
         payload["paramsSummary"] = summarize_params(public_runtime_payload(task.params))
         payload.pop("params", None)
         payload.pop("generalReadRoots", None)

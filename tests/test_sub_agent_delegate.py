@@ -13,7 +13,6 @@ from sub_agent_delegate import (
     build_sub_agent_role_handlers,
     build_sub_agent_roles,
     run_outfit_import_plan_review,
-    run_outfit_package_inspection,
     run_package_install_diagnosis,
     run_project_index_review,
     run_selected_context_review,
@@ -153,13 +152,6 @@ def test_project_index_review_dispatches_through_gateway_and_keeps_envelope():
 def test_preset_roles_route_to_expected_tools():
     expectations = [
         (
-            run_outfit_package_inspection,
-            {"packagePath": "C:/pkg.zip"},
-            "vrcforge_inspect_outfit_package",
-            "sub-agent:outfit_package_inspection",
-            "inspection",
-        ),
-        (
             run_validation_triage,
             {"projectPath": "ProjectA"},
             "vrcforge_run_validation_report",
@@ -199,26 +191,7 @@ def test_missing_required_role_params_fail_before_runtime_tool_dispatch():
         run_project_index_review(gateway, {"projectPath": ""}, _idle_event())
     with pytest.raises(RuntimeError, match="outfit_import_plan_review requires params.packagePath"):
         run_outfit_import_plan_review(gateway, {"task": "Build an import plan"}, _idle_event())
-    with pytest.raises(RuntimeError, match="outfit_package_inspection requires params.packagePath"):
-        run_outfit_package_inspection(
-            gateway,
-            {"task": "Inspect E:/.../Example_Outfit_SampleAvatar_V1.00_6431583.zip"},
-            _idle_event(),
-        )
     assert gateway.calls == []
-
-    run_outfit_package_inspection(
-        gateway,
-        {"task": "Inspect the package", "packagePath": "E:/.../Example_Outfit_SampleAvatar_V1.00_6431583.zip"},
-        _idle_event(),
-    )
-    assert gateway.calls == [
-        (
-            "vrcforge_inspect_outfit_package",
-            {"packagePath": "E:/.../Example_Outfit_SampleAvatar_V1.00_6431583.zip", "maxEntries": 5000},
-            "sub-agent:outfit_package_inspection",
-        )
-    ]
 
 
 def test_blocked_skill_surfaces_block_reason_as_failure():

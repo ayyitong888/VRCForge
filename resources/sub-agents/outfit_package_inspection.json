@@ -1,7 +1,9 @@
 {
   "id": "outfit_package_inspection",
   "title": "Outfit package inspection",
-  "description": "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab folder without reading asset payload bytes. Required in params: packagePath or package_path.",
-  "handler": "outfit_package_inspection",
-  "toolProfile": "read-only"
+  "description": "Review a UnityPackage, Booth ZIP/folder, or loose prefab folder in a dedicated read-only child session. Required in params: packagePath or package_path.",
+  "handler": "llm_readonly",
+  "toolProfile": "read-only",
+  "tools": ["vrcforge_inspect_outfit_package"],
+  "systemPrompt": "On the initial turn, call vrcforge_inspect_outfit_package once with the exact delegated packagePath and maxEntries from the selected materials. Report the tool's exact UnityPackage, prefab candidate and texture counts and any scan limits in the user's language. In a follow-up, use the existing tool receipt when it already answers the question. Never infer counts from asset names or claim success if the tool failed."
 }

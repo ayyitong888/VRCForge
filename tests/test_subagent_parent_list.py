@@ -53,3 +53,34 @@ def test_parent_scope_filters_before_paging_and_keeps_global_list(tmp_path, monk
     finally:
         release.set()
         registry.shutdown()
+
+
+def test_parent_model_comes_from_the_delegating_turn(tmp_path):
+    registry = SubAgentTaskRegistry(
+        artifact_dir=tmp_path,
+        roles=[SubAgentRole(id="fixture", title="Fixture", description="File check")],
+        handlers={"fixture": lambda task, _: {"ok": True, "summaryText": task["task"]}},
+    )
+    seed = {
+        "sessionId": "parent-session",
+        "parentChatId": "parent-chat",
+        "turnId": "parent-turn",
+        "clientTurnId": "parent-client-turn",
+        "model": "delegating-model",
+    }
+    try:
+        matched = registry.create_task(
+            role="fixture", display_name="Fixture", task="Check file names", parent_chat_id="parent-chat",
+            parent_session_id="parent-session", params={"_taskSeed": seed, "model": "role-override"},
+        )
+        mismatched = registry.create_task(
+            role="fixture", display_name="Fixture", task="Check file names", parent_chat_id="different-chat",
+            parent_session_id="parent-session", params={"_taskSeed": seed},
+        )
+        assert registry.get_task(matched["task"]["id"])["task"]["parentModel"] == "delegating-model"
+        assert "parentModel" not in registry.get_task(mismatched["task"]["id"])["task"]
+        public = registry.list_tasks(parent_chat_id="parent-chat")["tasks"][0]
+        assert public["parentModel"] == "delegating-model"
+        assert public["model"] == "role-override"
+    finally:
+        registry.shutdown()

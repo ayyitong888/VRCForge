@@ -13,9 +13,10 @@ import { displaySubAgentStatus, subAgentTaskIssueText } from "../../lib/subagent
 import { subAgentResultSummaryText } from "../../lib/subagent-merge";
 import { copyableAgentDialogueText, formatPayload } from "../../lib/conversation-utils";
 import { ConversationCard, MessageDateSeparator, StreamingPhaseStatus } from "../chat/conversation-card";
+import { WorkSegmentRow } from "../chat/conversation-timeline";
 import { Button } from "../ui/button";
 import { OutputBlock } from "../ui/output-block";
-import { SubAgentInspectionDetails, subAgentInspectionConclusion } from "./sub-agent-inspection-report";
+import { OutfitInspectionEvidence, subAgentInspectionConclusion, subAgentInspectionResult } from "./sub-agent-inspection-report";
 
 type TurnTimeline = {
   events: ChatTimelineEvent[];
@@ -138,12 +139,14 @@ function TurnTechnicalDetails({ turn, readError }: { turn: SubAgentTask; readErr
 }
 
 /** Read the child's existing public ledger; opening a conversation never starts a turn. */
-export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled = false, onCopyItem, onOpenChatById }: {
+export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled = false, onCopyItem, onOpenChatById, modelTaskId, onModelChange }: {
   endpoint: string;
   turns: SubAgentTask[];
   developerOptionsEnabled?: boolean;
   onCopyItem?: (item: ConversationItem) => void;
   onOpenChatById?: (chatId: string) => void;
+  modelTaskId?: string;
+  onModelChange?: (taskId: string, model: string) => void;
 }) {
   const { t } = useTranslation();
   const [timelines, setTimelines] = useState<Record<string, TurnTimeline>>({});
@@ -216,6 +219,14 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
   }, [endpoint, sessionId, turnKey, refresh, polling]);
 
   const turnsWithResults = turns.map(turn => withRecordedResult(turn, timelines[turn.id]?.detail));
+  const modelTask = turnsWithResults.find(turn => turn.id === modelTaskId);
+  const modelRun = modelTask && timelines[modelTask.id]?.run;
+  const ledgerModel = modelRun && modelTask?.childSessionId && modelRun.sessionId === modelTask.childSessionId
+    && modelRun.clientTurnId === modelTask.id ? modelRun.model?.trim() : "";
+  const model = modelTask ? subAgentConversationModel(modelTask) || ledgerModel || "" : "";
+  useEffect(() => {
+    if (modelTaskId && model) onModelChange?.(modelTaskId, model);
+  }, [modelTaskId, model, onModelChange]);
   const projection = projectConversationSteeringMessages(mergeConversationTimelineItems(
     turnsWithResults.flatMap(turn => turnItems(turn, t, timelines[turn.id])),
   ));
@@ -228,10 +239,11 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
         const user = projection.initialUsersByTurnId.get(item.id);
         if (!turn) return null;
         const response = item.type === "agent" ? item.response : undefined;
+        const historicalInspection = response ? subAgentInspectionResult(turn) : null;
         const budgetStop = turn.reason === BUDGET_STOP || response?.plan.reason === BUDGET_STOP;
         const hasContent = response?.plan.reply || response?.plan.summary || response?.steps?.length || response?.timeline?.length;
         const failureInAnswer = runtimeTerminalStatusKey(response?.plan.plannerFailure?.code)
-          || (turn.role === "outfit_package_inspection" && subAgentInspectionConclusion(turn, t));
+          || historicalInspection;
         const errorText = turn.resultUnavailable || (
           !failureInAnswer && !budgetStop && turn.status !== "cancelled" && turn.status !== "interrupted"
         ) ? subAgentTaskIssueText(turn) : "";
@@ -240,7 +252,6 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
           && !loading && turn.status !== "cancelled" && turn.status !== "interrupted";
         const supplement = response ? (
           <>
-            <SubAgentInspectionDetails turn={turn} />
             {turn.status === "paused" || budgetStop ? (
               <p role="status" className="px-1 text-xs text-muted-foreground" data-subagent-paused-report>
                 {budgetStop ? t("subagent.budgetPaused") : displaySubAgentStatus(turn.status)}
@@ -253,7 +264,15 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
         return (
           <section key={turn.id} data-subagent-conversation-turn={turn.id}>
             {dateSeparators.has(item) ? <MessageDateSeparator timestamp={dateSeparators.get(item)} /> : null}
-            <ConversationCard item={item} onCopyItem={onCopyItem} onOpenChatById={onOpenChatById} agentReplySupplement={supplement} compactAgentReply developerOptionsEnabled={developerOptionsEnabled}
+            <ConversationCard item={item} onCopyItem={onCopyItem} onOpenChatById={onOpenChatById} agentReplySupplement={supplement}
+              agentProcessSupplement={historicalInspection ? (
+                <div data-subagent-inspection-activity>
+                  <WorkSegmentRow kind="tool" title={t("subagent.inspection.scanActivity")} statusLabel="" statusTone="muted">
+                    <OutfitInspectionEvidence inspection={historicalInspection} />
+                  </WorkSegmentRow>
+                </div>
+              ) : undefined}
+              compactAgentReply developerOptionsEnabled={developerOptionsEnabled}
               initialUserContent={user ? <div data-subagent-user-message><ConversationCard item={user} onCopyItem={onCopyItem} /></div> : undefined} />
             {item.type === "streaming" ? <StreamingPhaseStatus item={item} nowMs={Date.now()} showElapsed={false} /> : null}
             {developerOptionsEnabled && (turn.result || turn.events?.length || turn.parentContinuationStatus || turn.error || turn.errorCode || turnReadError)

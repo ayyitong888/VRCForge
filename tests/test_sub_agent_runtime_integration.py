@@ -12,6 +12,7 @@ import pytest
 import dashboard_server as server
 from background_goal_runtime import RuntimeLaneBudget
 from general_agent_tools import read_text_file
+from outfit_package_inspector import inspect_outfit_package
 from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from tests.test_native_runtime_gateway import call, setup_gateway
@@ -224,6 +225,164 @@ def test_parent_omitting_role_runs_general_readonly_child_without_project(tmp_pa
         assert fetches == [url]
         assert source_excerpt in detail["task"]["summary"]
     finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("request_case", ["verified", "no_scan", "scan_failed", "cancelled"])
+def test_outfit_inspection_delegates_native_child_and_delivers_exact_scanner_receipt(tmp_path, monkeypatch, request_case):
+    project = tmp_path / "project"
+    project.mkdir()
+    materials = project / "素材"
+    materials.mkdir()
+    for extension, count in (("unitypackage", 14), ("prefab", 86), ("png", 232)):
+        for index in range(count):
+            (materials / f"fixture{index}.{extension}").touch()
+    inspect_tool = "vrcforge_inspect_outfit_package"
+    arguments = {"packagePath": str(materials), "maxEntries": 50000}
+    final_report = "共 14 个 UnityPackage、86 个 Prefab 候选、232 张纹理。"
+    reply = {"role": "assistant", "content": final_report}
+    child_calls = [] if request_case == "no_scan" else [call("scan", inspect_tool, arguments)]
+    followup_replies = [reply]
+    if request_case == "verified":
+        unrelated = tmp_path / "other"
+        unrelated.mkdir()
+        child_calls.insert(0, call("wrong-bound", inspect_tool, {**arguments, "maxEntries": 5000}))
+        child_calls.append(call("duplicate", inspect_tool, arguments))
+        followup_replies.extend([
+            call("other-scan", inspect_tool, {**arguments, "packagePath": str(unrelated)}),
+            reply,
+        ])
+    child, child_model, _ = _child_gateway(tmp_path / "child", [*child_calls, reply, *followup_replies])
+    inspected = []
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def inspect(arguments):
+        inspected.append(arguments)
+        scan_started.set()
+        if request_case == "cancelled":
+            assert release_scan.wait(5)
+        if request_case == "scan_failed":
+            return {"ok": False, "error": "Unreadable fixture package."}
+        return inspect_outfit_package(arguments["packagePath"], max_entries=arguments["maxEntries"])
+
+    child.register_tool(inspect_tool, "When to use: inspect. When NOT to use: import.", "read/debug", inspect)
+    request = {
+        "role": "outfit_package_inspection",
+        "displayName": "素材复核",
+        "task": "只读检查指定素材目录，统计 UnityPackage、Prefab 候选和纹理数量。",
+        "model": "fixture-child-model",
+        "params": {**arguments, "_generalReadRoots": ["must-not-be-used"]},
+    }
+    expected = {"unityPackageCount": 14, "prefabCandidateCount": 86, "textureCount": 232}
+    parent_deliveries = []
+    parent_observations = []
+    parent_ready = threading.Event()
+
+    def finish_parent(request):
+        observation_text = "\n".join(message["content"] for message in request["messages"]
+                                     if message["role"] == "tool")
+        parent_observations.append(observation_text)
+        return {"role": "assistant", "content": final_report}
+
+    parent, _model, _ = _child_gateway(tmp_path / "parent", [
+        call("delegate", "vrcforge_delegate_subagent", request),
+        finish_parent,
+    ])
+
+    def handoff(event):
+        try:
+            parent_deliveries.append(
+                parent.resume_runtime_task_after_sub_agent(event) if request_case == "verified" else event
+            )
+        finally:
+            parent_ready.set()
+
+    service = SubAgentCollaborationService(SubAgentCollaborationPorts(
+        artifact_dir=tmp_path / "children", gateway=child, lane_budget=RuntimeLaneBudget(),
+        build_roles=build_sub_agent_roles, build_handlers=build_sub_agent_role_handlers, task_finished=handoff,
+    ))
+    monkeypatch.setattr(server, "AGENT_GATEWAY", parent)
+    monkeypatch.setattr(server, "SUB_AGENT_COLLABORATION", service)
+    parent.register_tool(
+        "vrcforge_delegate_subagent", "Delegate a read.", "plan/preview", server.delegate_sub_agent_runtime,
+    )
+    try:
+        parent.runtime_message({
+            "message": request["task"], "sessionId": "outfit-parent-session",
+            "projectRoot": str(project), "model": "fixture-parent-model",
+        })
+        task_id = service.list_tasks()["tasks"][0]["id"]
+        if request_case == "cancelled":
+            assert scan_started.wait(5)
+            service.cancel_task(task_id)
+            release_scan.set()
+        service._registry._threads[task_id].join(8)
+        detail = service.get_task(task_id)["task"]
+        assert detail["handler"] == "llm_readonly"
+        assert detail["childSessionId"] and detail["childSessionId"] != "outfit-parent-session"
+        assert child.runtime_planner._turn.requests[0]["model"] == "fixture-child-model"
+        first_child_request = child_model.requests[0]
+        visible = _native_available_tool_names(first_child_request)
+        assert inspect_tool in visible and "vrcforge_read_text_file" not in visible
+        assert len(inspected) == (0 if request_case == "no_scan" else 1)
+        if inspected:
+            assert inspected == [arguments]
+        assert parent_ready.wait(8)
+        assert len(parent_deliveries) == 1
+        if request_case == "verified":
+            assert detail["status"] == "completed", detail
+            assert detail["result"]["finalReport"] == final_report
+            assert detail["model"] == "fixture-child-model"
+            assert detail["result"]["providerRoute"]["model"] == "fixture-child-model"
+            assert {key: detail["result"]["plannerEvidence"][key] for key in expected} == expected
+            assert detail["result"]["rawResult"]["steps"][1]["result"]["summary"]["textureCount"] == 232
+            assert parent_deliveries[0]["plan"]["reply"] == final_report
+            assert parent_observations and all(key in parent_observations[0] for key in expected), ascii(parent_observations)
+            assert final_report in parent_observations[0], ascii(parent_observations)
+        elif request_case == "cancelled":
+            assert detail["status"] == "cancelled", detail
+            assert parent_deliveries[0]["status"] == "cancelled"
+            assert parent_deliveries[0]["result"] is None
+        else:
+            assert detail["status"] == "failed", detail
+            assert parent_deliveries[0]["status"] == "failed"
+            assert final_report not in detail["summary"]
+            assert "finalReport" not in detail["result"]
+            assert ("Unreadable fixture package" if request_case == "scan_failed" else
+                    "did not obtain a successful package inspection receipt") in detail["error"]
+
+        if request_case in {"verified", "no_scan"}:
+            resumed = service._registry.resume_task(
+                task_id, task="Explain the count from the previous inspection.",
+                general_read_roots=() if request_case == "verified" else (str(project),),
+            )
+            assert resumed["ok"], resumed
+            followup_id = resumed["task"]["id"]
+            service._registry._threads[followup_id].join(8)
+            followup = service.get_task(followup_id)["task"]
+            assert followup["childSessionId"] == detail["childSessionId"]
+            if request_case == "verified":
+                assert followup["status"] == "completed", followup
+                assert {key: followup["result"]["plannerEvidence"][key] for key in expected} == expected
+                assert any(message.get("tool_call_id") == "scan"
+                           for message in child_model.requests[-1]["messages"])
+                assert inspected == [arguments]
+                rejected = service._registry.resume_task(
+                    followup_id, task="Review the counts.", general_read_roots=(str(unrelated),),
+                )
+                assert rejected["ok"], rejected
+                rejected_id = rejected["task"]["id"]
+                service._registry._threads[rejected_id].join(8)
+                rejected_task = service.get_task(rejected_id)["task"]
+                assert rejected_task["status"] == "failed", rejected_task
+                assert inspected == [arguments]
+            else:
+                assert followup["status"] == "failed", followup
+                assert "did not obtain a successful package inspection receipt" in followup["error"]
+                assert not inspected
+    finally:
+        release_scan.set()
         service.shutdown()
 
 

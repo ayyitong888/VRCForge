@@ -47,6 +47,7 @@ export function ConversationCard({
   initialUserContent,
   sharedProcess,
   agentReplySupplement,
+  agentProcessSupplement,
   compactAgentReply = false,
   onOpenSubAgent,
   chatResourceImageContext,
@@ -86,6 +87,7 @@ export function ConversationCard({
   initialUserContent?: ReactNode;
   sharedProcess?: SharedTurnProcess;
   agentReplySupplement?: ReactNode;
+  agentProcessSupplement?: ReactNode;
   compactAgentReply?: boolean;
   onOpenSubAgent?: (taskId: string) => void;
   chatResourceImageContext?: Pick<ChatResourceImageContextValue, "endpoint" | "chatId" | "projectPath">;
@@ -529,6 +531,7 @@ export function ConversationCard({
     onOpenChatById,
     onOpenSubAgent,
     replySupplement: agentReplySupplement,
+    processSupplement: agentProcessSupplement,
     renderQuestionActions,
     live: runtimeActive ?? false,
     t,

@@ -18,6 +18,8 @@ export type SubAgentTask = {
   parentSessionId?: string;
   parentTurnId?: string;
   parentClientTurnId?: string;
+  parentModel?: string;
+  handler?: string;
   projectPath?: string;
   toolProfile?: string;
   status: "queued" | "running" | "cancelling" | "completed" | "paused" | "failed" | "cancelled" | "interrupted" | string;

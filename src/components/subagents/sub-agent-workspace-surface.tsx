@@ -1,5 +1,5 @@
 import { Ban, BellOff, Check, Copy, Loader2, ArrowLeft, ArrowUp, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { SubAgentTask } from "../../lib/api";
 import { elapsedSecondsSince } from "../../lib/chat-streaming";
@@ -11,6 +11,7 @@ import { groupSubAgentThreads } from "../../lib/subagent-threads";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { SubAgentConversation, subAgentConversationCopyItem, subAgentConversationModel } from "./sub-agent-conversation";
+import { subAgentInspectionConclusion } from "./sub-agent-inspection-report";
 import { SubAgentMark } from "./sub-agent-panel";
 import { useConversationScroll } from "../../hooks/use-conversation-scroll";
 
@@ -33,16 +34,18 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
   const { t } = useTranslation();
   const [resumeQuestion, setResumeQuestion] = useState("");
   const [resumeSubmitting, setResumeSubmitting] = useState(false);
+  const [readModel, setReadModel] = useState<{ taskId: string; model: string }>();
+  const recordReadModel = useCallback((taskId: string, model: string) => setReadModel({ taskId, model }), []);
   const threads = useMemo(() => groupSubAgentThreads(tasks), [tasks]);
   const activeThread = threads.find((thread) => thread.turns.some((turn) => turn.id === selected?.id)) || threads[0];
   const activeTask = activeThread ? selected?.id === activeThread.task.id ? selected : activeThread.task : null;
-  const activeModel = activeTask ? subAgentConversationModel(activeTask) : "";
-  const localInspection = activeTask?.role === "outfit_package_inspection";
-  const executionLabel = activeModel || t(localInspection ? "subagent.localFileInspection"
+  const activeModel = activeTask && (subAgentConversationModel(activeTask)
+    || (readModel?.taskId === activeTask.id ? readModel.model : ""));
+  const localExecution = activeTask?.handler && activeTask.handler !== "llm_readonly" && !activeTask.childSessionId;
+  const executionLabel = activeModel || t(localExecution ? "subagent.modelNotUsed"
     : activeTask && isActiveSubAgentStatus(activeTask.status) ? "subagent.modelPending" : "subagent.modelNotRecorded");
-  const executionTitle = localInspection && !activeModel ? t("subagent.localInspectionNoModel") : executionLabel;
   const end = Date.parse(activeTask?.stoppedAt || "");
-  const elapsed = activeTask && !activeTask.childSessionId && Number.isFinite(end)
+  const elapsed = activeTask && !activeTask.childSessionId && !subAgentInspectionConclusion(activeTask, t) && Number.isFinite(end)
     ? elapsedSecondsSince(activeTask.startedAt, end) : undefined;
   const copyItem = useMemo(() => activeTask && onCopyItem ? subAgentConversationCopyItem(activeTask, t) : undefined, [activeTask, onCopyItem, t]);
   const conversationEndRef = useRef<HTMLDivElement>(null);
@@ -66,26 +69,35 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden bg-transparent" data-vrcforge-subagent-workspace-surface>
-      <header className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0" onClick={onClose}
-          title={t("subagent.backToList")} aria-label={t("subagent.backToList")} data-vrcforge-subagent-back>
-          <ArrowLeft className="h-3.5 w-3.5" />
-        </Button>
-        {activeThread ? <SubAgentMark threadId={activeThread.id} /> : null}
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{activeTask?.displayName || t("subagent.conversation")}</span>
-        {activeTask ? <span className="max-w-[35%] truncate text-xs text-muted-foreground" title={executionTitle} data-subagent-model>{executionLabel}</span> : null}
-        {elapsed !== undefined ? <span className="shrink-0 text-xs tabular-nums text-muted-foreground" data-subagent-duration>
-          {t("agent.elapsed", { time: `${elapsed}s` })}
-        </span> : null}
-        {activeTask ? <Badge tone={subAgentStatusTone(activeTask.status)}>{displaySubAgentStatus(activeTask.status)}</Badge> : null}
-        {copyItem ? <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0"
-          title={t("chat.copyMessage")} aria-label={t("chat.copyMessage")} onClick={() => onCopyItem?.(copyItem)} data-subagent-copy-reply>
-          <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-        </Button> : null}
-        {onCloseSidebar ? <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0" onClick={onCloseSidebar}
-          aria-label={t("common.close")} title={t("common.close")} data-vrcforge-close-subagent-sidebar>
-          <X className="h-3.5 w-3.5" />
-        </Button> : null}
+      <header className="shrink-0 border-b border-border px-3 py-2">
+        <div className="flex items-center gap-2">
+          <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0" onClick={onClose}
+            title={t("subagent.backToList")} aria-label={t("subagent.backToList")} data-vrcforge-subagent-back>
+            <ArrowLeft className="h-3.5 w-3.5" />
+          </Button>
+          {activeThread ? <SubAgentMark threadId={activeThread.id} /> : null}
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{activeTask?.displayName || t("subagent.conversation")}</span>
+          {elapsed !== undefined ? <span className="shrink-0 text-xs tabular-nums text-muted-foreground" data-subagent-duration>
+            {t("agent.elapsed", { time: `${elapsed}s` })}
+          </span> : null}
+          {activeTask ? <Badge tone={subAgentStatusTone(activeTask.status)}>{displaySubAgentStatus(activeTask.status)}</Badge> : null}
+          {copyItem ? <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0"
+            title={t("chat.copyMessage")} aria-label={t("chat.copyMessage")} onClick={() => onCopyItem?.(copyItem)} data-subagent-copy-reply>
+            <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+          </Button> : null}
+          {onCloseSidebar ? <Button type="button" variant="ghost" className="h-7 w-7 shrink-0 p-0" onClick={onCloseSidebar}
+            aria-label={t("common.close")} title={t("common.close")} data-vrcforge-close-subagent-sidebar>
+            <X className="h-3.5 w-3.5" />
+          </Button> : null}
+        </div>
+        {activeTask ? <div className="flex flex-wrap gap-x-3 gap-y-1 pl-9 text-xs text-muted-foreground">
+          <span className="min-w-0 [overflow-wrap:anywhere]" data-subagent-model>
+            {t("subagent.modelValue", { model: executionLabel })}
+          </span>
+          {localExecution && activeTask.parentModel ? <span className="min-w-0 [overflow-wrap:anywhere]" data-subagent-parent-model>
+            {t("subagent.parentModelValue", { model: activeTask.parentModel })}
+          </span> : null}
+        </div> : null}
       </header>
 
       {activeTask && activeThread ? <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -95,6 +107,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
         <div className="app-scrollbar min-h-0 flex-1 overflow-auto pl-7 pr-4 py-5 md:pl-8 md:pr-6 md:py-6" data-vrcforge-subagent-conversation-scroll data-chat-history-scroll onScroll={(event) => onScroll(event.currentTarget)}>
           <div className="mx-auto max-w-3xl space-y-6">
           <SubAgentConversation key={activeThread.id} endpoint={endpoint} developerOptionsEnabled={developerOptionsEnabled} onCopyItem={onCopyItem} onOpenChatById={onOpenChatById}
+            modelTaskId={activeTask.id} onModelChange={recordReadModel}
             turns={activeThread.turns.map((turn) => turn.id === activeTask.id ? activeTask : turn)} />
           <div ref={conversationEndRef} />
           </div>

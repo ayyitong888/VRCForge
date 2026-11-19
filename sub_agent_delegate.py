@@ -8,6 +8,7 @@ skills fail visibly through the durable task registry.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -149,46 +150,6 @@ def run_project_index_review(
         },
         "projectIndex": result,
         "proposedNextAction": "Run targeted scanners for the affected families before planning writes." if changed else "No project-index-triggered scanner rerun is needed.",
-    }
-
-
-def run_outfit_package_inspection(
-    gateway: RuntimeSkillGateway,
-    payload: dict[str, Any],
-    cancel_event: Any,
-) -> dict[str, Any]:
-    _checkpoint(cancel_event)
-    package_path = str(payload.get("packagePath") or payload.get("package_path") or "").strip()
-    if not package_path:
-        raise RuntimeError("outfit_package_inspection requires params.packagePath.")
-    result = _dispatch(
-        gateway,
-        "vrcforge_inspect_outfit_package",
-        {"packagePath": package_path, "maxEntries": payload.get("maxEntries") or 5000},
-        "sub-agent:outfit_package_inspection",
-        payload,
-    )
-    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
-    summary_text = (
-        "Outfit package inspected: "
-        f"{summary.get('unityPackageCount', 0)} UnityPackage(s), "
-        f"{summary.get('prefabCandidateCount', 0)} prefab candidate(s), "
-        f"{summary.get('textureCount', 0)} texture(s)."
-    )
-    return {
-        "ok": bool(result.get("ok")),
-        "schema": "vrcforge.sub_agent.outfit_package_inspection.v1",
-        "role": "outfit_package_inspection",
-        "readOnly": True,
-        "summaryText": summary_text,
-        "plannerEvidence": {
-            "role": "outfit_package_inspection",
-            "unityPackageCount": int(summary.get("unityPackageCount") or 0),
-            "prefabCandidateCount": int(summary.get("prefabCandidateCount") or 0),
-            "textureCount": int(summary.get("textureCount") or 0),
-        },
-        "inspection": result,
-        "proposedNextAction": "Create a supervised import plan if the package has a UnityPackage or prefab candidate.",
     }
 
 
@@ -404,7 +365,104 @@ def run_skill_delegate(
     }
 
 
-def run_readonly_llm_agent(gateway: RuntimeSkillGateway, payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
+_OUTFIT_INSPECTION_TOOL = "vrcforge_inspect_outfit_package"
+_OUTFIT_COUNTS = ("unityPackageCount", "prefabCandidateCount", "textureCount")
+_OUTFIT_COVERAGE = ("assetCountScope", "truncated", "nestedPathnamesTruncated", "warningCount")
+# Scoped to the native child turn. Tool execution is synchronous on this worker.
+_OUTFIT_INSPECTION = ContextVar("child_outfit_inspection", default=None)
+
+
+def child_outfit_read_scope(
+    project_path: str,
+    read_roots: tuple[str, ...],
+) -> ReadScope:
+    bind_read = _delegated_read_scope(project_path, read_roots)
+    inspection = _OUTFIT_INSPECTION.get()
+
+    def bind(tool: RuntimeSkillTool, arguments: dict[str, Any]) -> dict[str, Any]:
+        if inspection is not None and inspection[0] is None:
+            raise PermissionError("The original package is outside the current scope. Use the existing inspection result.")
+        params = bind_read(tool, arguments)
+        if inspection is not None:
+            expected, dispatched = inspection
+            if params.get("packagePath") != expected["packagePath"] or (
+                params.get("maxEntries", 5000) != expected["maxEntries"]
+            ):
+                raise PermissionError("Use the exact packagePath and maxEntries in the delegated inspection scope.")
+            if dispatched:
+                raise RuntimeError("The delegated inspection already ran. Use its existing result.")
+            _OUTFIT_INSPECTION.set((expected, True))
+        return params
+
+    return bind
+
+
+def run_outfit_package_inspection(
+    gateway: RuntimeSkillGateway,
+    payload: dict[str, Any],
+    cancel_event: Any,
+) -> dict[str, Any]:
+    _checkpoint(cancel_event)
+    package_path = str(payload.get("packagePath") or payload.get("package_path") or "").strip()
+    if not package_path:
+        raise RuntimeError("outfit_package_inspection requires params.packagePath.")
+    prior = payload.get("_priorOutfitInspection") if payload.get("isResume") else None
+    can_reuse = isinstance(prior, dict) and all(isinstance(prior.get(key), int) for key in _OUTFIT_COUNTS)
+    scope = None
+    try:
+        scope = {
+            "packagePath": str(_authorized_path(package_path, payload.get("_generalReadRoots", ()))),
+            "maxEntries": int(payload.get("maxEntries") or 5000),
+        }
+    except OSError:
+        if not can_reuse:
+            raise
+    token = _OUTFIT_INSPECTION.set((scope, False))
+    try:
+        result = run_readonly_llm_agent(
+            gateway, payload if scope is not None else {**payload, "tools": []}, cancel_event,
+            scope_material={"label": "Delegated inspection tool arguments", **scope} if scope is not None else None,
+        )
+    finally:
+        _OUTFIT_INSPECTION.reset(token)
+
+    steps = result["rawResult"].get("steps") or []
+    receipts = [step for step in steps if step.get("tool") == _OUTFIT_INSPECTION_TOOL]
+    for receipt in receipts:
+        inspection = receipt.get("result")
+        if isinstance(inspection, dict) and inspection.get("ok") is True:
+            summary = inspection["summary"]
+            result["plannerEvidence"].update({
+                key: summary[key] for key in (*_OUTFIT_COUNTS, *_OUTFIT_COVERAGE) if key in summary
+            })
+            result["plannerEvidence"]["warningCount"] = len(inspection.get("warnings") or [])
+            break
+    else:
+        if can_reuse and not receipts:
+            result["plannerEvidence"].update({
+                key: prior[key] for key in (*_OUTFIT_COUNTS, *_OUTFIT_COVERAGE) if key in prior
+            })
+        elif result.get("status") != "paused":
+            failure = next(
+                (receipt["error"] for receipt in receipts if receipt.get("error")),
+                (result["finalReport"] if not result["ok"] else "")
+                or "The child did not obtain a successful package inspection receipt.",
+            )
+            result["ok"] = False
+            result["error"] = result["summaryText"] = failure
+            # Keep the provider's reply in its native conversation. Only a
+            # receipt-backed initial report is handed to the parent as output.
+            result.pop("finalReport")
+    return result
+
+
+def run_readonly_llm_agent(
+    gateway: RuntimeSkillGateway,
+    payload: dict[str, Any],
+    cancel_event: Any,
+    *,
+    scope_material: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Run one independent child session through AgentGateway's native runtime loop."""
     _checkpoint(cancel_event)
     task = str(payload.get("task") or "").strip()
@@ -416,6 +474,8 @@ def run_readonly_llm_agent(gateway: RuntimeSkillGateway, payload: dict[str, Any]
         raise RuntimeError("selectedMaterials must be a list of objects.")
     # Deliberately never forward parent native history, task seed, or arbitrary params.
     materials = [dict(item) for item in raw_materials]
+    if scope_material is not None:
+        materials.insert(0, scope_material)
     # The registry projects this private value from its typed task record.
     read_roots = payload.get("_generalReadRoots")
     response = gateway.run_sub_agent_llm(
@@ -533,7 +593,6 @@ def build_sub_agent_role_handlers(
     """Bind legacy fixed handlers and the generic read-only LLM executor."""
     handlers = {
         "project_index_review": lambda payload, cancel_event: run_project_index_review(gateway, payload, cancel_event),
-        "outfit_package_inspection": lambda payload, cancel_event: run_outfit_package_inspection(gateway, payload, cancel_event),
         "validation_triage": lambda payload, cancel_event: run_validation_triage(gateway, payload, cancel_event),
         "selected_context_review": lambda payload, cancel_event: run_selected_context_review(payload, cancel_event),
         "package_install_diagnosis": lambda payload, cancel_event: run_package_install_diagnosis(gateway, payload, cancel_event),
@@ -546,7 +605,8 @@ def build_sub_agent_role_handlers(
             def run_role(payload: dict[str, Any], cancel_event: Any, *, role_id: str = role.id) -> dict[str, Any]:
                 role_payload = dict(payload)
                 role_payload.setdefault("roleId", role_id)
-                return run_readonly_llm_agent(gateway, role_payload, cancel_event)
+                runner = run_outfit_package_inspection if role_id == "outfit_package_inspection" else run_readonly_llm_agent
+                return runner(gateway, role_payload, cancel_event)
 
             handlers[role.id] = run_role
     return handlers

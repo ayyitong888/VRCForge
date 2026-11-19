@@ -77,14 +77,6 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
     update(scope, { ...draft, attachments });
   }
 
-  function prefillTemporaryDraft(input: string) {
-    const temporaryScope = "new:";
-    const draft = read(temporaryScope);
-    if (draft.input || draft.attachments.length || submissions.current.has(temporaryScope)) return;
-    writeDraftText(temporaryScope, input);
-    update(temporaryScope, { ...draft, input });
-  }
-
   function beginSubmission() {
     const submitted = read(scope);
     const submission = Symbol();
@@ -134,5 +126,5 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
     };
   }
 
-  return { ...draft, setInput, setAttachments, prefillTemporaryDraft, beginSubmission, beginRetainedSubmission };
+  return { ...draft, setInput, setAttachments, beginSubmission, beginRetainedSubmission };
 }

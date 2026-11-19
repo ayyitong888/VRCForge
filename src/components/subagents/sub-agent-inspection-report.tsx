@@ -13,10 +13,13 @@ const INVENTORIES = [
   ["assemblyDefinitions", "assemblyDefinitionCount", "assemblies"],
 ] as const;
 
-function inspectionResult(turn: SubAgentTask) {
-  if (turn.role !== "outfit_package_inspection") return null;
-  const inspection = asRecord(turn.result?.inspection);
+export function asOutfitInspectionResult(value: unknown) {
+  const inspection = asRecord(value);
   return typeof inspection?.ok === "boolean" ? inspection : null;
+}
+
+export function subAgentInspectionResult(turn: SubAgentTask) {
+  return turn.role === "outfit_package_inspection" ? asOutfitInspectionResult(turn.result?.inspection) : null;
 }
 
 function pathRecords(value: unknown): Array<Record<string, unknown> & { path: string }> {
@@ -32,18 +35,20 @@ function paths(value: unknown) {
 }
 
 export function subAgentInspectionConclusion(turn: SubAgentTask, t: TFunction): string {
-  const inspection = inspectionResult(turn);
+  const inspection = subAgentInspectionResult(turn);
   if (!inspection) return "";
   if (inspection.ok === false) {
     return t(asRecord(inspection.source)?.type === "missing" ? "subagent.inspection.missing" : "subagent.inspection.failed");
   }
-  switch (asRecord(inspection.summary)?.importPlanKind) {
-    case "unitypackage_import": return t("subagent.inspection.packageFound");
-    case "loose_prefab_assets":
-    case "manual_loose_asset": return t("subagent.inspection.looseAssets");
-    case "manual_review": return t("subagent.inspection.manualReview");
-    default: return t("subagent.inspection.completed");
-  }
+  const summary = asRecord(inspection.summary);
+  const packages = summary?.unityPackageCount;
+  const prefabs = summary?.prefabCandidateCount;
+  const textures = summary?.textureCount;
+  const counts = typeof packages === "number" && typeof prefabs === "number" && typeof textures === "number"
+    ? t("subagent.inspection.counts", { packages, prefabs, textures })
+    : t("subagent.inspection.completed");
+  const partial = summary?.truncated === true || summary?.nestedPathnamesTruncated === true;
+  return partial ? `${counts}\n\n${t("subagent.inspection.partialScan")}` : counts;
 }
 
 function ReportDisclosure({ label, children }: { label: string; children: ReactNode }) {
@@ -66,10 +71,8 @@ function InventoryPaths({ entries }: { entries: string[] }) {
   );
 }
 
-export function SubAgentInspectionDetails({ turn }: { turn: SubAgentTask }) {
+export function OutfitInspectionEvidence({ inspection }: { inspection: Record<string, unknown> }) {
   const { t, i18n } = useTranslation();
-  const inspection = inspectionResult(turn);
-  if (!inspection) return null;
   const summary = asRecord(inspection.summary);
   const source = asRecord(inspection.source)?.name;
   const packages = pathRecords(inspection.unityPackages);
@@ -83,12 +86,9 @@ export function SubAgentInspectionDetails({ turn }: { turn: SubAgentTask }) {
   const numberFormat = new Intl.NumberFormat(i18n.resolvedLanguage);
 
   return (
-    <div className="mt-3 min-w-0 text-xs leading-5" data-subagent-inspection-report>
+    <div className="min-w-0 text-xs leading-5" data-subagent-inspection-evidence>
       {typeof source === "string" && source ? (
         <p className="mb-2 font-medium [overflow-wrap:anywhere]" data-subagent-inspection-source>{source}</p>
-      ) : null}
-      {summary?.truncated === true || summary?.nestedPathnamesTruncated === true ? (
-        <p className="mb-2 text-muted-foreground">{t("subagent.inspection.partialScan")}</p>
       ) : null}
       {packages.length > 0 ? (
         <ReportDisclosure label={`${t("subagent.inspection.packages")} (${numberFormat.format(
