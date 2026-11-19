@@ -484,7 +484,7 @@ export function isSubAgentTimelineTool(tool: string | undefined): boolean {
 
 export function subAgentLifecycleItems(task: SubAgentTask, fallbackLabel: string): Extract<ConversationItem, { type: "timeline_event" }>[] {
   const publicEvents = (task.events || [])
-    .filter((event) => ["created", "started", "completed", "failed", "cancel_requested", "cancelled", "interrupted"].includes(String(event.event || "")))
+    .filter((event) => ["created", "started", "completed", "paused", "failed", "cancel_requested", "cancelled", "interrupted"].includes(String(event.event || "")))
     .sort((left, right) => Number(left.revision || 0) - Number(right.revision || 0));
   if (!publicEvents.length && Number(task.revision || 0) > 0) {
     publicEvents.push({
@@ -532,7 +532,8 @@ export function subAgentLifecycleItems(task: SubAgentTask, fallbackLabel: string
           summary: summary.slice(0, 1000),
           status: eventName,
           tool: task.role,
-          subagentStatus,
+          ...(eventName !== "paused" ? { subagentStatus } : {}),
+          ...(task.dispatchBatchId ? { dispatchBatchId: task.dispatchBatchId } : {}),
         },
       },
     };
@@ -729,6 +730,7 @@ export function materializeRuntimeTimeline(response: AgentRuntimeResponse, fallb
         ...(typeof payload.actionId === "string" ? { actionId: payload.actionId.slice(0, 96) } : {}),
         ...(captures.length ? { captures } : {}),
         ...(payload.subagentStatus ? { subagentStatus: payload.subagentStatus } : {}),
+        ...(kind === "subagent" && payload.dispatchBatchId ? { dispatchBatchId: payload.dispatchBatchId } : {}),
       },
     } satisfies ChatTimelineEvent;
   });
@@ -771,7 +773,7 @@ export function mergeConversationTimelineItems(
   const storedIds = new Set(items.flatMap((item) => item.type === "timeline_event" ? [item.event.id]
     : item.type === "agent" ? [...(item.timeline || []), ...(item.response.timeline || [])].map((event) => event.id)
     : item.type === "streaming" ? (item.timeline || []).map((event) => event.id) : []));
-  const lifecycleItems = items.concat(registryLifecycle.filter((item) => !storedIds.has(item.event.id)))
+  const lifecycleItems = items.concat(registryLifecycle.filter((item) => !storedIds.has(item.event.id) || item.event.payload.dispatchBatchId))
     .map((item, index) => ({ item, index }))
     .filter((entry): entry is { item: Extract<ConversationItem, { type: "timeline_event" }>; index: number } => entry.item.type === "timeline_event");
   const claimedLifecycleIds = new Set<string>();

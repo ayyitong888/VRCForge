@@ -28,6 +28,7 @@ def test_lifecycle_events_survive_actual_chat_storage_write_and_read(tmp_path, m
     monkeypatch.setattr(server, "chat_transcripts_path", lambda: tmp_path / "chats.json")
     monkeypatch.setattr(server, "chat_project_index_path", lambda: tmp_path / "projects.json")
     chat = lifecycle_chat()
+    chat["items"][1]["event"]["payload"]["dispatchBatchId"] = "ab" * 12
     assert is_valid_chat_record(chat)
     result, _, _ = server.write_chat_transcripts_storage(ChatTranscriptsRequest(chats=[chat]))
     assert result["ok"] is True

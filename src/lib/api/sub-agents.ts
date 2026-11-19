@@ -19,6 +19,7 @@ export type SubAgentTask = {
   parentSessionId?: string;
   parentTurnId?: string;
   parentClientTurnId?: string;
+  dispatchBatchId?: string;
   parentModel?: string;
   handler?: string;
   projectPath?: string;

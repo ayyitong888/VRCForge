@@ -14,7 +14,7 @@ from background_goal_runtime import RuntimeLaneBudget
 from general_agent_tools import read_text_file
 from outfit_package_inspector import inspect_outfit_package
 from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
-from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
+from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles, run_outfit_package_inspection
 from tests.test_native_runtime_gateway import call, setup_gateway
 from tests.test_native_permission_modes import _set_mode
 from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata
@@ -503,13 +503,51 @@ def _native_available_tool_names(request):
     raise AssertionError("native request did not include runtime catalog state")
 
 
+def test_scoped_child_can_follow_its_scan_receipt_without_reopening_the_package(tmp_path):
+    tool = "vrcforge_inspect_outfit_package"
+    folder = tmp_path / "materials"
+    folder.mkdir()
+    (folder / "sample.prefab").touch()
+    arguments = {"packagePath": str(folder), "maxEntries": 5000}
+    scans = []
+
+    def inspect(params):
+        scans.append(params)
+        return inspect_outfit_package(params["packagePath"], max_entries=params["maxEntries"])
+
+    def read_receipt(request):
+        message = next(item for item in request["messages"] if item.get("tool_call_id") == "scan")
+        observation = json.loads(message["content"])["observations"][0]["observation"]
+        continuation, _ = json.JSONDecoder().raw_decode(observation.split("; resultContinuation=", 1)[1])
+        return call("read-result", "call_tool", continuation["nextRequest"])
+
+    gateway, model, _ = _child_gateway(tmp_path, [
+        call("scan", tool, arguments), read_receipt, _finish,
+    ])
+    gateway.register_tool(tool, "When to use: inspect. When NOT to use: import.", "read/debug", inspect)
+    result = run_outfit_package_inspection(gateway, {
+        **arguments, "roleId": "outfit_package_inspection", "task": "Inspect the selected package.",
+        "childSessionId": "inspection-owner", "model": "fixture-child-model", "maxSteps": 4,
+        "projectPath": str(tmp_path), "tools": [tool], "_generalReadRoots": (str(folder),),
+    }, threading.Event())
+    steps = result["rawResult"]["steps"]
+    page = steps[1].get("result") or {}
+    assert page.get("sourceTool") == tool, steps[1].get("outcome")
+    assert page["resultRef"] == steps[0]["resultRead"]["resultRef"]
+    assert scans == [arguments]
+    assert result["ok"]
+    assert "load_internal_tool_block" not in _native_function_names(model.requests[0])
+
+
 def test_role_allowlist_filters_native_and_legacy_tool_catalogs_including_empty_list(tmp_path):
-    gateway, model, invoked = _child_gateway(tmp_path, [_finish])
+    reply = {"role": "assistant", "content": "I reviewed the supplied context."}
+    gateway, model, invoked = _child_gateway(tmp_path, [reply])
     _register_second_read_tool(gateway, invoked)
     result = _run(gateway, tmp_path, allowed_tools=("vrcforge_read_text_file",))
     assert result["ok"] is True
     exposed = _native_available_tool_names(model.requests[0])
     assert "vrcforge_read_text_file" in exposed
+    assert "vrcforge_read_tool_result" in exposed
     assert "vrcforge_search_text" not in exposed
 
     with gateway.runtime_planner.bind_role_instructions(
@@ -534,13 +572,14 @@ def test_role_allowlist_filters_native_and_legacy_tool_catalogs_including_empty_
 
     empty_path = tmp_path / "empty-role"
     empty_path.mkdir()
-    empty_gateway, empty_model, _ = _child_gateway(empty_path, [_finish])
+    empty_gateway, empty_model, _ = _child_gateway(empty_path, [reply])
     empty_invoked = []
     _register_second_read_tool(empty_gateway, empty_invoked)
     empty_result = _run(empty_gateway, empty_path, allowed_tools=())
     assert empty_result["ok"] is True
     empty_exposed = _native_available_tool_names(empty_model.requests[0])
     assert "vrcforge_read_text_file" not in empty_exposed
+    assert "vrcforge_read_tool_result" not in empty_exposed
     assert "vrcforge_search_text" not in empty_exposed
 
 

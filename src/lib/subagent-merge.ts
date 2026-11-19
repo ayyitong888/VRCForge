@@ -25,10 +25,6 @@ export function canResumeSubAgentTask(task: SubAgentTask): boolean {
   return task.canResume === true && !["queued", "running", "cancelling"].includes(task.status);
 }
 
-export function isAwaitingMergeReview(task: SubAgentTask): boolean {
-  return task.status !== "paused" && (canAdoptSubAgentResult(task) || canDismissSubAgentResult(task));
-}
-
 export function isMergedAdopted(task: SubAgentTask): boolean {
   return task.mergeDecision === "adopted" && !task.parentContinuationStatus;
 }

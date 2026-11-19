@@ -38,7 +38,7 @@ const bundled = await build({
       }
       return <><nav>{tasks.map(item=><button key={item.id} onClick={()=>setSelected(item)}>{item.displayName}</button>)}</nav><SubAgentWorkspaceSurface tasks={tasks} roles={[{id:'custom_reviewer',title:'Custom reviewer title'}]} selected={selected}
         onSelect={id=>setSelected(tasks.find(item=>item.id===id))} onCancel={noop} onRetry={noop} onResume={onResume}
-        onMerge={noop} onIgnoreNotification={noop} onAdoptNextAction={noop} busyTaskIds={busy} onClose={noop}/></>;
+        onMerge={noop} onAdoptNextAction={noop} busyTaskIds={busy} onClose={noop}/></>;
     }
     i18n.use(initReactI18next).init({lng:'en-US',resources:{'en-US':{translation:messages}},interpolation:{escapeValue:false}})
       .then(()=>createRoot(document.getElementById('root')).render(<Fixture/>));

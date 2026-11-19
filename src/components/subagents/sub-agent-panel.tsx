@@ -12,14 +12,14 @@ const MARK_COLORS = [
   "bg-rose-500/15 text-rose-700 dark:text-rose-300",
 ];
 
-export function SubAgentMark({ threadId }: { threadId: string }) {
+export function SubAgentMark({ threadId, compact = false }: { threadId: string; compact?: boolean }) {
   let hash = 0x811c9dc5;
   for (let index = 0; index < threadId.length; index += 1) {
     hash = Math.imul(hash ^ threadId.charCodeAt(index), 0x01000193);
   }
   const color = MARK_COLORS[(hash >>> 0) % MARK_COLORS.length];
   return (
-    <span className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${color}`} aria-hidden="true">
+    <span className={`inline-flex ${compact ? "h-4 w-4" : "h-6 w-6"} shrink-0 items-center justify-center rounded-full ${color}`} aria-hidden="true">
       <Bot className="h-3.5 w-3.5" />
     </span>
   );

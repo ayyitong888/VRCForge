@@ -14,6 +14,7 @@ from typing import Any, Callable, Protocol
 
 from agent_command_safety import normalize_filesystem_path
 from agent_runtime_skill_executor import ReadScope, RuntimeSkillTool
+from agent_tool_result_reader import TOOL_NAME as RESULT_READER_TOOL
 from agent_task_loop import SUB_AGENT_TASK_TOOLS
 from general_agent_tools import _authorized_path
 from internal_tool_blocks import CONVERSATION_TOOL_NAMES
@@ -380,6 +381,8 @@ def child_outfit_read_scope(
     inspection = _OUTFIT_INSPECTION.get()
 
     def bind(tool: RuntimeSkillTool, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool.name == RESULT_READER_TOOL:
+            return bind_read(tool, arguments)
         if inspection is not None and inspection[0] is None:
             raise PermissionError("The original package is outside the current scope. Use the existing inspection result.")
         params = bind_read(tool, arguments)

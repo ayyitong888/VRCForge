@@ -34,6 +34,7 @@ import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ApprovalRevisionEditor } from "../approvals/approval-revision-editor";
 import { asOutfitInspectionResult, OutfitInspectionEvidence } from "../subagents/sub-agent-inspection-report";
+import { SubAgentStartRow } from "../subagents/sub-agent-start-row";
 import { ChatCaptureResourcePreview, ChatCaptureThumbnail, ChatMarkdown } from "./chat-markdown";
 import { ChatImagePreview, type ChatImageSource } from "./chat-image-preview";
 
@@ -80,6 +81,7 @@ export function buildAgentTimelineRows({
   elapsedSeconds,
   hideTurnMetadata = false,
   sharedProcess,
+  activeSubAgentEvents,
   interleavedUserMessages = [],
   interleavedUsersExpanded = false,
   onInterleavedUsersExpandedChange,
@@ -107,6 +109,7 @@ export function buildAgentTimelineRows({
   elapsedSeconds?: number;
   hideTurnMetadata?: boolean;
   sharedProcess?: SharedTurnProcess;
+  activeSubAgentEvents?: ReadonlyMap<string, string>;
   interleavedUserMessages?: InterleavedUserMessage[];
   interleavedUsersExpanded?: boolean;
   onInterleavedUsersExpandedChange?: (expanded: boolean) => void;
@@ -156,6 +159,8 @@ export function buildAgentTimelineRows({
       steps: response.steps?.filter((step) => !isStepKindAnswer(step.kind)),
     };
   }
+  const visibleActiveChild = (sharedProcess?.open ?? live)
+    && response.timeline?.some((event) => event.kind === "subagent" && event.id && activeSubAgentEvents?.has(event.id));
   const finishStatusRows = (rows: ReactNode[]): ReactNode[] => interrupted ? [...rows,
     ...(interruptedPartial && !response.timeline?.some((event) => event.kind === "assistant" && event.payload?.summary?.trim() === interruptedPartial) ? [
       <div key="interrupted-partial" data-agent-partial-reply className="space-y-1 px-1 text-chat-body" data-chat-quote-content>
@@ -172,7 +177,7 @@ export function buildAgentTimelineRows({
       <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(response.unityWriteMayHaveExecuted ? "chat.stoppedUnityWriteUnconfirmed" : "chat.cancelled")}</span>
     </div>,
-  ] : (waitingForChild ? !response.timeline?.some((event) => event.kind === "subagent") : backgroundWait) && (!sharedProcess || sharedProcess.last) ? [...rows,
+  ] : (waitingForChild ? !visibleActiveChild : backgroundWait) && (!sharedProcess || sharedProcess.last) ? [...rows,
     <div key="waiting-for-tool" data-agent-waiting-for-subagent={waitingForChild || undefined} role="status" className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
       <Clock className="h-3.5 w-3.5" aria-hidden="true" />
       <span>{t(waitingForChild ? "subagent.parentWaiting" : "chat.runtimePhase.toolInBackground")}</span>
@@ -192,6 +197,7 @@ export function buildAgentTimelineRows({
     {
       live,
       sharedProcess,
+      activeSubAgentEvents,
       providerLine,
       activeApprovalId: approval?.id,
       approvalRuns,
@@ -476,6 +482,7 @@ export function buildDurableTimelineRows(
     processTitleElapsed?: number;
     processSupplement?: ReactNode;
     sharedProcess?: SharedTurnProcess;
+    activeSubAgentEvents?: ReadonlyMap<string, string>;
     providerLine?: string;
     activeApprovalId?: string;
     approvalRuns?: readonly AgentRuntimeRun[];
@@ -562,11 +569,30 @@ export function buildDurableTimelineRows(
       && !entry.phase && Boolean(terminalFailureCode))
     || isFinalAssistantPresentationEntry(entry)
   ));
-  for (const entry of presentation.entries) {
+  for (let index = 0; index < presentation.entries.length; index++) {
+    const entry = presentation.entries[index];
     appendMessagesBefore(entry.startedAt);
     if (entry.type === "subagent") {
       flushToolCalls();
-      processRows.push(<SubAgentTimelineRow key={entry.id} event={entry.event} onOpenSubAgent={options.onOpenSubAgent} />);
+      const start = entry.event;
+      if (start.payload.status === "started" && start.payload.dispatchBatchId && subAgentTimelineTaskId(start) && options.onOpenSubAgent) {
+        const starts = [start];
+        const nextUser = interleavedMessages[nextInterleavedMessage];
+        for (let nextIndex = index + 1; nextIndex < presentation.entries.length; nextIndex++) {
+          const next = presentation.entries[nextIndex];
+          if (next.type !== "subagent" || next.event.payload.status !== "started" || !subAgentTimelineTaskId(next.event)
+            || next.event.payload.dispatchBatchId !== start.payload.dispatchBatchId
+            || next.event.turnId !== start.turnId || next.event.clientTurnId !== start.clientTurnId || next.event.sessionId !== start.sessionId
+            || (nextUser && parseTimelineTime(nextUser.createdAt) <= parseTimelineTime(next.startedAt))) break;
+          starts.push(next.event);
+        }
+        if (starts.length > 1) {
+          processRows.push(<SubAgentStartRow key={entry.id} events={starts} onOpen={options.onOpenSubAgent} />);
+          index += starts.length - 1;
+          continue;
+        }
+      }
+      processRows.push(<SubAgentTimelineRow key={entry.id} event={entry.event} activeStatus={options.activeSubAgentEvents?.get(entry.id)} onOpenSubAgent={options.onOpenSubAgent} />);
       continue;
     }
     if (entry.type === "subagent_dispatch") {
@@ -667,19 +693,19 @@ export function buildDurableTimelineRows(
   return rows;
 }
 
-function SubAgentTimelineRow({ event, onOpenSubAgent }: {
+function SubAgentTimelineRow({ event, activeStatus, onOpenSubAgent }: {
   event: ChatTimelineEvent;
+  activeStatus?: string;
   onOpenSubAgent?: (taskId: string) => void;
 }) {
   const taskId = subAgentTimelineTaskId(event);
   const status = event.payload.status || event.payload.subagentStatus || "";
-  const displayStatus = status === "created" ? "queued" : status === "started" ? "running"
-    : status === "cancel_requested" ? "cancelling" : status;
+  const displayStatus = activeStatus ?? status;
   const label = event.payload.label || i18n.t("agent.subagentTask");
   return <div data-subagent-activity={taskId || event.id} data-subagent-status={status}>
     {taskId && onOpenSubAgent ? (
       <button type="button" onClick={() => onOpenSubAgent(taskId)}
-        className="flex min-h-8 w-fit max-w-full items-center gap-2 rounded-md px-1 py-1 text-left text-muted-foreground hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        className="flex min-h-7 w-fit max-w-full items-center gap-2 rounded-md px-1 text-left text-muted-foreground hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         <Bot className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         <span className="min-w-0 truncate text-chat-detail">{label}</span>
         <span className="shrink-0 text-xs">{displaySubAgentStatus(displayStatus)}</span>

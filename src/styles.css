@@ -7,6 +7,10 @@
 @tailwind components;
 @tailwind utilities;
 
+[data-agent-process-content] > [data-subagent-activity] + [data-subagent-activity] {
+  margin-top: 0;
+}
+
 @layer components {
   .chat-composer-shell {
     @apply rounded-3xl bg-muted/70 shadow-composer;

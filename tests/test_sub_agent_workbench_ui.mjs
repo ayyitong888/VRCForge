@@ -45,12 +45,6 @@ assert.match(app, /fetchSubAgents\(endpoint, true\)/);
 assert.match(app, /subagent-event-\$\{task\.id\}-\$\{revision\}/);
 assert.match(app, /type: "timeline_event"/);
 assert.match(app, /\["created", "started", "completed", "failed", "cancel_requested", "cancelled", "interrupted"\]/);
-assert.match(app, /showSubAgentReviewNotification/);
-assert.match(app, /handledSubAgentReviewNotificationIdsRef/);
-assert.match(app, /fetchSubAgent\(endpoint, action\.taskId\)/);
-assert.match(app, /task\.revision !== action\.revision/);
-assert.match(app, /task\.parentChatId !== action\.parentChatId/);
-assert.match(app, /!isAwaitingMergeReview\(task\)/);
 assert.match(app, /openChat\(chat\)/);
 assert.match(app, /setSelectedSubAgentPanelOpen\(true\)/);
 assert.match(app, /subAgentInspectRequestRef/);
@@ -62,17 +56,11 @@ assert.match(app, /const latest = await fetchAgentApprovals\(endpoint\)/);
 assert.match(app, /item\.id === action\.approvalId && String\(item\.status \|\| ""\)[\s\S]*=== "pending"/, "toast activation must re-read and revalidate current backend pending state");
 assert.match(scopedApproval, /data-approval-id=\{approval\.id\}/);
 assert.doesNotMatch(app, /action\.action === "approve"/);
-assert.match(notifications, /taskId/);
-assert.match(notifications, /parentChatId/);
-assert.match(notifications, /revisionValue <= 0/);
-
-assert.match(rustNotifications, /show_sub_agent_review_notification/);
 assert.match(rustNotifications, /focus_main_window\(&callback_app\)/);
-assert.match(rustNotifications, /parse_sub_agent_review_notification_action/);
 assert.doesNotMatch(rustNotifications, /merge_sub_agent|approve_sub_agent|dismiss_sub_agent/);
 const mainApprovalToast = rustNotifications.slice(
   rustNotifications.indexOf("pub(crate) fn show_approval_notification"),
-  rustNotifications.indexOf("pub(crate) fn show_sub_agent_review_notification"),
+  rustNotifications.indexOf("pub(crate) fn show_background_goal_notification"),
 );
 assert.doesNotMatch(mainApprovalToast, /\.add_button\(/);
 assert.match(mainApprovalToast, /action: "open"/);

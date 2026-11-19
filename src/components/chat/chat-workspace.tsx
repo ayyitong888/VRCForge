@@ -25,7 +25,7 @@ import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-
 import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
-import { subAgentLifecycleItems } from "../../lib/chat-timeline-presentation";
+import { projectSubAgentRegistry } from "../../lib/subagent-ui";
 import type { SubAgentTask } from "../../lib/api/sub-agents";
 import { projectConversationSteeringMessages } from "../../lib/chat-steering-projection";
 import { agentReplyPreviewText, conversationItemRenderKey, copyableAgentDialogueText, includesQuestionText } from "../../lib/conversation-utils";
@@ -394,9 +394,9 @@ export function ChatWorkspace({
       <button type="button" className="shrink-0 rounded border border-border px-2 py-1 hover:bg-muted" onClick={onCancelReply}>{t("common.cancel")}</button>
     </div>
   ) : null;
-  const registryLifecycle = (subAgentTasks || [])
-    .filter((task) => task.parentClientTurnId || task.parentTurnId)
-    .flatMap((task) => subAgentLifecycleItems(task, t("agent.subagentTask")));
+  const { items: registryLifecycle, activeEvents: activeSubAgentEvents } = projectSubAgentRegistry(
+    subAgentTasks || [], t("agent.subagentTask"),
+  );
   const steeringProjection = projectConversationSteeringMessages(mergeConversationTimelineItems(conversation.filter(
     (item) => item.type !== "user" || !(item.composerQueued || (
       item.queuedFrom && (item.queueStatus === "queued" || item.queueStatus === "waiting_for_resources"
@@ -861,6 +861,7 @@ export function ChatWorkspace({
                 item={item}
                 developerOptionsEnabled={developerOptionsEnabled}
                 sharedProcess={sharedProcess}
+                activeSubAgentEvents={activeSubAgentEvents}
                 retiredLoopPause={item.type === "agent" && Boolean(turnId) && retiredLoopPauses.has(turnId)}
                 onOpenSubAgent={onOpenSubAgent}
                 runtimeActive={itemRuntimeActive}

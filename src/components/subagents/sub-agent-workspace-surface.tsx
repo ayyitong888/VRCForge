@@ -1,11 +1,10 @@
-import { Ban, BellOff, Check, Loader2, ArrowLeft, ArrowUp, X } from "lucide-react";
+import { Ban, Check, Loader2, ArrowLeft, ArrowUp, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { SubAgentTask } from "../../lib/api";
 import { elapsedSecondsSince } from "../../lib/chat-streaming";
 import type { ConversationItem } from "../../lib/chat-types";
-import { canAdoptSubAgentResult, canCancelSubAgentTask, canDismissSubAgentResult, canResumeSubAgentTask,
-  isAwaitingMergeReview } from "../../lib/subagent-merge";
+import { canAdoptSubAgentResult, canCancelSubAgentTask, canDismissSubAgentResult, canResumeSubAgentTask } from "../../lib/subagent-merge";
 import { displaySubAgentStatus, isActiveSubAgentStatus, subAgentStatusTone } from "../../lib/subagent-ui";
 import { groupSubAgentThreads } from "../../lib/subagent-threads";
 import { Badge } from "../ui/badge";
@@ -17,7 +16,7 @@ import { SubAgentMark } from "./sub-agent-panel";
 import { useConversationScroll } from "../../hooks/use-conversation-scroll";
 
 export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", developerOptionsEnabled = false,
-  onCancel, onResume, onMerge, onIgnoreNotification, busyTaskIds, onClose, onCloseSidebar, onCopyItem, onOpenChatById }: {
+  onCancel, onResume, onMerge, busyTaskIds, onClose, onCloseSidebar, onCopyItem, onOpenChatById }: {
   tasks: SubAgentTask[];
   selected: SubAgentTask | null;
   endpoint?: string;
@@ -25,7 +24,6 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
   onCancel: (taskId: string) => void;
   onResume: (taskId: string, question: string) => Promise<boolean>;
   onMerge: (task: SubAgentTask, decision: "adopted" | "dismissed") => void;
-  onIgnoreNotification: (task: SubAgentTask) => void;
   busyTaskIds: ReadonlySet<string>;
   onClose: () => void;
   onCloseSidebar?: () => void;
@@ -55,7 +53,6 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
   const canResume = activeTask ? canResumeSubAgentTask(activeTask) : false;
   const canAdopt = activeTask ? canAdoptSubAgentResult(activeTask) : false;
   const canDismiss = activeTask ? canDismissSubAgentResult(activeTask) : false;
-  const canIgnoreNotification = activeTask ? isAwaitingMergeReview(activeTask) : false;
   const actionBusy = activeTask ? busyTaskIds.has(activeTask.id) : false;
 
   useEffect(() => setResumeQuestion(""), [activeTask?.id]);
@@ -110,7 +107,7 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
           <div ref={conversationEndRef} />
           </div>
         </div>
-          {canResume || canCancel || canAdopt || canDismiss || canIgnoreNotification ? <div className="shrink-0 px-4 pb-3 pt-2">
+          {canResume || canCancel || canAdopt || canDismiss ? <div className="shrink-0 px-4 pb-3 pt-2">
             {canResume && activeTask ? (
               <form className="chat-composer-shell mx-auto mb-2 w-full max-w-3xl" onSubmit={(event) => void submitResume(event)}>
                 <div className="chat-composer-frame p-3">
@@ -180,17 +177,6 @@ export function SubAgentWorkspaceSurface({ tasks, selected, endpoint = "", devel
                     <Ban className="h-3.5 w-3.5" />
                     {t("subagent.mergeDismiss")}
                   </Button>
-              ) : null}
-              {canIgnoreNotification && activeTask ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  className="h-7 px-2 text-xs"
-                  onClick={() => onIgnoreNotification(activeTask)}
-                >
-                  <BellOff className="h-3.5 w-3.5" />
-                  {t("subagent.ignoreNotification")}
-                </Button>
               ) : null}
             </div>
           </div> : null}

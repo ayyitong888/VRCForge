@@ -125,7 +125,7 @@ const bundled = await build({ stdin: { resolveDir: root, loader: "tsx", contents
       </section>
       <div className="min-h-0 overflow-hidden bg-workspace">{visible?<Sidebar endpoint={location.origin} tasks={tasks} selected={selected} roles={[{id:"llm_readonly",title:"Reviewer"}]}
         openThread={open} developerOptionsEnabled={developer} loading={false} error="" onOpen={choose} onSelect={choose} onCancel={id=>window.cancelled.push(id)} onResume={resume}
-        onMerge={noop} onIgnoreNotification={noop} onCopyItem={item=>window.copiedReply=conversationItemText(item,i18n.t)} busyTaskIds={new Set()}
+        onMerge={noop} onCopyItem={item=>window.copiedReply=conversationItemText(item,i18n.t)} busyTaskIds={new Set()}
         onBack={()=>setOpen(false)} onClose={()=>setVisible(false)}/>:<button data-open-subagents onClick={()=>setVisible(true)}>Open subagents</button>}</div>
     </main>}
   document.documentElement.classList.remove('dark');

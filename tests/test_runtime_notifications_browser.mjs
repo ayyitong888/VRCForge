@@ -50,6 +50,21 @@ try {
   const identity={sessionId:'session',clientTurnId:'client-turn',turnId:'backend-turn'};
   const run={...identity,status:'blocked',startedAt:'2026-01-01T00:00:00Z'};
   const response={...identity,plan:{completionGate:{status:'needs_user_action',reason:'question_pending'}}};
+  const childRuns = process.env.VRCFORGE_CHILD_NOTIFICATION_REPLAY
+    ? JSON.parse(await readFile(process.env.VRCFORGE_CHILD_NOTIFICATION_REPLAY, 'utf8'))
+    : [{...run, agent:'sub-agent',status:'failed'},{...run, agent:'sub-agent',status:'completed'}];
+  const pending = await open({sessionId:identity.sessionId, snapshot:{runs:{runs:childRuns}}});
+  await pending.waitForFunction(() => window.calls.some(call => call.ledger));
+  const final = {...run, agent:'desktop-agent', continuationSource:'sub_agent_finished', status:'completed'};
+  await pending.evaluate(parent => {
+    window.fixture.snapshot.runs.runs.push(parent);
+    window.tick();
+  }, final);
+  await pending.waitForFunction(() => window.calls.some(c => c.command === 'show_background_goal_notification'));
+  assert.deepEqual(await pending.evaluate(() => window.calls.filter(c => c.command).map(c => c.args.request.title)),
+    ['workspace.notificationCompletedTitle'], 'the main turn alone notifies after the child receipts and a second poll');
+  assert.equal(await pending.evaluate(() => window.calls.filter(c => c.sound).length), 1);
+  await pending.close();
   // A pending call_user question and its terminal run arrive through independent observers.
   const questionReplay = process.env.VRCFORGE_BLOCKED_QUESTION_REPLAY
     ? JSON.parse(await readFile(process.env.VRCFORGE_BLOCKED_QUESTION_REPLAY, 'utf8'))

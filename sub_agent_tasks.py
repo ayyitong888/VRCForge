@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import secrets
@@ -1207,6 +1208,10 @@ class SubAgentTaskRegistry:
         payload["taskSource"] = task.task_source
         payload["result"] = copy.deepcopy(task.result)
         seed = task.params.get("_taskSeed")
+        call_ids = seed.get("_nativeSubAgentBatchCallIds") if isinstance(seed, dict) else None
+        if isinstance(call_ids, list) and len(call_ids) > 1 and seed.get("_nativeCallId") in call_ids:
+            # Keep provider call IDs private and give a restored batch the same display identity.
+            payload["dispatchBatchId"] = hashlib.blake2s(json.dumps(call_ids).encode(), digest_size=12).hexdigest()
         if (isinstance(seed, dict) and task.parent_session_id
                 and seed.get("sessionId") == task.parent_session_id
                 and seed.get("parentChatId") == task.parent_chat_id

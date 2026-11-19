@@ -1123,6 +1123,8 @@ def _is_valid_chat_timeline_event(value: Any) -> bool:
     payload = value.get("payload")
     limits = {"label": 160, "summary": 32_000 if kind == "assistant" else 1000,
               "status": 80, "tool": 160, "phase": 80, "actionId": 96, "messageId": 180, "subagentStatus": 40}
+    if kind == "subagent":
+        limits["dispatchBatchId"] = 24
     if not isinstance(payload, dict) or any(key not in limits for key in payload):
         return False
     if any(not isinstance(text, str) or len(text) > limits[key] for key, text in payload.items()):

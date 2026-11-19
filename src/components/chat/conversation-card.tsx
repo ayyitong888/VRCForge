@@ -46,6 +46,7 @@ export function ConversationCard({
   steeringRevealSequence,
   initialUserContent,
   sharedProcess,
+  activeSubAgentEvents,
   retiredLoopPause,
   userMessageAuthor,
   agentReplySupplement,
@@ -89,6 +90,7 @@ export function ConversationCard({
   steeringRevealSequence?: number;
   initialUserContent?: ReactNode;
   sharedProcess?: SharedTurnProcess;
+  activeSubAgentEvents?: ReadonlyMap<string, string>;
   retiredLoopPause?: boolean;
   userMessageAuthor?: string;
   agentReplySupplement?: ReactNode;
@@ -395,6 +397,7 @@ export function ConversationCard({
       renderElapsed: false,
       processTitleElapsed: streamingElapsed,
       sharedProcess,
+      activeSubAgentEvents,
       providerLine: "",
       interleavedUserMessages,
       interleavedUsersExpanded,
@@ -537,6 +540,7 @@ export function ConversationCard({
     elapsedSeconds: item.elapsedSeconds,
     hideTurnMetadata: compactAgentReply,
     sharedProcess,
+    activeSubAgentEvents,
     interleavedUserMessages,
     interleavedUsersExpanded,
     onInterleavedUsersExpandedChange: setInterleavedUsersExpanded,

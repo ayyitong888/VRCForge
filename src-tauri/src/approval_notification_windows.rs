@@ -37,13 +37,8 @@ const AGENT_QUESTION_NOTIFICATION_ACTION_EVENT: &str =
 const MAX_NOTIFICATION_ID_LENGTH: usize = 128;
 const MAX_TITLE_LENGTH: usize = 120;
 const MAX_BODY_LENGTH: usize = 512;
-const MAX_ACTION_LABEL_LENGTH: usize = 32;
 #[cfg(windows)]
 static MAIN_WINDOW_TASKBAR_ICON: OnceLock<usize> = OnceLock::new();
-const SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT: &str =
-    "vrcforge-sub-agent-review-notification-action";
-const SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION: &str = "open";
-
 #[cfg(windows)]
 pub(crate) fn bind_approval_notification_identity() -> bool {
     if register_approval_notification_identity().is_err() {
@@ -112,19 +107,6 @@ pub(crate) struct DesktopAgentQuestionNotificationRequest {
     silent: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DesktopSubAgentReviewNotificationRequest {
-    task_id: String,
-    revision: u64,
-    parent_chat_id: String,
-    title: String,
-    body: String,
-    open_label: String,
-    #[serde(default)]
-    silent: bool,
-}
-
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApprovalNotificationActionEvent {
@@ -137,15 +119,6 @@ struct ApprovalNotificationActionEvent {
 struct AgentQuestionNotificationActionEvent {
     question_id: String,
     chat_id: String,
-    action: &'static str,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SubAgentReviewNotificationActionEvent {
-    task_id: String,
-    revision: u64,
-    parent_chat_id: String,
     action: &'static str,
 }
 
@@ -331,73 +304,6 @@ pub(crate) fn show_agent_question_notification(
     }
 }
 
-/// Displays a bounded, display-only sub-agent review toast.
-///
-/// This command never updates any sub-agent state directly. A toast action only
-/// emits an event for the existing frontend path to refetch the latest task and
-/// re-check parent chat/revision/merge decision before opening the detail view.
-#[tauri::command]
-pub(crate) fn show_sub_agent_review_notification(
-    app: AppHandle,
-    request: DesktopSubAgentReviewNotificationRequest,
-) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        validate_sub_agent_review_request(&request)?;
-        if !bind_approval_notification_identity() {
-            return Err("Unable to bind the VRCForge notification identity.".to_string());
-        }
-        let executable = std::env::current_exe()
-            .map_err(|_| "Unable to resolve the VRCForge notification icon.".to_string())?;
-        let icon_path = approval_notification_icon_path(&executable)
-            .filter(|path| path.is_file())
-            .ok_or_else(|| "Unable to resolve the VRCForge notification icon.".to_string())?;
-        let event = SubAgentReviewNotificationActionEvent {
-            task_id: request.task_id.clone(),
-            revision: request.revision,
-            parent_chat_id: request.parent_chat_id.clone(),
-            action: SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION,
-        };
-        let callback_app = app.clone();
-        tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
-            .title(&request.title)
-            .text1(&request.body)
-            .sound(if request.silent { None } else { Some(tauri_winrt_notification::Sound::Default) })
-            .icon(
-                &icon_path,
-                tauri_winrt_notification::IconCrop::Square,
-                APPROVAL_NOTIFICATION_ICON_ALT_TEXT,
-            )
-            .add_button(
-                &request.open_label,
-                SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION,
-            )
-            .on_activated(move |activation| {
-                let open_action = match activation.as_deref() {
-                    None => true,
-                    Some(value) if value.trim().is_empty() => true,
-                    Some(value) => parse_sub_agent_review_notification_action(value).is_some(),
-                };
-                if !open_action {
-                    return Ok(());
-                }
-                let _ =
-                    callback_app.emit(SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT, event.clone());
-                focus_main_window(&callback_app);
-                Ok(())
-            })
-            .show()
-            .map_err(|_| "Unable to show the sub-agent review notification.".to_string())
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = app;
-        let _ = request;
-        Err("Sub-agent review notifications are only supported on Windows.".to_string())
-    }
-}
-
 #[cfg(windows)]
 fn register_approval_notification_identity() -> Result<(), ()> {
     // Permission: current-user HKCU only. Lifecycle: the reusable product
@@ -488,20 +394,8 @@ fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn sub_agent_review_notification_action() -> &'static str {
-    SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION
-}
-
 fn is_approval_notification_activation(value: Option<&str>) -> bool {
     matches!(value.map(str::trim), None | Some("") | Some("open"))
-}
-
-fn parse_sub_agent_review_notification_action(value: &str) -> Option<&'static str> {
-    if value == sub_agent_review_notification_action() {
-        Some(SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION)
-    } else {
-        None
-    }
 }
 
 fn validate_notification_request(
@@ -541,20 +435,6 @@ fn validate_notification_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_sub_agent_review_request(
-    request: &DesktopSubAgentReviewNotificationRequest,
-) -> Result<(), String> {
-    validate_notification_id(&request.task_id)?;
-    validate_notification_id(&request.parent_chat_id)?;
-    if request.revision == 0 {
-        return Err("Invalid sub-agent review notification revision.".to_string());
-    }
-    validate_display_text(&request.title, MAX_TITLE_LENGTH, "title")?;
-    validate_display_text(&request.body, MAX_BODY_LENGTH, "body")?;
-    validate_display_text(&request.open_label, MAX_ACTION_LABEL_LENGTH, "open label")?;
-    Ok(())
-}
-
 fn validate_display_text(value: &str, maximum_length: usize, field: &str) -> Result<(), String> {
     let trimmed = value.trim();
     if trimmed.is_empty()
@@ -578,7 +458,7 @@ mod tests {
     #[cfg(windows)]
     use super::approval_notification_icon_path;
     use super::{
-        is_approval_notification_activation, parse_sub_agent_review_notification_action,
+        is_approval_notification_activation,
         validate_agent_question_notification_request, validate_notification_request,
         DesktopAgentQuestionNotificationRequest, DesktopApprovalNotificationRequest,
         APPROVAL_NOTIFICATION_APP_ID, APPROVAL_NOTIFICATION_DISPLAY_NAME,
@@ -614,16 +494,6 @@ mod tests {
         assert!(is_approval_notification_activation(Some("open")));
         assert!(!is_approval_notification_activation(Some("approve")));
         assert!(!is_approval_notification_activation(Some("reject")));
-    }
-
-    #[test]
-    fn sub_agent_review_parse_accepts_activation_click_and_open() {
-        assert_eq!(
-            parse_sub_agent_review_notification_action("open"),
-            Some("open")
-        );
-        assert_eq!(parse_sub_agent_review_notification_action(""), None);
-        assert_eq!(parse_sub_agent_review_notification_action("unknown"), None);
     }
 
     #[test]

@@ -6,8 +6,8 @@ import { build } from "esbuild";
 const bundle = await build({
   stdin: { resolveDir: process.cwd(), contents: `
     import { buildChatHistory } from "./src/lib/conversation-utils";
-    import { canAdoptSubAgentResult, canDismissSubAgentResult, isAwaitingMergeReview, subAgentAdoptedHistoryItem } from "./src/lib/subagent-merge";
-    export { canAdoptSubAgentResult, canDismissSubAgentResult, isAwaitingMergeReview, subAgentAdoptedHistoryItem };
+    import { canAdoptSubAgentResult, canDismissSubAgentResult, subAgentAdoptedHistoryItem } from "./src/lib/subagent-merge";
+    export { canAdoptSubAgentResult, canDismissSubAgentResult, subAgentAdoptedHistoryItem };
     export const build = (items) => buildChatHistory(items, (key) => key);
   ` },
   bundle: true, write: false, platform: "node", format: "cjs",
@@ -25,7 +25,6 @@ for (const parentContinuationStatus of ["pending", "dispatching", "delivered", "
   const auto = { ...task, parentContinuationStatus };
   assert.equal(api.canAdoptSubAgentResult(auto), false);
   assert.equal(api.canDismissSubAgentResult(auto), false);
-  assert.equal(api.isAwaitingMergeReview(auto), false);
   assert.equal(api.subAgentAdoptedHistoryItem({ ...auto, mergeDecision: "adopted" }), undefined);
 }
 assert.equal(api.subAgentAdoptedHistoryItem({ ...task, mergeDecision: "dismissed" }), undefined);

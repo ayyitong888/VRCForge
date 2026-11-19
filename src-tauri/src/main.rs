@@ -234,7 +234,6 @@ fn main() {
             show_approval_notification,
             show_background_goal_notification,
             show_agent_question_notification,
-            show_sub_agent_review_notification,
             begin_developer_options_challenge,
             begin_chat_attachment_upload,
             bind_agent_goal_owner,

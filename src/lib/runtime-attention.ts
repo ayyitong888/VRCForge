@@ -24,8 +24,7 @@ function attentionStatus(status: string | undefined): RuntimeAttentionStatus | n
 const STORAGE_KEY = "vrcforge.runtime-attention.notifications.v1";
 
 function runAttentionStatus(run: AgentRuntimeRun): RuntimeAttentionStatus | null {
-  if ((run.status === "blocked" && isAutomaticToolWait(run, run.shellStatus))
-    || (run.agent === "sub-agent" && run.nextStep === "paused")) return null;
+  if (run.agent === "sub-agent" || (run.status === "blocked" && isAutomaticToolWait(run, run.shellStatus))) return null;
   const status = attentionStatus(run.status);
   const cancellationReason = run.cancellationReason || run.reason;
   if ((status === "cancelled" || status === "stopped")

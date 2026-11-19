@@ -32,6 +32,15 @@ try {
     response = {...response, sessionId:run.sessionId,clientTurnId:run.clientTurnId,turnId:run.turnId,plan:{...response.plan,reply:final.payload.summary}};
   }
   assert.deepEqual(api.latestRuntimeAttentionCandidates([run]), [run]);
+  // A child failure and its successful retry are both internal to the parent's turn.
+  for (const status of ['running','parked','blocked','completed','failed','cancelled','stopped','denied']) {
+    const child = {...run, agent:'sub-agent', status};
+    assert.deepEqual(api.runtimeAttentionCandidates([child]), [], `child ${status} should stay in the chat`);
+    assert.equal(api.runtimeAttentionFromResponse(child, response), null);
+    assert.equal(api.runtimeAttentionFromTurnState(child, {...response, ok:true, status:'failed'}), null);
+  }
+  const continuedParent = {...run, agent:'desktop-agent', continuationSource:'sub_agent_finished', status:'completed'};
+  assert.deepEqual(api.runtimeAttentionCandidates([continuedParent]), [continuedParent]);
   const childWait = { ...run, nextStep: 'waiting_for_tool', reason: 'sub_agent_pending' };
   assert.deepEqual(api.latestRuntimeAttentionCandidates([childWait]), []);
   assert.equal(api.runtimeAttentionFromRun(childWait), null, 'automatic child waits never notify the user');

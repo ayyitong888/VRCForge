@@ -149,6 +149,8 @@ def test_native_parent_waits_for_both_delegated_reads(tmp_path, monkeypatch, del
             assert started["second"].wait(2)
         tasks = registry.list_tasks()["tasks"]
         assert len(tasks) == (1 if single_child else 2)
+        if not single_child:
+            assert tasks[0]["dispatchBatchId"] and tasks[0]["dispatchBatchId"] == tasks[1]["dispatchBatchId"]
         threads = {task["task"]: registry._threads[task["id"]] for task in tasks}
         if delivery == "reverse":
             release["second"].set()

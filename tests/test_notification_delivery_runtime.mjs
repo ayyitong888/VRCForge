@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 const directory = await mkdtemp(path.resolve("local-review/notification-runtime-test-"));
 try {
   const bundle = await build({stdin:{resolveDir:process.cwd(), contents:`
-    export {showApprovalNotification, showSubAgentReviewNotification} from './src/lib/approval-notifications';
+    export {showApprovalNotification} from './src/lib/approval-notifications';
     export {notifyBackgroundGoal, backgroundGoalNotificationIsBlocking} from './src/lib/background-goal-notifications';
     export {saveAgentQuestionNotificationSound} from './src/lib/agent-question-notification-sound';
   `}, bundle:true, write:false, format:"esm", platform:"node"});
@@ -27,7 +27,6 @@ try {
   api.saveAgentQuestionNotificationSound({enabled:true,dataUrl:"data:audio/wav;base64,AAAA",name:"test.wav"},"ordinary");
   const senders = [
     ()=>api.showApprovalNotification({id:"approval-retry"},"title","body"),
-    ()=>api.showSubAgentReviewNotification({taskId:"review-retry",revision:1,parentChatId:"chat",title:"title",body:"body",openLabel:"open"}),
     ()=>api.notifyBackgroundGoal({status:"blocked_question"},true,k=>k,"goal-retry:1"),
   ];
   for(const send of senders){
@@ -40,7 +39,7 @@ try {
   assert.equal(api.backgroundGoalNotificationIsBlocking({status:"failed"}),false);
   assert.equal(api.backgroundGoalNotificationIsBlocking({status:"blocked_approval"}),true);
   assert.equal(api.backgroundGoalNotificationIsBlocking({status:"blocked",blockedKind:"question"}),true);
-  console.log("PASS: real approval/review/goal calls retry silently after native failure; classification is based on waiting for user.");
+  console.log("PASS: real approval/goal calls retry silently after native failure; classification is based on waiting for user.");
 } finally {
   await rm(directory,{recursive:true,force:true});
 }

@@ -1,5 +1,6 @@
 import i18n from "../i18n";
 import type { SubAgentRole, SubAgentTask } from "./api/sub-agents";
+import { subAgentLifecycleItems } from "./chat-timeline-presentation";
 
 const BUILT_IN_ROLES = new Set([
   "project_index_review",
@@ -53,8 +54,26 @@ export function isActiveSubAgentStatus(status: string): boolean {
   return status === "queued" || status === "running" || status === "cancelling";
 }
 
+export function projectSubAgentRegistry(tasks: SubAgentTask[], fallbackLabel: string) {
+  const activeEvents = new Map<string, string>();
+  const items = tasks.flatMap((task) => {
+    if (!task.parentClientTurnId && !task.parentTurnId) return [];
+    const lifecycle = subAgentLifecycleItems(task, fallbackLabel);
+    const latest = lifecycle.at(-1);
+    if (latest && isActiveSubAgentStatus(task.status)) activeEvents.set(latest.id, task.status);
+    return lifecycle;
+  });
+  return { items, activeEvents };
+}
+
 export function displaySubAgentStatus(status: string): string {
   switch (status) {
+    case "created":
+      return i18n.t("subagent.statusCreated");
+    case "started":
+      return i18n.t("subagent.statusStarted");
+    case "cancel_requested":
+      return i18n.t("subagent.statusCancelRequested");
     case "queued":
       return i18n.t("subagent.statusQueued");
     case "running":

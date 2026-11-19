@@ -8,18 +8,19 @@ import { pathToFileURL } from 'node:url';
 const root = process.cwd();
 const source = await readFile('src/hooks/use-runtime-workspace.ts', 'utf8');
 const start = source.indexOf('  function notifyCallUserQuestions(');
-const end = source.indexOf('  function clearScopedRuntimeProjection()', start);
+const end = source.indexOf('  function clearScopedRuntimeProjection(', start);
 assert(start > 0 && end > start);
 const directory = await mkdtemp(path.resolve('local-review/notification-failure-test-'));
 const bundle = await build({ stdin: { resolveDir: root, loader: 'ts', contents: `
 import { isTauriRuntime } from './src/lib/app-runtime';
 import { isCallUserQuestion, isBlockingAgentQuestion, saveAgentQuestionNotificationIds, shouldStartAgentQuestionNotification, normalizeAgentQuestionNotificationBody, markAgentQuestionNotificationDelivered, showAgentQuestionNotification } from './src/lib/agent-question-notifications';
 import { playNotificationSoundOnce } from './src/lib/notification-sound-delivery';
-export { showApprovalNotification, showSubAgentReviewNotification } from './src/lib/approval-notifications';
+import { normalizeRuntimeNotificationText } from './src/lib/runtime-attention';
+export { showApprovalNotification } from './src/lib/approval-notifications';
 export { notifyBackgroundGoal } from './src/lib/background-goal-notifications';
 export function questionFixture() {
  const agentQuestionNotificationIdsRef = {current:new Set<string>()}, agentQuestionNotificationInflightRef = {current:new Set<string>()}, agentQuestionNotificationStatusRef = {current:new Map<string,string>()};
- const chatIdForSessionId = () => 'chat-stub', t = (key:string) => key;
+ const chatForSessionId = () => ({id:'chat-stub'}), t = (key:string) => key;
  ${source.slice(start, end)}
  return { notifyCallUserQuestions, agentQuestionNotificationInflightRef };
 }
@@ -46,20 +47,19 @@ function sendAll(prefix) {
  fixture.notifyCallUserQuestions([{questionId:prefix,sourceTool:'call_user',status:'pending',sessionId:'session-stub',question:'Stub only',needsUserAction:true}]);
  return Promise.allSettled([
   api.showApprovalNotification({id:prefix},'title','body'),
-  api.showSubAgentReviewNotification({taskId:prefix,revision:1,parentChatId:'chat-stub',title:'title',body:'body',openLabel:'open'}),
   api.notifyBackgroundGoal({status:'blocked_question'},true,key=>key,prefix),
  ]);
 }
 const settle = ms => new Promise(resolve=>setTimeout(resolve,ms));
 try {
- await test('all four native notification paths survive Audio construction failure',async()=>{
+ await test('question, approval and goal notifications survive Audio construction failure',async()=>{
   mode='constructor-throw';const before=__notificationCalls.length;await sendAll('constructor-failure');await settle(20);
-  assert.equal(__notificationCalls.length-before,4);
+  assert.equal(__notificationCalls.length-before,3);
   assert(__notificationCalls.slice(before).every(call=>call.request.silent===false));
  });
  await test('unsettled playback is stopped and cannot indefinitely block any native notification',async()=>{
   mode='pending';const before=__notificationCalls.length;void sendAll('pending-playback');await settle(1800);
-  assert.equal(__notificationCalls.length-before,4);
+  assert.equal(__notificationCalls.length-before,3);
   assert(!fixture.agentQuestionNotificationInflightRef.current.has('pending-playback'));
   assert(audios.filter(audio=>audio.mode==='pending').every(audio=>audio.paused));
   assert(__notificationCalls.slice(before).every(call=>call.request.silent===false));
@@ -67,7 +67,7 @@ try {
  await test('failed pause/seek cannot reject the next notification and successful sound stays deduplicated',async()=>{
   mode='stop-throw';await api.showApprovalNotification({id:'stop-failure-primer'},'title','body');
   mode='success';const before=__notificationCalls.length;await sendAll('stop-failure');await settle(20);
-  assert.equal(__notificationCalls.length-before,4);
+  assert.equal(__notificationCalls.length-before,3);
   const audioCount=audios.length;await api.showApprovalNotification({id:'stop-failure'},'title','body');
   assert.equal(audios.length,audioCount,'retry reuses played sound receipt');
   assert.equal(__notificationCalls.at(-1).request.silent,true);

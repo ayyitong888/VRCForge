@@ -13,12 +13,29 @@ const compiled = await build({
     import { initReactI18next } from "react-i18next";
     import { ConversationCard } from "./src/components/chat/conversation-card";
     import { buildTimelinePresentation, mergeConversationTimelineItems } from "./src/lib/chat-timeline-presentation";
+    import { projectSubAgentRegistry } from "./src/lib/subagent-ui";
     import { SubAgentPanel } from "./src/components/subagents/sub-agent-panel";
     i18n.use(initReactI18next).init({lng:"en",resources:{en:{translation:{}}},interpolation:{escapeValue:false}});
     export function projectRaw(chat) {
       return mergeConversationTimelineItems(chat.items).map(item => item.type === "agent"
         ? buildTimelinePresentation(item.timeline || item.response.timeline).entries
         : item.type === "timeline_event" ? [{ type: "standalone", event: item.event }] : []);
+    }
+    export function renderLifecycle(items, activeSubAgentEvents, { open = true, last = true, streaming = false } = {}) {
+      const item = streaming ? { id: "stream", type: "streaming", text: "", timeline: items }
+        : { id: "parent", type: "agent", response: { timeline: items, plan: {
+          planner: "llm", reply: "", summary: "", nextStep: "waiting_for_tool", reason: "sub_agent_pending",
+        } } };
+      return renderToStaticMarkup(<ConversationCard item={item} activeSubAgentEvents={activeSubAgentEvents}
+        onOpenSubAgent={()=>{}} sharedProcess={{open, last, first:false, live:streaming, failures:0, onOpenChange:()=>{}}} />);
+    }
+    export function renderRegistry(tasks) {
+      const registry = projectSubAgentRegistry(tasks, "Child");
+      const parents = tasks.map(task => ({id:task.parentTurnId, type:"agent", response:{
+        sessionId:task.parentSessionId, turnId:task.parentTurnId, clientTurnId:task.parentClientTurnId, plan:{},
+      }}));
+      return mergeConversationTimelineItems(parents, registry.items).map((parent, index) =>
+        renderLifecycle(parent.response.timeline, registry.activeEvents, { last:index === parents.length - 1 })).join("");
     }
     export function run() {
       const time=(second)=>"2026-09-17T00:00:"+String(second).padStart(2,"0")+"Z";
@@ -71,6 +88,40 @@ const filename=fileURLToPath(new URL("./subagent-render-fixture.cjs",import.meta
 const module=new Module(filename);module.paths=Module._nodeModulePaths(process.cwd());
 module._compile(compiled.outputFiles[0].text,filename);
 const result=module.exports.run();
+const activity = result.entries.filter(entry => entry.type === "subagent").map(entry => entry.event);
+const [firstStart, secondStart, firstTerminal] = activity;
+const parallelStarts = [firstStart, secondStart].map(event => ({
+  ...event, payload: { ...event.payload, dispatchBatchId: "same-dispatch" },
+}));
+for (const streaming of [false, true]) {
+  const render = events => module.exports.renderLifecycle(events, new Map(), { streaming });
+  const grouped = render([...parallelStarts, firstTerminal]);
+  assert.match(grouped, /data-subagent-start-group/);
+  assert.deepEqual([...grouped.matchAll(/<button[^>]*data-subagent-activity="([^"]+)"/g)].map(match => match[1]), ["task-a", "task-b"]);
+  assert.doesNotMatch(render([firstStart, secondStart]), /data-subagent-start-group/);
+  assert.doesNotMatch(render([parallelStarts[0], { ...parallelStarts[1], payload: { ...parallelStarts[1].payload, dispatchBatchId: "later" } }]), /data-subagent-start-group/);
+  assert.doesNotMatch(render([parallelStarts[0], { ...firstTerminal, timestamp: parallelStarts[0].timestamp }, parallelStarts[1]]), /data-subagent-start-group/);
+}
+const retryTimeline = [firstStart, { ...firstTerminal, payload: { ...firstTerminal.payload, status: "failed" } },
+  { ...secondStart, timestamp: "2026-09-17T00:01:00Z", payload: { ...secondStart.payload, label: firstStart.payload.label } }];
+const currentRetry = new Map([[secondStart.id, "running"]]);
+for (const streaming of [false, true]) {
+  const html = module.exports.renderLifecycle(retryTimeline, currentRetry, {streaming});
+  assert.equal((html.match(/subagent\.statusRunningOne/g) || []).length, 1, "only the currently executing attempt says running");
+  assert.equal((html.match(/subagent\.statusStarted/g) || []).length, 1, "the failed attempt retains its start in the history");
+  assert.doesNotMatch(html, /data-agent-waiting-for-subagent/, "the visible active attempt already explains the wait");
+}
+const withHistoryOnly = module.exports.renderLifecycle(retryTimeline, new Map());
+assert.match(withHistoryOnly, /data-agent-waiting-for-subagent/, "a waiting parent is visible when all child rows are historical");
+assert.doesNotMatch(withHistoryOnly, /subagent\.statusRunningOne/);
+assert.match(module.exports.renderLifecycle(retryTimeline, currentRetry, {open:false}), /data-agent-waiting-for-subagent/,
+  "a collapsed process still shows the current parent's wait");
+assert.doesNotMatch(module.exports.renderLifecycle(retryTimeline, new Map(), {last:false}), /data-agent-waiting-for-subagent/,
+  "superseded parent receipts stay historical");
+const pausedAttempt = module.exports.renderRegistry([{id:"paused-child", parentSessionId:"session", parentTurnId:"paused-parent",
+  parentClientTurnId:"request", status:"paused", events:[{event:"started", revision:1}, {event:"paused", revision:2}]}]);
+assert.match(pausedAttempt, /subagent\.statusPaused/);
+assert.doesNotMatch(pausedAttempt, /subagent\.statusRunningOne/);
 assert.doesNotMatch(result.completed, /data-subagent-activity/, "the historical process is collapsed");
 assert.match(result.completed, /data-agent-turn-process-group/);
 assert.match(result.completed, /User final answer/);
@@ -92,7 +143,26 @@ assert.equal(result.unchanged, true);
 assert.equal(result.storedEvents, 1, "presentation preserves stored lifecycle evidence");
 assert.equal(result.storedOwner, "agent", "post-receipt completion belongs to the waiting execution, not its continuation");
 const replayPath = process.argv[2];
-if (replayPath) {
+if (replayPath === "--retry-registry") {
+  const [, , , file, original, retry] = process.argv;
+  const revisions = readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
+    .filter(row => row.taskId === original || row.taskId === retry);
+  const tasks = new Map();
+  for (const { task, taskId, timestamp, revision, event } of revisions) {
+    const history = tasks.get(taskId)?.events || [];
+    history.push({ taskId, timestamp, revision, event });
+    tasks.set(taskId, { id: taskId, parentSessionId: task.parentSessionId, parentTurnId: task.parentTurnId,
+      parentClientTurnId: task.parentClientTurnId, displayName: task.displayName, status: task.status, revision, events: history });
+    if (taskId !== retry || !["started", "completed"].includes(event)) continue;
+    const html = module.exports.renderRegistry([...tasks.values()]);
+    assert.equal((html.match(/subagent\.statusRunningOne/g) || []).length, event === "started" ? 1 : 0, event);
+    assert.equal((html.match(/subagent\.statusStarted/g) || []).length, event === "started" ? 1 : 2, event);
+    assert.equal((html.match(/subagent\.statusFailed/g) || []).length, 1, event);
+    assert.equal((html.match(/subagent\.statusCompleted/g) || []).length, event === "started" ? 0 : 1, event);
+  }
+  assert.equal(tasks.get(original)?.status, "failed");
+  assert.equal(tasks.get(retry)?.status, "completed");
+} else if (replayPath) {
   const { chat, task } = JSON.parse(readFileSync(replayPath, "utf8"));
   const parentAndContinuation = chat.items.filter((item) => item.event?.clientTurnId === task.parentClientTurnId
     || item.response?.clientTurnId?.startsWith(task.parentClientTurnId));
