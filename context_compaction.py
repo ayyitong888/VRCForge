@@ -13,7 +13,6 @@ from agent_handoff_graph import (
     HANDOFF_EDIT_CONTRACT,
     HandoffSchemaError,
     apply_handoff_edits,
-    fold_handoff_graph,
     map_handoff_graph_text,
     parse_handoff_graph,
     serialize_handoff_graph,
@@ -535,9 +534,13 @@ def estimate_compaction_prompt_tokens(prompt: str) -> int:
     return _estimate_entry_tokens({"role": "user", "text": prompt})
 
 
-def _effective_budget(target_tokens: int | None, real_context_limit: int | None) -> int:
-    requested = int(target_tokens or DEFAULT_TARGET_TOKENS)
-    requested = max(64, min(requested, MAX_INPUT_BUDGET_TOKENS))
+def _effective_budget(target_tokens: int | None, real_context_limit: int | None, *, handoff: bool) -> int:
+    if handoff:
+        context_target = real_context_limit // 2 if real_context_limit else None
+        if target_tokens is None:
+            return context_target or 0
+        return max(0, min(int(target_tokens), context_target if context_target is not None else int(target_tokens)))
+    requested = max(64, min(int(target_tokens or DEFAULT_TARGET_TOKENS), MAX_INPUT_BUDGET_TOKENS))
     if real_context_limit:
         context_bound = max(64, int(real_context_limit) // 2)
         requested = min(requested, context_bound)
@@ -593,16 +596,15 @@ def _continuous_pages(entries: Sequence[dict[str, str]], budget: int,
     return pages
 
 
-def _handoff_pages(entries: list[dict[str, str]], fits_request: Callable[[Sequence[dict[str, str]], int], bool],
-                   carry_reserve: int) -> list[dict[str, Any]]:
+def _handoff_pages(entries: list[dict[str, str]], fits_request: Callable[[Sequence[dict[str, str]]], bool],
+                   *, start: int = 0, end: int | None = None) -> list[dict[str, Any]]:
     pages = []
-    start = 0
-    while start < len(entries):
-        low, high = start, len(entries)
-        reserve = carry_reserve if start else 0
+    end = len(entries) if end is None else end
+    while start < end:
+        low, high = start, end
         while low < high:
             middle = (low + high + 1) // 2
-            if fits_request(entries[start:middle], reserve):
+            if fits_request(entries[start:middle]):
                 low = middle
             else:
                 high = middle - 1
@@ -787,7 +789,6 @@ def _build_prompt(
     prior_handoff: str = "",
     prior_handoff_source: str = "",
     legacy_handoff_text: str = "",
-    compact_graph: bool = False,
     handoff_schema_feedback: str = "",
 ) -> str:
     if handoff:
@@ -839,15 +840,11 @@ def _build_prompt(
             + ("Use an exact TODO_SOURCE ID in todoId whenever a task corresponds to that TODO item. "
                "Record the dependencies and blockers in the graph and use the source's status. Do not create new TODOs. "
                if has_todo or todo_source else "")
-            + ("Your previous edit made the resulting graph too large. Shorten node text with update operations, while preserving "
-               "unfinished work, decisions, ordering, evidence and failure history. The original records stay unchanged. "
-               if compact_graph else "")
             + (f"Correct your previous response using the same graph and same records. Schema feedback: {handoff_schema_feedback} "
                if handoff_schema_feedback else "")
             + (f"Write other node text in {language}. " if language else "Write other node text in the task's language. ")
-            + "Keep metadata only when it helps resume a task. The resulting graph must fit within "
-            f"{target_tokens} tokens including JSON punctuation and IDs. Use compact IDs and combine equivalent "
-            "evidence. Preserve distinct unresolved work and meaningful operational order. "
+            + "Keep metadata only when it helps resume a task. Use compact IDs and combine equivalent evidence. "
+            "Preserve distinct unresolved work and meaningful operational order. "
             + HANDOFF_EDIT_CONTRACT
             + "\nPRIOR_HANDOFF_SOURCE=" + (prior_handoff_source or "null")
             + ("\nLEGACY_HANDOFF_TEXT=" + legacy_handoff_text if legacy_handoff_text else "")
@@ -1181,7 +1178,7 @@ def compact_context(
         int(real_context_limit) if real_context_limit and int(real_context_limit) > 0 else None
     )
     normalized_language = _safe_language(language)
-    budget = _effective_budget(target_tokens, normalized_real_context_limit)
+    budget = _effective_budget(target_tokens, normalized_real_context_limit, handoff=handoff)
     estimated_tokens = sum(_estimate_entry_tokens(entry) for entry in entries)
     task_text_limit = min(2400, normalized_real_context_limit // 16) if normalized_real_context_limit else 2400
     goal_sources = {next((row["id"] for row in task_inputs if row["source"] != "agent_relay"), None)}
@@ -1261,26 +1258,27 @@ def compact_context(
     # the provider has not supplied a limit.
     request_budget = (max(64, normalized_real_context_limit // 2)
                       if normalized_real_context_limit else MAX_INPUT_BUDGET_TOKENS)
-    if input_mode == "native" and normalized_real_context_limit:
+    if handoff and normalized_real_context_limit:
+        # A post-compaction target describes the full resumed turn. It is not
+        # the summarizer's output reservation or an independent graph quota.
+        request_budget = normalized_real_context_limit * 95 // 100
+    elif input_mode == "native" and normalized_real_context_limit:
         request_budget = max(0, normalized_real_context_limit * 95 // 100 - budget)
     def request_tokens(prompt: str) -> int:
         return math.ceil(estimate_compaction_prompt_tokens(prompt) * ratio)
 
     overhead = estimate_compaction_prompt_tokens(_build_prompt([], **prompt_options)) + 256
     source_budget = int(request_budget / ratio) - overhead
-    def fits_request(rows: Sequence[dict[str, str]], reserve: int = 0) -> bool:
+    def fits_request(rows: Sequence[dict[str, str]]) -> bool:
         # Account for JSON escapes in the actual framed prompt as well as the
         # source entry budget. Leave bounded room for continuous-page metadata.
-        prompt = _build_prompt(rows, prior_handoff=handoff_text if not reserve else "", **prompt_options)
-        return request_tokens(prompt) + 256 + reserve <= request_budget
+        prompt = _build_prompt(rows, prior_handoff=handoff_text, **prompt_options)
+        return request_tokens(prompt) + 256 <= request_budget
 
     selected_start = 0
     summary_max_chars = max(1_000, min(MAX_SUMMARY_CHARS, budget * 4))
-    handoff_target = min(budget, DEFAULT_TARGET_TOKENS)
     if handoff:
-        prompt_options["target_tokens"] = handoff_target
-        carry_reserve = math.ceil(handoff_target * ratio)
-        pages = _handoff_pages(entries, fits_request, carry_reserve)
+        pages = _handoff_pages(entries, fits_request)
     elif input_mode == "native":
         # Keep whole historical transactions. Full source remains in recovery;
         # only the model's bounded working input drops the oldest entries.
@@ -1320,7 +1318,6 @@ def compact_context(
     fidelity = "fallback"
     completed_summaries: list[str] = []
     completed_pages = 0
-    revised_handoff = False
     if not pages or within_calls and not within_request:
         fallback_reason = "input_oversize"
     elif not within_calls:
@@ -1334,10 +1331,17 @@ def compact_context(
             active_page = pages[completed_pages]
             if handoff:
                 prompt = _build_prompt(active_page["entries"], prior_handoff=handoff_text,
-                                       compact_graph=revised_handoff, handoff_schema_feedback=schema_feedback, **prompt_options)
+                                       handoff_schema_feedback=schema_feedback, **prompt_options)
                 if request_tokens(prompt) > request_budget:
-                    fallback_reason = "input_oversize"
-                    break
+                    split = _handoff_pages(entries, fits_request, start=active_page["start"]["entryIndex"],
+                                           end=active_page["end"]["entryIndex"])
+                    if not split or len(split) == 1:
+                        fallback_reason = "input_oversize"
+                        break
+                    pages[completed_pages:completed_pages + 1] = split
+                    schema_feedback = ""
+                    continue
+                request_estimates.append(request_tokens(prompt))
             else:
                 prompt = prompts[completed_pages]
             attempts += 1
@@ -1393,9 +1397,6 @@ def compact_context(
                     candidate_graph = map_handoff_graph_text(candidate_graph, output_scanner.redact,
                                                             transform_properties=output_scanner.redact_json)
                     candidate = serialize_handoff_graph(candidate_graph)
-                    if completed_pages + 1 == len(pages) or estimate_compaction_prompt_tokens(candidate) >= handoff_target:
-                        candidate_graph = fold_handoff_graph(candidate_graph)
-                        candidate = serialize_handoff_graph(candidate_graph)
                 elif payload_kind == "summary":
                     candidate = str(payload).strip()
                 elif isinstance(payload, Mapping):
@@ -1409,21 +1410,12 @@ def compact_context(
                 if not handoff and output_scanner.report.total:
                     fallback_reason = "sensitive_provider_output"
                     break
-                if handoff and estimate_compaction_prompt_tokens(candidate) >= handoff_target:
-                    fallback_reason = "handoff_over_budget"
-                    if revised_handoff or page_attempts >= MAX_PROVIDER_ATTEMPTS:
-                        break
-                    revised_handoff = True
-                    prompt_options["target_tokens"] = max(32, handoff_target // 2)
-                    continue
                 completed_summaries.append(candidate)
                 if handoff:
                     handoff_graph = candidate_graph
                     handoff_text = candidate
-                    prompt_options["target_tokens"] = handoff_target
                 completed_pages += 1
                 page_attempts = 0
-                revised_handoff = False
                 schema_feedback = ""
                 fallback_reason = ""
             except ValueError as exc:
@@ -1495,7 +1487,7 @@ def compact_context(
                      "nextSourcePosition": next_position,
                      "completedRanges": [{"start": page["start"], "end": page["end"]}
                                          for page in pages[:completed_pages]],
-                     "maxProviderCalls": (len(pages) * (MAX_PROVIDER_ATTEMPTS + 1) + MAX_PROVIDER_ATTEMPTS - 1 if handoff
+                     "maxProviderCalls": (len(pages) * MAX_PROVIDER_ATTEMPTS + MAX_PROVIDER_ATTEMPTS - 1 if handoff
                                           else MAX_PROVIDER_ATTEMPTS ** 2 if input_mode == "native" else len(pages) * MAX_PROVIDER_ATTEMPTS)},
         # Data returned to the existing caller, not a store or a reader promise.
         # Source completeness means all accepted, normalized, redacted entries;

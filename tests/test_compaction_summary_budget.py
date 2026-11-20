@@ -1,4 +1,3 @@
-from copy import deepcopy
 import pytest
 from context_compaction import compact_context
 from tests.test_native_context_compaction import Compactor, fixture, plan
@@ -13,39 +12,59 @@ def test_prompt_honors_real_100_token_target_without_256_floor():
     assert "below 256 tokens" not in prompts[0]
 
 
-def test_native_summary_budget_reserves_retained_request_and_schema_overhead():
+def test_native_low_water_uses_the_whole_request_and_keeps_the_trigger_separate():
     compactor = Compactor()
-    state, planner, model, turn = fixture(compactor, prior_policy=True)
+    state, planner, model, turn = fixture(compactor, prior_policy=True, limit=16_000)
     plan(planner, turn)
     assert turn.compaction["applied"] is True
-    target = compactor.calls[0][1]["targetTokens"]
-    assert 64 <= target < turn.compaction["targetAfterTokens"]
-    assert "Continue checking" not in str(compactor.calls[0][0])
+    assert compactor.calls[0][1]["targetTokens"] == turn.compaction["targetAfterTokens"] == 8000
+    assert turn.compaction["afterTokens"] <= turn.compaction["targetAfterTokens"] < turn.compaction["triggerTokens"]
+    assert [row["text"] for row in compactor.calls[0][1]["_handoffTaskInputs"]][-1] == "Continue checking"
     assert state._native_pending(turn.snapshot()) == set()
 
 
-def test_native_no_room_for_minimum_summary_never_calls_compactor():
+def test_native_low_water_remains_strictly_below_a_small_auto_trigger(monkeypatch):
+    import runtime_planner_service
+
+    monkeypatch.setattr(runtime_planner_service, "RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO", 0.4)
+    _, planner, _, _ = fixture(limit=8000)
+    with planner.bind_turn({}):
+        guard = planner.native_context_guard({"messages": []})
+    assert guard["targetAfterTokens"] == 3199
+    assert guard["triggerTokens"] == 3200
+
+
+def test_legacy_first_dispatch_refits_ui_handoff_below_auto_trigger_without_model_compaction():
+    import json
+
+    from agent_handoff_graph import HANDOFF_GRAPH_SCHEMA
+    from agent_native_handoff_blocks import legacy_handoff_archive
+    from context_compaction import MODEL_HANDOFF_PREFIX
+
     compactor = Compactor()
-    state, planner, model, turn = fixture(compactor, current="retained current data " * 1200, limit=8000)
-    before = deepcopy(turn.snapshot())
-    plan(planner, turn)
-    assert compactor.calls == []
-    assert turn.compaction["applied"] is False
-    assert turn.compaction["failureClass"] == "insufficient_summary_budget"
-    assert turn.snapshot()["messages"][:len(before["messages"])] == before["messages"]
-
-
-def test_native_small_window_uses_space_below_trigger_when_preferred_target_is_too_small():
-    compactor = Compactor()
-    state, planner, model, turn = fixture(compactor, current="retained current data " * 300, limit=8000)
-
-    result = plan(planner, turn)
-
-    assert result["nextStep"] == "done"
-    assert turn.compaction["applied"] is True
-    assert turn.compaction["targetAfterTokens"] < turn.compaction["afterTokens"] < turn.compaction["triggerTokens"]
-    assert len(compactor.calls) == len(model.requests) == 1
-    assert state._native_pending(turn.snapshot()) == set()
+    _, planner, _, _ = fixture(compactor, limit=32_000)
+    head = "EARLIEST_SCOPE " + "alpha " * 4800 + " FIRST_CHECK"
+    latest = "RECENT_UPDATE " + "bravo " * 4800 + " RECENT_CHECK"
+    handoff = {"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
+        "next": {"kind": "task", "status": "pending", "text": "Review"},
+    }, "edges": []}
+    history = [
+        {"role": "user", "text": head, "messageId": "head"},
+        {"role": "user", "text": latest, "messageId": "latest"},
+        {"role": "agent", "text": MODEL_HANDOFF_PREFIX + json.dumps(handoff)},
+    ]
+    projected, metadata, blocked = planner.maybe_compact_runtime_history(
+        message="Continue", params={"_contextCompactionLimit": 32_000}, observe={}, history=history,
+        loop_state=[], context_usage={}, adopt_handoff=True,
+    )
+    assert not blocked and not compactor.calls
+    assert metadata["targetAfterTokens"] < metadata["beforeTokens"] < metadata["triggerTokens"]
+    assert metadata["afterTokens"] <= metadata["targetAfterTokens"]
+    for row, original in zip(projected, (head, latest)):
+        assert len(row["text"]) < len(original)
+        assert row["text"].split()[0] == original.split()[0]
+        assert row["text"].split()[-1] == original.split()[-1]
+        assert legacy_handoff_archive(projected, row["messageId"])["text"] == original
 
 
 @pytest.mark.parametrize("requested,effective", [(1,64),(64,64),(100,100)])

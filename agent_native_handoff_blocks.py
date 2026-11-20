@@ -114,6 +114,7 @@ def project_handoff_blocks(
     humans: list[int], archive_indices: dict[int, str], pending_from: int, transaction_end: int,
     task_indices: set[int], last_reply: tuple[int, str] | None, policy_indices: set[int],
     continuation_index: int | None, character_budget: int, measure: Callable[[str], int] = len,
+    preserve_user_text: bool = False,
 ) -> dict[str, Any]:
     messages = snapshot["messages"]
     active = snapshot["activeTurnStart"]
@@ -165,7 +166,7 @@ def project_handoff_blocks(
     # Fold oldest first, keeping the newest human message as the resumption anchor.
     first_inline = 0
     smallest = used
-    for index, (message_id, _) in enumerate(originals[:-1], start=1):
+    for index, (message_id, _) in enumerate(() if preserve_user_text else originals[:-1], start=1):
         if used <= budget:
             break
         used += user_cost(message_id, _pointer(message_id, "User message")) - costs[message_id]
@@ -239,6 +240,81 @@ def project_handoff_blocks(
             for row in (projected[index] for index in user_indices)
         ],
     }
+
+
+def fit_handoff_post_context(
+    summary: str, blocks: dict[str, Any], target: int,
+    measure: Callable[[str, dict[str, Any]], int],
+) -> tuple[str, dict[str, Any], int]:
+    """Shrink only the working projection. Every pointer resolves in the same conversation."""
+    from agent_handoff_folding import fold_completed_subtrees
+    from agent_handoff_graph import parse_handoff_graph, serialize_handoff_graph
+
+    tokens = measure(summary, blocks)
+    if tokens <= target or (graph := parse_handoff_graph(summary)) is None:
+        return summary, blocks, tokens
+    blocks = {**blocks, "messages": list(blocks["messages"]), "messageArchive": dict(blocks["messageArchive"])}
+    if "legacyRows" in blocks:
+        blocks["legacyRows"] = list(blocks["legacyRows"])
+    archive = blocks["messageArchive"]
+    graph_id = "handoff:" + hashlib.sha256(summary.encode("utf-8")).hexdigest()
+    folded = fold_completed_subtrees(graph, archive_message_id=graph_id)
+    if folded != graph:
+        candidate = serialize_handoff_graph(folded)
+        cost = measure(candidate, blocks)
+        if cost < tokens:
+            archive[graph_id] = {"id": graph_id, "source": "assistant", "text": summary}
+            summary, tokens = candidate, cost
+
+    user_indices = blocks["humanUserMessageIndices"]
+    messages = blocks["messages"]
+    def replace_text(index: int, value: str) -> None:
+        messages[index] = {**messages[index], "content": value}
+        message_id = messages[index]["messageId"]
+        for offset, legacy in enumerate(blocks.get("legacyRows", ())):
+            if legacy.get("messageId") == message_id:
+                blocks["legacyRows"][offset] = {**legacy, "text": value, "sourceText": archive[message_id]["text"]}
+                break
+
+    for index in user_indices[1:-1]:
+        if tokens <= target:
+            return summary, blocks, tokens
+        text = messages[index]["content"]
+        replace_text(index, _pointer(messages[index]["messageId"], "User message"))
+        cost = measure(summary, blocks)
+        if cost >= tokens:
+            replace_text(index, text)
+        else:
+            tokens = cost
+    if tokens <= target or not user_indices:
+        return summary, blocks, tokens
+
+    ends = {index: (messages[index]["content"], _pointer(messages[index]["messageId"], "User message"))
+            for index in (user_indices[0], user_indices[-1])}
+
+    def excerpt_ends(count: int) -> int:
+        for index, (text, pointer) in ends.items():
+            head, tail = (count + 1) // 2, count // 2
+            excerpt = text[:head] + "\n\n" + pointer + "\n\n" + text[-tail:]
+            replace_text(index, text if len(text) <= len(excerpt) else excerpt)
+        return measure(summary, blocks)
+
+    # Fit both endpoints together. Even at an irreducible floor, keep a
+    # literal character on each side of each archived gap.
+    low, high = 2, max(len(text) for text, _ in ends.values())
+    cost = excerpt_ends(low)
+    if cost < tokens:
+        while low < high and cost <= target:
+            count = (low + high + 1) // 2
+            if excerpt_ends(count) <= target:
+                low = count
+            else:
+                high = count - 1
+        tokens = excerpt_ends(low)
+    else:
+        for index, (text, _) in ends.items():
+            replace_text(index, text)
+    return summary, blocks, tokens
 
 
 def handoff_block_messages(
@@ -322,7 +398,7 @@ def project_legacy_handoff_blocks(
     history: list[dict[str, Any]], *, current: dict[str, Any] | None = None,
     current_source: RuntimeInputSource = RuntimeInputSource.USER,
     is_handoff: Callable[[dict[str, Any]], bool], character_budget: int, measure: Callable[[str], int],
-    public_reply: str | None = None,
+    public_reply: str | None = None, preserve_user_text: bool = False,
 ) -> dict[str, Any]:
     messages = []
     human_ids = {}
@@ -365,7 +441,7 @@ def project_legacy_handoff_blocks(
          "handoffArchive": archive},
         humans=list(human_ids), archive_indices=human_ids, pending_from=len(messages), transaction_end=len(messages),
         task_indices=task_indices, last_reply=latest_reply, policy_indices=set(), continuation_index=None,
-        character_budget=character_budget, measure=measure,
+        character_budget=character_budget, measure=measure, preserve_user_text=preserve_user_text,
     )
     user_rows = [{"role": "user", "messageId": row["messageId"], "text": row["content"], "_handoffUser": True}
                  for row in (blocks["messages"][index] for index in blocks["humanUserMessageIndices"])]

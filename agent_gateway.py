@@ -2263,6 +2263,7 @@ class AgentGateway:
         record_provider_usage: Callable[[Mapping[str, Any]], None],
     ) -> dict[str, Any] | None:
         from project_instruction_context import load_project_instructions
+        from runtime_planner_service import project_native_resume_reads
 
         planner = self.runtime_planner
         state = self.runtime_sessions
@@ -2278,7 +2279,7 @@ class AgentGateway:
             state, planner, session_id, snapshot["turnId"], binding, "", [], None, None, None,
             project_context_active=bool(project_root), compaction_only=True,
         )
-        request, _ = planner._build_native_plan_request(
+        request, tools = planner._build_native_plan_request(
             snapshot["messages"], observe=observe, exposure_layer="planning",
             project_context_active=bool(project_root), project_path=project_root,
             internal_tool_blocks=state.internal_tool_blocks(session_id),
@@ -2288,6 +2289,8 @@ class AgentGateway:
         replacement, _ = planner.maybe_compact_native_context(
             request, turn, force=trigger == "manual", preserve_pending=trigger == "manual", has_todo=bool(todo),
             phase=phase, provider_receipt=record_provider_usage, expected_snapshot=snapshot,
+            resume_read_projection=lambda messages: project_native_resume_reads(
+                messages, lambda: planner._read_catalog("planning", project_context_active=bool(project_root)), tools),
         )
         audit = dict(turn.compaction or {})
         if audit.get("applied") is not True:
@@ -7073,11 +7076,20 @@ class AgentGateway:
         native_turn.retain_recovery_catalog = retain_compaction_recovery_catalog
 
         def read_handoff_record(key: str, identity: str) -> dict[str, Any] | None:
-            if not native_binding:
-                from agent_native_handoff_blocks import legacy_handoff_archive
-                return legacy_handoff_archive(history, identity) if key == "messageId" else None
             if key == "messageId":
-                return self.runtime_sessions.native_handoff_archive(session_id, binding=native_binding, message_id=identity)
+                if native_binding:
+                    record = self.runtime_sessions.native_handoff_archive(session_id, binding=native_binding, message_id=identity)
+                else:
+                    from agent_native_handoff_blocks import legacy_handoff_archive
+
+                    record = legacy_handoff_archive(history, identity)
+                if record or not identity.startswith("handoff:"):
+                    return record
+                recoveries = native_turn.recoveries() if native_binding else accepted_recovery
+                return next(({"id": identity, "source": "assistant", "text": page["summary"]}
+                             for page in recoveries if identity == "handoff:" + page["summaryDigest"]), None)
+            if not native_binding:
+                return None
             from agent_handoff_operations import lookup_native_handoff_receipt
             return lookup_native_handoff_receipt(native_turn.snapshot(), identity)
         incoming_recovery = params.get("compactionRecovery", [])
@@ -7704,6 +7716,24 @@ class AgentGateway:
                     last_plan["completionActionIds"] = task_loop.completed_action_ids()
                 iterations += 1
                 break
+            if step_index == 0 and not native_binding and any(model_handoff_payload(row) is not None for row in history):
+                history, adoption, blocked = self.runtime_planner.maybe_compact_runtime_history(
+                    message=message, params=params, observe=observe, history=history, loop_state=[],
+                    context_usage=context_usage, runtime_exposure_layer=runtime_exposure_layer, adopt_handoff=True,
+                )
+                if adoption and adoption.get("afterTokens", 0) >= adoption["triggerTokens"]:
+                    runtime_compaction_attempted = True
+                if blocked:
+                    runtime_compaction = adoption
+                    last_plan = {
+                        "summary": "The retained conversation exceeds the provider's context limit.",
+                        "reply": "VRCForge kept the handoff and paused before sending it. A model with a larger verified context window can continue from it.",
+                        "planner": "runtime",
+                        "shellNeeded": False,
+                        "nextStep": "context_compaction_required",
+                    }
+                    iterations += 1
+                    break
             if step_index > 0:
                 usage_before_compaction = dict(context_usage)
                 if native_binding:
@@ -7726,7 +7756,8 @@ class AgentGateway:
                         runtime_exposure_layer=runtime_exposure_layer,
                     )
                 if compaction_result is not None:
-                    runtime_compaction_attempted = not bool(compaction_result.get("applied"))
+                    runtime_compaction_attempted = (not compaction_result.get("applied") or
+                        compaction_result.get("afterTokens", 0) >= compaction_result["triggerTokens"])
                     if compaction_result.get("applied"):
                         runtime_compacted_loop_steps += int(
                             compaction_result.get("compactedLoopStepCount") or 0

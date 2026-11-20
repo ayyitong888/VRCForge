@@ -463,9 +463,11 @@ class NativeRuntimeTurn:
     def handoff_tail(self, snapshot: dict[str, Any]) -> int:
         return self._state.native_handoff_tail(snapshot)
 
-    def handoff_projection(self, snapshot: dict[str, Any], *, character_budget: int, measure: Callable[[str], int] = len
+    def handoff_projection(self, snapshot: dict[str, Any], *, character_budget: int, measure: Callable[[str], int] = len,
+                           preserve_user_text: bool = False,
                            ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        return self._state.native_handoff_projection(snapshot, character_budget=character_budget, measure=measure)
+        return self._state.native_handoff_projection(snapshot, character_budget=character_budget, measure=measure,
+                                                     preserve_user_text=preserve_user_text)
 
     @staticmethod
     def handoff_messages(blocks: dict[str, Any], *, summary: str = "",

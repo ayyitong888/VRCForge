@@ -1155,7 +1155,8 @@ class AgentRuntimeSessionState:
                                         or is_output_continuation_control(item)) and model_handoff_payload(item) is None)]
 
     @classmethod
-    def native_handoff_projection(cls, snapshot: dict[str, Any], *, character_budget: int, measure: Callable[[str], int] = len
+    def native_handoff_projection(cls, snapshot: dict[str, Any], *, character_budget: int, measure: Callable[[str], int] = len,
+                                  preserve_user_text: bool = False,
                                   ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         messages = snapshot["messages"]
         pending_from = _pending_suffix(messages)
@@ -1188,7 +1189,7 @@ class AgentRuntimeSessionState:
                                         task_indices=task_indices, last_reply=last_reply,
                                         policy_indices={index for index, item in enumerate(messages) if is_scan_result_policy_message(item)},
                                         continuation_index=len(messages) - 1 if is_output_continuation_control(messages[-1]) else None,
-                                        character_budget=character_budget, measure=measure)
+                                        character_budget=character_budget, measure=measure, preserve_user_text=preserve_user_text)
         inputs_by_id = {row["id"]: row for row in blocks["taskInputs"]}
         previous_boundary = 0
         for index in humans:

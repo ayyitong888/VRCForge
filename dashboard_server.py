@@ -3690,6 +3690,22 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
                 goal_bindings=AGENT_GATEWAY.goal.handoff_goal_bindings(request.session_id or "", request.project_root or ""),
                 goal_acceptances=AGENT_GATEWAY.goal.handoff_acceptances(request.session_id or "", request.project_root or ""),
             )
+            if result.get("ok") and (request.target_tokens is not None or request.real_context_limit):
+                from agent_native_handoff_blocks import fit_handoff_post_context
+
+                # The browser supplies the portion of its low-water target
+                # left after measuring retained history and incoming content.
+                target = result["targetTokens"]
+                full_summary = result["summary"]
+                summary, _, estimated = fit_handoff_post_context(full_summary, {
+                    "messages": [], "messageArchive": {}, "humanUserMessageIndices": [],
+                }, target, lambda text, _: estimate_compaction_prompt_tokens(text))
+                if summary != full_summary:
+                    result["summary"] = summary
+                    result["summaryDigest"] = hashlib.sha256(summary.encode("utf-8")).hexdigest()
+                    result["completeness"]["inlineSummaryComplete"] = False
+                if estimated > target:
+                    result["fallbackReason"] = "context_target_unreachable"
         result["providerUsage"] = aggregate_compact_provider_usage(
             provider_receipts, provider=settings.llm_provider, model=settings.llm_model
         )

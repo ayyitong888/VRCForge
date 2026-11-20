@@ -140,19 +140,25 @@ def test_long_active_turn_retains_all_user_texts_and_last_public_reply():
     assert "group-90-a" in compactor.prompts[0] and "group-4-a" in compactor.prompts[0]
 
 
-def test_no_todo_handoff_has_unresolved_evidence_and_only_handoff_rewrites_for_budget():
+def test_verified_handoff_larger_than_the_old_graph_limit_is_kept_in_one_call():
+    from context_compaction import estimate_compaction_prompt_tokens
+
     attempts = []
+    evidence = "evidence " * 6000
+
     def summarize(prompt):
         attempts.append(prompt)
         return _with_source(prompt, {"nodes": {
             "goal": _node("goal", "Intent"),
-            "readback": _node("task", "evidence " * 250 if len(attempts) == 1 else "One result", "pending"),
+            "readback": _node("task", evidence, "pending"),
         }})
-    result = compact_context([{"role": "tool", "text": "OLD_TOOL_ROW"}], handoff=True, target_tokens=220, summarizer=summarize)
-    assert result["ok"] is True and len(attempts) == 2
-    assert all("OLD_TOOL_ROW" in prompt for prompt in attempts)
-    assert "resulting graph too large" in attempts[1]
-    assert parse_handoff_graph(result["summary"])["nodes"]["readback"]["text"] == "One result"
+    result = compact_context([{"role": "tool", "text": "OLD_TOOL_ROW"}], handoff=True, real_context_limit=240_000, summarizer=summarize)
+    assert result["ok"] is True and len(attempts) == 1
+    assert result["targetTokens"] == 120_000
+    assert estimate_compaction_prompt_tokens(result["summary"]) > 12_000
+    assert "OLD_TOOL_ROW" in attempts[0]
+    assert parse_handoff_graph(result["summary"])["nodes"]["readback"]["text"] == evidence
+    assert result["recovery"]["summary"] == result["summary"]
 
 
 def test_long_handoff_merges_ordered_pages_and_keeps_earliest_decision_after_provider_size_retry():
@@ -279,9 +285,10 @@ def test_repeated_compaction_resolves_linked_work_and_keeps_failure_history():
     for node_id in ("goal", "package-b", "check", "shader", "order"):
         assert graph["nodes"][node_id] == prior["nodes"][node_id]
     assert graph["nodes"]["package-a"]["status"] == "done"
-    assert not {"retry", "recovery"} & graph["nodes"].keys()
-    assert {"type": "receipt", "id": "older-call"} in graph["nodes"]["package-a"]["evidence"]
-    assert graph["edges"] == [edge for edge in prior["edges"] if not {"retry", "recovery"} & set(edge[:3])]
+    assert graph["nodes"]["retry"] == prior["nodes"]["retry"]
+    assert graph["nodes"]["recovery"]["status"] == "closed"
+    assert {"type": "receipt", "id": "older-call"} in graph["nodes"]["retry"]["evidence"]
+    assert graph["edges"] == prior["edges"]
     assert result["recovery"]["sourceEntries"] == rows
 
     from agent_runtime_session_state import native_model_history
@@ -361,7 +368,7 @@ def test_retries_one_wrong_handoff_envelope_with_same_graph_and_same_records():
 
 def test_verbatim_assistant_reply_is_never_cut_to_force_fit():
     compactor = ModelHandoff()
-    state, planner, _, turn = fixture(compactor, prior=False, current="ORIGINAL_USER_TASK", limit=8_000)
+    state, planner, model, turn = fixture(compactor, prior=False, current="ORIGINAL_USER_TASK", limit=8_000)
     for index in range(8):
         _pair(state, index)
     state.append_native_assistant("s", binding="b", message={"role": "assistant", "content": "EXACT_LARGE_REPLY " * 5000})
@@ -369,8 +376,106 @@ def test_verbatim_assistant_reply_is_never_cut_to_force_fit():
     with planner.bind_turn({}):
         _, guard = planner.maybe_compact_native_context(_request(planner, before), turn, force=True)
     assert guard["blocked"] is True
-    assert turn.compaction["failureClass"] == "insufficient_summary_budget"
-    assert turn.snapshot() == before and not compactor.prompts
+    assert turn.compaction["applied"] is True and turn.compaction["blocked"] is True
+    assert turn.compaction["failureClass"] == "context_target_unreachable"
+    assert turn.compaction["afterTokens"] > turn.compaction["hardLimitTokens"]
+    saved = turn.snapshot()
+    reply_id = saved["handoffLastReplyId"]
+    assert state.native_handoff_archive("s", binding="b", message_id=reply_id)["text"] == before["messages"][-1]["content"]
+    graph = next(row["content"] for row in saved["messages"] if row.get("content", "").startswith(MODEL_HANDOFF_PREFIX))
+    assert parse_handoff_graph(graph.removeprefix(MODEL_HANDOFF_PREFIX))["nodes"]["inspect"]["status"] == "pending"
+    assert saved["compactionRecovery"][-1]["summary"] == graph.removeprefix(MODEL_HANDOFF_PREFIX)
+    assert len(compactor.prompts) == 1
+    from tests.test_native_context_compaction import plan
+
+    assert plan(planner, turn)["nextStep"] == "context_compaction_required"
+    assert not model.requests
+
+
+def test_native_above_trigger_below_hard_sends_once_without_resummarizing_unchanged_graph():
+    from tests.test_native_context_compaction import Compactor, plan
+
+    compactor = Compactor()
+    state, planner, model, turn = fixture(compactor, prior=False, current="Original request", limit=16_000)
+    for index in range(3):
+        _pair(state, index)
+    with planner.bind_turn({}):
+        request = _request(planner, turn.snapshot())
+        fixed = planner.native_context_guard({**request, "messages": [request["messages"][-1]]})["beforeTokens"]
+        compactor.summary = json.dumps({"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
+            "active": _node("task", "Irreducible task details " + "x" * ((14_400 - fixed - 240) * 4), "pending"),
+        }, "edges": []})
+        planner.maybe_compact_native_context(request, turn, force=True)
+        pressure = turn.compaction
+        assert pressure["applied"] and not pressure["blocked"]
+        assert pressure["triggerTokens"] <= pressure["afterTokens"] < pressure["hardLimitTokens"]
+        assert pressure["failureClass"] == "context_target_unreachable"
+        turn.persist_runtime_state(request["messages"][-1])
+        request = _request(planner, turn.snapshot())
+        unchanged, guard = planner.maybe_compact_native_context(request, turn)
+        assert unchanged is request
+        assert guard["triggerTokens"] <= guard["beforeTokens"] < guard["hardLimitTokens"]
+        assert not guard["blocked"] and len(compactor.calls) == 1
+    assert plan(planner, turn)["nextStep"] == "done"
+    assert len(model.requests) == len(compactor.calls) == 1
+
+
+def test_native_budget_folds_completed_branch_and_retains_full_graph_after_restart(tmp_path):
+    from agent_native_history_store import NativeHistoryStore
+    from tests.test_native_context_compaction import Compactor
+    from tests.test_native_handoff_blocks import _state
+
+    pointer = {"type": "receipt", "id": "verified-detail"}
+    summary = json.dumps({"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
+        "complete": _node("task", "Completed export", "done", evidence=[pointer]),
+        "detail": _node("task", "Verified rows " * 12_000, "done", evidence=[pointer]),
+        "pending": _node("task", "Review the exported result", "pending"),
+    }, "edges": [["detail", "belongs_to", "complete"], ["pending", "depends_on", "detail"]]})
+    store = NativeHistoryStore(tmp_path)
+    state, planner, _, turn = fixture(Compactor(summary), prior=False, current="Original scope", limit=32_000, store=store)
+    for index in range(4):
+        _pair(state, index)
+    with planner.bind_turn({}):
+        planner.maybe_compact_native_context(_request(planner, turn.snapshot()), turn, force=True)
+    assert turn.compaction["applied"] is True
+    assert turn.compaction["afterTokens"] <= turn.compaction["targetAfterTokens"]
+    restarted = _state(store)
+    saved = restarted.native_conversation("s", binding="b")
+    node_graph = next(row["content"] for row in saved["messages"] if row.get("content", "").startswith(MODEL_HANDOFF_PREFIX))
+    graph = parse_handoff_graph(node_graph.removeprefix(MODEL_HANDOFF_PREFIX))
+    assert set(graph["nodes"]) == {"complete", "pending"}
+    assert graph["edges"] == [["pending", "depends_on", "complete"]]
+    graph_id = next(item["id"] for item in graph["nodes"]["complete"]["evidence"] if item["type"] == "message")
+    assert restarted.native_handoff_archive("s", binding="b", message_id=graph_id)["text"] == summary
+
+
+def test_native_pressure_preserves_both_long_endpoints_and_retrieves_middle_after_restart(tmp_path):
+    from agent_native_history_store import NativeHistoryStore
+    from tests.test_native_handoff_blocks import _state
+
+    originals = {
+        "head": "OPENING_REQUEST " + "alpha " * 3600 + " ORIGINAL_END",
+        "middle": "MIDDLE_UPDATE " + "bravo " * 2800,
+        "tail": "LATEST_UPDATE " + "charlie " * 3600 + " LATEST_CONSTRAINT",
+    }
+    store = NativeHistoryStore(tmp_path)
+    compactor = ModelHandoff()
+    state, planner, _, turn = fixture(compactor, prior=False, current=originals["head"], limit=24_000, store=store)
+    for index, (identity, text) in enumerate(list(originals.items())[1:]):
+        _pair(state, index)
+        state.append_native_user("s", binding="b", input_id=identity, message=text)
+    with planner.bind_turn({}):
+        planner.maybe_compact_native_context(_request(planner, turn.snapshot()), turn, force=True)
+    assert turn.compaction["applied"] is True
+    assert turn.compaction["afterTokens"] <= turn.compaction["targetAfterTokens"]
+    restarted = _state(store)
+    saved = restarted.native_conversation("s", binding="b")
+    first, middle, latest = [row for row in saved["messages"] if row.get("handoffUser")]
+    assert first["content"].startswith("OPENING_REQUEST ") and first["content"].endswith(" ORIGINAL_END")
+    assert "MIDDLE_UPDATE" not in middle["content"] and 'messageId="middle"' in middle["content"]
+    assert latest["content"].startswith("LATEST_UPDATE ") and latest["content"].endswith(" LATEST_CONSTRAINT")
+    for row, original in zip((first, middle, latest), originals.values()):
+        assert restarted.native_handoff_archive("s", binding="b", message_id=row["messageId"])["text"] == original
 
 
 def test_native_handoff_projects_lossless_transactions_and_drops_registry_definitions_only():

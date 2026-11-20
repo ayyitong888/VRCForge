@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,38 @@ def test_standalone_compact_routes_prior_handoff_as_state_and_keeps_archive(monk
 
     monkeypatch.setattr(dashboard, "compact_context", compact)
     assert dashboard.app_agent_compact(AgentCompactRequest(history=[prior, recent]))["ok"] is True
+
+
+def test_standalone_residual_budget_folds_only_completed_detail_and_preserves_graph(monkeypatch):
+    from agent_handoff_graph import HANDOFF_GRAPH_SCHEMA, parse_handoff_graph
+    from context_compaction import estimate_compaction_prompt_tokens, normalize_compaction_recovery
+
+    settings = SimpleNamespace(llm_provider="openai", llm_api_key="test", llm_model="model")
+    monkeypatch.setattr(dashboard, "load_dashboard_settings", lambda _request: settings)
+    prompts = []
+    def summarize(_settings, prompt):
+        prompts.append(prompt)
+        return PlannerModelResult("{}")
+
+    monkeypatch.setattr(dashboard, "request_llm_plan_with_metadata", summarize)
+    source = {"type": "receipt", "id": "read-verified"}
+    facts = "Long closed observation. " * 700
+    prior = {"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
+        "done": {"kind": "task", "status": "done", "text": "Verified item", "evidence": [source],
+                 "packagePreflight": {"ready": True, "receiptId": source["id"]}},
+        "item": {"kind": "issue", "status": "closed", "text": "Resolved item", "facts": facts, "evidence": [source]},
+    }, "edges": [["done", "blocked_by", "item", {"evidence": [source], "reason": "Verified"}]]}
+    result = dashboard.app_agent_compact(AgentCompactRequest(history=[
+        {"role": "agent", "text": MODEL_HANDOFF_PREFIX + json.dumps(prior)},
+        {"role": "user", "text": "Please continue reviewing the export."},
+    ], target_tokens=1200, real_context_limit=32_000))
+    assert result["ok"] and len(prompts) == 1
+    assert estimate_compaction_prompt_tokens(result["summary"]) <= 1200
+    graph = parse_handoff_graph(result["summary"])
+    assert "item" not in graph["nodes"] and graph["nodes"]["done"]["packagePreflight"] == prior["nodes"]["done"]["packagePreflight"]
+    recovery = normalize_compaction_recovery(result["recovery"])
+    assert {"type": "message", "id": "handoff:" + recovery["summaryDigest"]} in graph["nodes"]["done"]["evidence"]
+    assert parse_handoff_graph(recovery["summary"])["nodes"]["item"]["facts"] == facts
 
 
 def test_standalone_compact_preserves_provider_usage_and_uses_metadata_route(monkeypatch):

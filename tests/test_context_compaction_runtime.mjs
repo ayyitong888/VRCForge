@@ -92,7 +92,7 @@ const moduleUrl = `data:text/javascript;base64,${Buffer.from(compiled).toString(
 const controllerModule = await import(moduleUrl);
 
 const conversationSource = await readFile(path.join(root, "src/lib/conversation-utils.ts"), "utf8");
-const historyStart = conversationSource.indexOf("export function buildChatHistory");
+const historyStart = conversationSource.indexOf("export function legacyGoalInputIds");
 const historyEnd = conversationSource.indexOf("/** Recovery is sent", historyStart);
 const historyHarness = `${conversationSource.slice(historyStart, historyEnd)}
 const appendAttachmentSummary = (text) => text;
@@ -199,11 +199,14 @@ test("manual native compaction keeps the pending approval on its original sessio
     assert.match(sent, /Second recent complete turn/);
     assert.match(sent, /A long user request/);
     assert.doesNotMatch(sent, /Second recent complete answer|pending-ref/);
-    return { nativeApplied: true, summary: "handoff", summaryDigest: "digest" };
+    return { nativeApplied: true, summary: "handoff", summaryDigest: "digest", beforeTokens: 900, afterTokens: 425, targetAfterTokens: 500 };
   };
   const outcome = await harness.render((_chatId, _sessionId, allowPendingApproval) => !allowPendingApproval).compactChat(request());
   assert.equal(outcome.status, "applied");
   assert.equal(chat.sessionId, "session-old");
+  assert.equal(chat.compaction.beforeTokens, 900);
+  assert.equal(chat.compaction.afterTokens, 425);
+  assert.equal(chat.compaction.targetAfterTokens, 500);
   assert.deepEqual(chat.items.filter(item => item.type !== "compact"), transcript);
   assert.deepEqual(chat.items.find(item => item.type === "compact").summarizedItemIds, ["agent-1", "agent-2", "agent-3"]);
 });
@@ -377,22 +380,23 @@ test("legacy compact state without a receipt remains unknown when a later compac
   assert.equal(chat.compaction.providerUsage.unavailableReason, "provider_usage_missing");
 });
 
-test("reduction rejection keeps an explicit stage, token evidence, and original history", async () => {
+test("a returned handoff is retained even when the active projection cannot reach its target", async () => {
   const chat = makeChat();
   const harness = makeHarness(chat, async () => undefined);
   harness.compactAgentHistoryState.promise = async () => ({
-    summary: "x".repeat(2000),
+    ok: true,
+    summary: JSON.stringify({ schema: "vrcforge.agent_handoff_graph.v3", nodes: { goal: { kind: "goal", text: "x".repeat(2000) } }, edges: [] }),
     summaryDigest: "digest",
     entryCount: 2,
   });
-  const failed = await harness.render(() => false).compactChat(request());
-  assert.equal(failed.status, "failed");
-  assert.equal(chat.compaction.failureClass, "reduction_gate");
+  const result = await harness.render(() => false).compactChat(request());
+  assert.equal(result.status, "applied");
+  assert.equal(chat.compaction.failureClass, "context_target_unreachable");
   assert.equal(typeof chat.compaction.beforeTokens, "number");
   assert.equal(typeof chat.compaction.afterTokens, "number");
   assert.ok(chat.compaction.afterTokens > chat.compaction.beforeTokens);
-  assert.equal(chat.sessionId, "session-old");
-  assert.deepEqual(chat.items.map((item) => item.id), rawIds);
+  assert.deepEqual(chat.items.filter((item) => item.type !== "compact").map((item) => item.id), rawIds);
+  assert.match(chat.items.find(item => item.type === "compact").detail, /agent_handoff_graph/);
 });
 
 test("actual conversation projection survives JSON reload and second compact without replaying old dialogue", async () => {

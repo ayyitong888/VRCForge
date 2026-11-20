@@ -462,7 +462,7 @@ export function resolveContextCompactionPolicy(
   const targetRatio = clamp(
     finiteNumber(overrides.targetRatio) ?? DEFAULT_CONTEXT_COMPACTION_POLICY.targetRatio,
     0.1,
-    CONTEXT_COMPACTION_PREFIRE_RATIO,
+    Math.min(CONTEXT_COMPACTION_PREFIRE_RATIO, triggerRatio - 0.1),
   );
   const attachmentMetadataTokens = Math.max(
     0,
@@ -542,13 +542,7 @@ export function evaluateCompactionBudget(
     policy.minimumReductionFloorTokens,
     Math.ceil(limit * policy.minimumReductionRatio),
   );
-  const targetAfterTokens = Math.max(
-    0,
-    Math.min(
-      Math.floor(limit * policy.targetRatio),
-      projectedTokens - minimumReductionTokens,
-    ),
-  );
+  const targetAfterTokens = Math.floor(limit * policy.targetRatio);
   const level = compactionLevel(projectedRatio, policy);
   const sameWindow = input.previousCompaction?.contextLimit === limit;
   const previousStatus = input.previousCompaction?.status;

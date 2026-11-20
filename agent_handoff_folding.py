@@ -3,8 +3,10 @@
 from collections import defaultdict
 from graphlib import CycleError, TopologicalSorter
 
+from agent_handoff_sources import HOST_NODE_OWNERSHIP
 
-def fold_completed_subtrees(graph: dict) -> dict:
+
+def fold_completed_subtrees(graph: dict, *, archive_message_id: str | None = None) -> dict:
     nodes = dict(graph["nodes"])
     edges = graph["edges"]
     children = defaultdict(set)
@@ -56,8 +58,7 @@ def fold_completed_subtrees(graph: dict) -> dict:
                 pending.append(neighbor)
 
         removed = (branch - {root}) | (details - shared)
-        if not removed or removed & order_sources or any(nodes[node].get("attemptReceiptId") or nodes[node].get("toolTask")
-                                                       for node in removed):
+        if not removed or removed & order_sources or any(HOST_NODE_OWNERSHIP.intersection(nodes[node]) for node in removed):
             continue
         pointers = []
         seen = set()
@@ -70,6 +71,8 @@ def fold_completed_subtrees(graph: dict) -> dict:
                         pointers.append(pointer)
         if not pointers:
             continue
+        if archive_message_id:
+            pointers.append({"type": "message", "id": archive_message_id})
         owned = removed | {root}
         kept = {}
         for source, relation, target, *properties in edges:

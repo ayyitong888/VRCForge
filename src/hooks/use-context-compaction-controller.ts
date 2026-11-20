@@ -150,20 +150,10 @@ export function useContextCompactionController({
     });
 
     if (request.trigger === "manual") {
-      // Manual compaction reduces the visible model-history projection, not
-      // the provider's schema/system overhead or ten percent of its capacity.
-      // Compare before/after in the same units; keep automatic guard policy.
       const projectedTokens = estimateHistoryTokens(history)
         + estimateIncomingContextTokens(request.incomingText, request.incomingAttachments);
-      const minimumReductionTokens = Math.max(1, Math.ceil(projectedTokens * 0.1));
-      decision = {
-        ...decision,
-        projectedTokens,
-        minimumReductionTokens,
-        targetAfterTokens: Math.max(0, Math.min(
-          projectedTokens - minimumReductionTokens,
-          contextLimit.known ? Math.floor(contextLimit.limit * 0.5) : projectedTokens,
-        )),
+      decision = { ...decision, projectedTokens,
+        targetAfterTokens: contextLimit.known ? Math.floor(contextLimit.limit * 0.5) : undefined,
       };
     }
 
@@ -221,11 +211,11 @@ export function useContextCompactionController({
       ...buildChatHistory(summarySourceItems, t, snapshotItems, true),
       ...buildDurableCompactionStateEntries(summarySourceItems),
     ] : [];
-    const summaryTargetTokens = (decision.targetAfterTokens ?? 0)
-      - estimateHistoryTokens(buildChatHistory(retainedProjection, t))
-      - estimateIncomingContextTokens(request.incomingText, request.incomingAttachments) - 8;
-    const fallbackHistory = summaryTargetTokens >= 64 ? summaryHistory : [];
-    if (!fallbackHistory.length && !mayCompactNative) {
+    const summaryTargetTokens = decision.targetAfterTokens === undefined ? undefined : Math.max(1,
+      decision.targetAfterTokens - estimateHistoryTokens(buildChatHistory(retainedProjection, t))
+      - estimateIncomingContextTokens(request.incomingText, request.incomingAttachments) - 8,
+    );
+    if (!summaryHistory.length && !mayCompactNative) {
       if (request.trigger === "manual") setError(t("compact.noContent"));
       return { status: "skipped", decision, chat: snapshot };
     }
@@ -263,24 +253,23 @@ export function useContextCompactionController({
     jobsRef.current.set(request.chatId, { generation, controller });
     syncActiveJobCount();
     let failureClassOverride: string | undefined;
-    let failureAfterTokens: number | undefined;
     let compactionProviderUsage = priorCompactionUsage;
     let compactionResponseReceived = false;
 
     try {
       const payload: CompactAgentHistoryResponse = await compactAgentHistory(request.endpoint, {
-        history: fallbackHistory,
+        history: summaryHistory,
         signal: controller.signal,
         trigger: request.trigger,
         phase: request.phase,
-        sourceDigest: fingerprintCompactionSource(fallbackHistory),
+        sourceDigest: fingerprintCompactionSource(summaryHistory),
         language: i18n.resolvedLanguage || i18n.language,
         provider: request.provider,
         model: request.model,
         sessionId: snapshot.sessionId,
         projectRoot: snapshot.projectPath,
         requireNative,
-        targetTokens: summaryTargetTokens >= 64 ? summaryTargetTokens : undefined,
+        targetTokens: summaryTargetTokens,
         realContextLimit: contextLimit.known ? contextLimit.limit : undefined,
       });
       compactionResponseReceived = true;
@@ -303,7 +292,7 @@ export function useContextCompactionController({
         detail: summary,
         status: "completed",
         entryCount: payload.entryCount ?? history.length,
-        beforeTokens,
+        beforeTokens: payload.beforeTokens ?? beforeTokens,
         contextLimit: contextLimit.known ? contextLimit.limit : undefined,
         compactionRecovery: mergeCompactionRecovery(
           ...snapshotItems.map((item) => (item.type === "agent" || item.type === "compact") ? item.compactionRecovery : undefined),
@@ -311,14 +300,9 @@ export function useContextCompactionController({
         ),
         createdAt: new Date().toISOString(),
       });
-      const replacementHistory = buildChatHistory(replacementItems, t);
-      const incomingTokens = estimateIncomingContextTokens(request.incomingText, request.incomingAttachments);
-      const afterTokens = estimateHistoryTokens(replacementHistory) + incomingTokens;
-      failureAfterTokens = afterTokens;
-      if (!payload.nativeApplied && !replacementIsUseful(beforeTokens, afterTokens, decision, contextLimit.known ? contextLimit.limit : 0)) {
-        failureClassOverride = "reduction_gate";
-        throw new Error("Compaction did not reduce context enough to apply safely.");
-      }
+      const afterTokens = payload.afterTokens ?? (estimateHistoryTokens(buildChatHistory(replacementItems, t))
+        + estimateIncomingContextTokens(request.incomingText, request.incomingAttachments));
+      const targetAfterTokens = payload.targetAfterTokens ?? decision.targetAfterTokens;
       const latestBeforeCommit = getChatById(request.chatId);
       if (latestBeforeCommit && hasUnresolvedRuntimeStateRef.current?.(request.chatId, latestBeforeCommit.sessionId, allowPendingApproval)) {
         markLatestGeneration(request.chatId, generation, "failed", "runtime_pending", t("compact.failed"), undefined, compactionProviderUsage);
@@ -338,7 +322,9 @@ export function useContextCompactionController({
         ...startState,
         status: "applied",
         summaryDigest: payload.summaryDigest,
+        beforeTokens: payload.beforeTokens ?? beforeTokens,
         afterTokens,
+        targetAfterTokens,
         entryCount: payload.entryCount ?? history.length,
         retainedEntryCount: payload.retainedEntryCount,
         fidelity: payload.fidelity || "full",
@@ -346,7 +332,8 @@ export function useContextCompactionController({
         latencyMs: boundedCompactionLatencyMs(startState.startedAt, appliedAt),
         retainedSummaryCharacters: boundedCompactionSummaryCharacters(summary.length),
         completedAt: appliedAt,
-        failureClass: payload.failureClass || payload.fallbackReason,
+        failureClass: payload.failureClass || payload.fallbackReason || (targetAfterTokens !== undefined && afterTokens > targetAfterTokens
+          ? "context_target_unreachable" : undefined),
         providerUsage: compactionProviderUsage,
       };
       const committed = updateChatIfRevision(request.chatId, workingRevision, (chat) => ({
@@ -402,7 +389,7 @@ export function useContextCompactionController({
         cancelled ? "cancelled" : request.trigger === "auto" && isStickyFailure(failureClass) ? "suppressed" : "failed",
         failureClass,
         cancelled ? t("compact.cancelled") : t("compact.failed"),
-        failureAfterTokens,
+        undefined,
         compactionProviderUsage,
       );
       return { status: cancelled ? "cancelled" : "failed", decision, chat: getChatById(request.chatId) };
@@ -533,24 +520,6 @@ function applyCompactedAttachmentReferences(
 
 function estimateHistoryTokens(history: ChatHistoryEntry[]): number {
   return history.reduce((total, entry) => total + estimateTextTokens(entry.text) + 8, 0);
-}
-
-function replacementIsUseful(
-  beforeTokens: number,
-  afterTokens: number,
-  decision: ContextCompactionBudgetDecision,
-  contextLimit: number,
-): boolean {
-  if (afterTokens >= beforeTokens) {
-    return false;
-  }
-  if (decision.targetAfterTokens !== undefined && afterTokens > decision.targetAfterTokens) {
-    return false;
-  }
-  if (decision.minimumReductionTokens !== undefined && beforeTokens - afterTokens < decision.minimumReductionTokens) {
-    return false;
-  }
-  return contextLimit <= 0 || afterTokens < Math.ceil(contextLimit * 0.85);
 }
 
 function forwardAbort(source: AbortSignal | undefined, target: AbortController): () => void {

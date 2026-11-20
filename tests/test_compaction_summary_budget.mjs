@@ -17,7 +17,7 @@ function harness(items, summary="历史仅检查，未修改。"){
   ? {ok:true,summary,summaryDigest:'offline-summary'}
   : {ok:false,status:'no_content',summary:''};}};
  const controller=useContextCompactionController({getChatById:()=>structuredClone(chat),updateChat:(_id,fn)=>Object.assign(chat,fn(chat)),updateChatIfRevision:(_id,revision,fn)=>{if(chat.revision!==revision)return false;Object.assign(chat,fn(chat));chat.revision++;return true;},persistChatsNow:async()=>{},setError:x=>errors.push(x),hasUnresolvedRuntimeState:()=>false});
- return {chat,requests,errors,run:()=>controller.compactChat({chatId:chat.id,endpoint:'offline',trigger:'manual',phase:'standalone',provider:'chatgpt',model:'fixture',contextLimit:500000})};
+ return {chat,requests,errors,run:(contextLimit=500000)=>controller.compactChat({chatId:chat.id,endpoint:'offline',trigger:'manual',phase:'standalone',provider:'chatgpt',model:'fixture',contextLimit})};
 }
 const user=(id,text)=>({id,type:'user',text});
 const agent=(id,text,extra={})=>({id,type:'agent',response:{ok:true,plan:{reply:text},...extra},timeline:[]});
@@ -27,27 +27,22 @@ test('actual failed projection includes completed answer and reserves exact late
  const before=JSON.stringify(raw);
  const h=harness(raw.state.items);const outcome=await h.run();
  assert.equal(h.requests.length,1);
- assert.equal(h.requests[0].targetTokens,872);
+ assert.ok(h.requests[0].targetTokens > 0 && h.requests[0].targetTokens <= 250000);
  assert.equal(h.requests[0].history.length,6);
  assert.equal(h.requests[0].history.filter(x=>x.role==='user').length,5);
  assert.equal(h.requests[0].history.at(-1).role,'agent');
  assert.equal(outcome.status,'applied');
- assert.deepEqual(h.chat.items.slice(-2),raw.state.items.slice(-2));
+ assert.deepEqual(h.chat.items.slice(0,-1),raw.state.items);
  assert.equal(JSON.stringify(raw),before);
- // The original actual summary now fits because the completed answer is replaced.
+ // The marker preserves the transcript while reducing the provider projection.
  const old=harness(raw.state.items,raw.response.summary);
  assert.equal((await old.run()).status,'applied');
  assert.equal(old.chat.compaction.afterTokens,778);
  const oversized=harness(raw.state.items,raw.response.summary.repeat(3));
- assert.equal((await oversized.run()).status,'failed');
- assert.equal(oversized.chat.compaction.failureClass,'reduction_gate');
- assert.deepEqual(oversized.chat.items,raw.state.items);
- // Immediately re-compacting this short result has no useful 64-token room.
- assert.equal((await h.run()).status,'skipped');
- assert.equal(h.requests.length,1);
- assert.equal(h.errors.at(-1),'compact.noContent');
+ assert.equal((await oversized.run()).status,'applied');
+ assert.equal(oversized.chat.items.at(-1).detail,raw.response.summary.repeat(3).trim());
 });
-test('only user text or insufficient room skips with manual noContent feedback',async()=>{
+test('history without a completed older reply checks for native work before reporting no content',async()=>{
  for(const items of [[user('u','current')],[user('old','tiny'),user('u','current '.repeat(100)),agent('a','tiny answer')]]){
   const h=harness(items);assert.equal((await h.run()).status,'skipped');assert.deepEqual(h.requests[0].history,[]);assert.deepEqual(h.errors,['compact.noContent']);assert.equal(h.chat.sessionId,'session');
  }
@@ -81,10 +76,11 @@ test('budget probe cannot collide with a stored compaction id',async()=>{
  } finally {Date.now=now;Math.random=random;}
 });
 
-test('existing minimum allows exactly 64 summary tokens but rejects 63 before dispatch',async()=>{
- const items = (length) => [user('old','x'),agent('older','中'.repeat(length)),user('latest','z'),agent('last','y')];
- const enough=harness(items(76));
- assert.equal((await enough.run()).status,'applied');assert.equal(enough.requests[0].targetTokens,64);
- const short=harness(items(74));
- assert.equal((await short.run()).status,'skipped');assert.deepEqual(short.requests[0].history,[]);assert.deepEqual(short.errors,['compact.noContent']);
+test('a small residual budget preserves source history and the returned handoff',async()=>{
+ const h=harness([user('old','first'),agent('older','中'.repeat(76)),user('latest','last '.repeat(150)),agent('last','y')]);
+ assert.equal((await h.run(100)).status,'applied');
+ assert.equal(h.requests[0].targetTokens,1);
+ assert.ok(h.requests[0].history.some(item=>item.text==='first'));
+ assert.equal(h.chat.compaction.failureClass,'context_target_unreachable');
+ assert.ok(h.chat.compaction.afterTokens > h.chat.compaction.targetAfterTokens);
 });

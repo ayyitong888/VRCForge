@@ -82,6 +82,9 @@ export type AgentHistoryCompactionDetails = {
 
 export type CompactAgentHistoryResponse = AgentHistoryCompactionDetails & {
   nativeApplied?: boolean;
+  beforeTokens?: number;
+  afterTokens?: number;
+  targetAfterTokens?: number;
   status?: "no_content";
   ok: boolean;
   provider?: string;
