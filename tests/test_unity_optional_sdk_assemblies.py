@@ -66,17 +66,14 @@ def test_preflight_accepts_transitive_newtonsoft_from_packages_lock(tmp_path: Pa
     project = tmp_path / "Project"
     packages = project / "Packages"
     packages.mkdir(parents=True)
-    (packages / "manifest.json").write_text(
-        json.dumps(
-            {
-                "dependencies": {
-                    "com.vrchat.avatars": "3.7.0",
-                    "com.vrchat.base": "3.7.0",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
+    (packages / "manifest.json").write_text('{"dependencies": {}}', encoding="utf-8")
+    for package_id in ("com.vrchat.avatars", "com.vrchat.base"):
+        sdk = packages / package_id
+        sdk.mkdir()
+        (sdk / "package.json").write_text(
+            json.dumps({"name": package_id, "version": "3.7.0"}),
+            encoding="utf-8",
+        )
     (packages / "packages-lock.json").write_text(
         json.dumps(
             {

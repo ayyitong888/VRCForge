@@ -2,6 +2,10 @@
   "schema": "vrcforge.unitypackage-guid-manifest.v1",
   "entries": [
     {
+      "path": "Assets/VRCForge/Editor/PreviewAssetFileVersion.cs",
+      "guid": "41d44f188d172d2c99466ffb63e9c760"
+    },
+    {
       "path": "Assets/VRCForge/Editor/ModelImportSettingsTool.cs",
       "guid": "3039e7cd6be6a9bd1fe8f347f2eda30e"
     },
