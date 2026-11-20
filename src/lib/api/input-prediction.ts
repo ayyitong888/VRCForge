@@ -5,6 +5,7 @@ export type InputPredictionContext = {
   assistant_tail: string;
   provider: string;
   model: string;
+  reasoning_effort?: string;
 };
 
 export async function requestInputPrediction(endpoint: string, context: InputPredictionContext, signal: AbortSignal) {

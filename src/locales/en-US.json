@@ -395,6 +395,7 @@
     "inputPredictionDesc": "Suggest your next message after a reply. Press Tab to fill it in and edit before sending.",
     "inputPredictionModel": "Completion Model",
     "inputPredictionModelDefault": "Follow main model",
+    "inputPredictionReasoningDefault": "Automatic (lowest supported effort)",
     "inputPredictionModelDesc": "Choose a model from your current provider for input predictions. Leave it blank or select Follow main model to use your current chat model.",
     "startupAnimation": "Startup animation",
     "startupAnimationDesc": "Show the opening animation when VRCForge launches.",

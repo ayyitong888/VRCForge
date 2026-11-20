@@ -18,7 +18,7 @@ const bundle = await build({
             approvalId: history.approvalId, plan: { nextStep: history.nextStep, reply: history.reply,
               summary: "", completionGate: { reason: history.reason } },
           },
-        }],
+        }, ...(history.trailing || [])],
       }, history.questions || [], history.approvals || []);
       const prediction = useChatInputPrediction({ ...state, endpoint: location.origin, owner, latestReply });
       window.openHistory = setHistory;
@@ -137,10 +137,11 @@ try {
   assert.equal(await page.locator("output").textContent(), "");
   const restoreHistory = (response) => render(value => window.openHistory(value), response);
   const expectHistorySuggestion = async (response, expectedTail, expectedModel = "third") => {
-    const request = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"));
+    const request = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"), { timeout: 3000 });
     await restoreHistory(response);
     const payload = (await request).postDataJSON();
     assert.equal(payload.assistant_tail, expectedTail);
+    assert.deepEqual(payload.recent_user_messages, ["Check this"]);
     assert.equal(payload.model, expectedModel);
     await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
   };
@@ -152,10 +153,27 @@ try {
   const pendingQuestion = { id: "pending-question", status: "waiting_user", nextStep: "needs_user_action", reason: "question_pending",
     questions: [{ status: "pending", originTurnId: "pending-question", question: "Which option should we use?" }] };
   await expectHistorySuggestion(pendingQuestion, "Which option should we use?");
+  const skippedQuestion = { id: "skipped-question", nextStep: "needs_user_action", reason: "question_pending",
+    reply: "Close the editor and reply when it is ready.",
+    trailing: [{ id: "skip-record", type: "question_answer", selectedOptionId: "skip", text: "Skipped confirmation" }] };
+  await expectHistorySuggestion(skippedQuestion, skippedQuestion.reply);
   const modelSwitch = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"));
   await change({ model: "dedicated-completion-model" });
   assert.equal((await modelSwitch).postDataJSON().model, "dedicated-completion-model");
-  assert.equal(requests.length, 10);
+  assert.equal(requests.length, 11);
+  await change({ busy: true });
+  await restoreHistory({ ...skippedQuestion, id: "answered-question", trailing: [
+    { id: "answer-record", type: "question_answer", selectedOptionId: "custom", text: "Already closed" },
+  ] });
+  await change({ busy: false, model: "model-after-answer" });
+  await page.waitForFunction(() => document.querySelector("output").textContent === "");
+  assert.equal(requests.length, 11, "a newer user answer suppresses the previous model reply");
+  await expectHistorySuggestion(restored, restored.reply, "model-after-answer");
+  const effortChange = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"), { timeout: 3000 });
+  await change({ reasoningEffort: "high" });
+  const effortPayload = (await effortChange).postDataJSON();
+  assert.equal(effortPayload.reasoning_effort, "high");
+  assert.equal(effortPayload.model, "model-after-answer");
   console.log("PASS: completed and restored replies, user decisions, model changes, deduplication, typing and cancellation");
 } finally {
   finishSlow?.();

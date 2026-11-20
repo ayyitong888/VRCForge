@@ -7,6 +7,7 @@ import { SUPPORTED_LOCALES } from "../../i18n";
 import type { SettingsSection } from "../../lib/app-view";
 import { focusSettingsSearchResult, type SettingsSearchSelection } from "../../lib/settings-search";
 import { loadStartupAnimationEnabled, persistStartupAnimationEnabled, type RunningEnterAction } from "../../lib/app-preferences";
+import { fetchReasoningVariants } from "../../lib/api";
 import type {
   DiagnosticsStatus,
   DiagnosticLogLevel,
@@ -57,6 +58,10 @@ type SettingsWorkspaceProps = {
   inputPredictionEnabled: boolean;
   onInputPredictionChange: (enabled: boolean) => void;
   inputPredictionModel: string;
+  effectiveInputPredictionModel: string;
+  inputPredictionApiType: ProviderApiType;
+  inputPredictionReasoningEffort: string;
+  onInputPredictionReasoningChange: (effort: string) => void;
   inputPredictionProvider?: string;
   inputPredictionModelOptions: ProviderModelInfo[];
   onInputPredictionModelChange: (model: string) => void;
@@ -172,6 +177,10 @@ export function SettingsWorkspace({
   inputPredictionEnabled,
   onInputPredictionChange,
   inputPredictionModel = "",
+  effectiveInputPredictionModel = "",
+  inputPredictionApiType = "auto",
+  inputPredictionReasoningEffort = "",
+  onInputPredictionReasoningChange,
   inputPredictionProvider,
   inputPredictionModelOptions = [],
   onInputPredictionModelChange,
@@ -274,9 +283,31 @@ export function SettingsWorkspace({
   const [startupAnimationEnabled, setStartupAnimationEnabled] = useState(loadStartupAnimationEnabled);
   const [providerPanel, setProviderPanel] = useState<"subscription" | "api" | null>(null);
   const [activeChatGptModels, setActiveChatGptModels] = useState<ChatGptOAuthModel[]>([]);
-  const completionModelOptions = (inputPredictionProvider ?? apiProvider) === "chatgpt"
+  const completionProvider = inputPredictionProvider ?? apiProvider;
+  const completionModelOptions = completionProvider === "chatgpt"
     ? activeChatGptModels.map(({ id, name }) => ({ id, label: name }))
     : inputPredictionModelOptions;
+  const completionApiModel = inputPredictionModelOptions.find(({ id }) => id === effectiveInputPredictionModel);
+  const completionCatalogEfforts = completionApiModel?.reasoningEfforts;
+  const completionReasoningScope = JSON.stringify([endpoint, completionProvider, effectiveInputPredictionModel, inputPredictionApiType]);
+  const [completionVariants, setCompletionVariants] = useState<{ scope: string; efforts: string[] }>();
+  useEffect(() => {
+    if (activeSection !== "models" || !runtimeConnected || completionProvider === "chatgpt"
+      || !effectiveInputPredictionModel || completionCatalogEfforts !== undefined) return;
+    let active = true;
+    void fetchReasoningVariants(endpoint, {
+      provider: completionProvider, model: effectiveInputPredictionModel, api_type: inputPredictionApiType,
+    }).then(({ variants }) => {
+      if (active) setCompletionVariants({ scope: completionReasoningScope, efforts: variants.map(({ key }) => key) });
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [activeSection, completionCatalogEfforts, completionProvider, completionReasoningScope, effectiveInputPredictionModel,
+    endpoint, inputPredictionApiType, runtimeConnected]);
+  const completionReasoningOptions = completionProvider === "chatgpt"
+    ? activeChatGptModels.find(({ id }) => id === effectiveInputPredictionModel)?.supportedReasoningLevels?.map(({ effort }) => effort) ?? []
+    : completionCatalogEfforts !== undefined
+      ? [...new Set([...(completionApiModel?.reasoningDisabledSupported ? ["none"] : []), ...completionCatalogEfforts])]
+      : completionVariants?.scope === completionReasoningScope ? completionVariants.efforts : [];
   const visibleProvider = providerPanel ?? (apiProvider === "chatgpt" ? "subscription" : "api");
   useEffect(() => setProviderPanel(null), [apiProvider]);
   const currentPermissionVisual = permissionVisualState(permission);
@@ -671,6 +702,21 @@ export function SettingsWorkspace({
                   className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
                 />
               )}
+              <label className="mb-2 mt-4 block text-sm font-medium" htmlFor="settings-input-prediction-reasoning">
+                {t("provider.reasoningEffort")}
+              </label>
+              <select
+                id="settings-input-prediction-reasoning"
+                value={completionReasoningOptions.includes(inputPredictionReasoningEffort) ? inputPredictionReasoningEffort : ""}
+                onChange={(event) => onInputPredictionReasoningChange(event.currentTarget.value)}
+                disabled={!completionReasoningOptions.length}
+                className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:opacity-60"
+              >
+                <option value="">{t("settings.inputPredictionReasoningDefault")}</option>
+                {completionReasoningOptions.map((level) => (
+                  <option key={level} value={level}>{t(`provider.reasoning_${level}`, { defaultValue: level })}</option>
+                ))}
+              </select>
             </div>
           </details>
         </section>

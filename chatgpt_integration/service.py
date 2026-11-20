@@ -304,6 +304,14 @@ class ChatGPTAuthService:
         with self._state_lock:
             return self._model_reasoning_efforts.get(account_id, {}).get(model)
 
+    def model_reasoning_efforts(self, account_id: str, model: str) -> frozenset[str] | None:
+        """Resolve capabilities, loading the account catalog after a cold start."""
+        with self._state_lock:
+            if account_id in self._model_reasoning_efforts:
+                return self._model_reasoning_efforts[account_id].get(model)
+        self.models(account_id)
+        return self.cached_model_reasoning_efforts(account_id, model)
+
     def logout(self, account_id: str) -> dict[str, bool]:
         with self._state_lock:
             pending = self._pending

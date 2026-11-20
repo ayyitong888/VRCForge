@@ -13,6 +13,7 @@ from fastapi import FastAPI
 import chat_input_prediction as prediction
 from chatgpt_integration import service as chatgpt_service
 from provider_configuration_service import ProviderApiConfig
+from tests.test_provider_configuration_service import _owner, _real_provider_policy
 
 
 START = "/api/app/chat/input-prediction"
@@ -36,24 +37,25 @@ def test_validates_raw_suggestions():
         assert prediction.parse_suggestion(invalid) is None
 
 
-def test_chatgpt_prediction_uses_lowest_advertised_effort_or_suppresses(monkeypatch):
-    expected_model = "gpt-6.1-sol"
+def test_chatgpt_prediction_uses_lowest_advertised_effort_or_suppresses(monkeypatch, tmp_path):
+    main_model = "gpt-5.6-terra"
+    prediction_model = "gpt-6.1-terra"
     account_id = "fake-account"
     advertised = {}
     calls = []
 
-    def cached_model_reasoning_efforts(account, model):
+    def model_reasoning_efforts(account, model):
         assert account == account_id
-        assert model == expected_model
         return advertised.get(model)
 
-    auth = SimpleNamespace(cached_model_reasoning_efforts=cached_model_reasoning_efforts)
+    auth = SimpleNamespace(model_reasoning_efforts=model_reasoning_efforts)
     monkeypatch.setattr(chatgpt_service, "get_chatgpt_auth_service", lambda: auth)
-    config = ProviderApiConfig("chatgpt", account_id, "https://api.openai.com/v1", expected_model, "responses", "high")
-    configuration = SimpleNamespace(bind_runtime_config=lambda **kwargs: nullcontext(config))
+    config = ProviderApiConfig("chatgpt", account_id, "https://api.openai.com/v1", main_model, "responses", "high")
+    configuration = _owner(tmp_path / "providers.json", policy=_real_provider_policy())
+    configuration.save_api_config(config)
 
-    async def request_text(bound, settings, prompt, resolve_vertex):
-        calls.append((bound.model, bound.thinking_level))
+    async def request_text(bound, settings, prompt, resolve_vertex, *, explicit_reasoning):
+        calls.append((bound.model, bound.thinking_level, explicit_reasoning))
         return "继续"
 
     monkeypatch.setattr(prediction, "request_prediction_text", request_text)
@@ -62,23 +64,32 @@ def test_chatgpt_prediction_uses_lowest_advertised_effort_or_suppresses(monkeypa
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
-            async def predict(messages=None):
+            async def predict(model="", messages=None, reasoning_effort=""):
                 response = await client.post(START, json={
                     "request_id": str(uuid4()), "recent_user_messages": ["继续"] if messages is None else messages,
-                    "assistant_tail": "现已完成第一轮。",
+                    "assistant_tail": "现已完成第一轮。", "model": model, "reasoning_effort": reasoning_effort,
                 })
                 return response.json()["suggestion"]
 
             assert await predict() is None
             assert calls == []
-            advertised[expected_model] = {"high", "low", "xhigh"}
+            advertised[main_model] = {"high", "none", "low"}
             assert await predict() == "继续"
-            advertised[expected_model] = {"high", "none", "low"}
-            assert await predict() == "继续"
-            assert await predict([]) == "继续"
-            assert calls == [(expected_model, "low"), (expected_model, "none"), (expected_model, "none")]
+            assert await predict(prediction_model) is None
+            advertised[prediction_model] = {"high", "low", "xhigh"}
+            assert await predict(prediction_model, messages=[]) == "继续"
+            assert await predict(prediction_model, reasoning_effort="high") == "继续"
+            assert await predict(prediction_model, reasoning_effort="none") is None
+            assert await predict(prediction_model, reasoning_effort="made-up") is None
+            assert calls == [
+                (main_model, "none", False), (prediction_model, "low", False),
+                (prediction_model, "high", True),
+            ]
 
     asyncio.run(run())
+    with configuration.bind_runtime_config() as main:
+        assert main is config
+        assert main.thinking_level == "high"
 
 
 def test_private_prediction_routes_cancel_before_start_and_abort_upstream(monkeypatch):
@@ -151,6 +162,7 @@ def test_private_prediction_routes_cancel_before_start_and_abort_upstream(monkey
 def test_prediction_reuses_tls_context_without_sharing_http_clients(monkeypatch):
     created_contexts = []
     created_clients = []
+    payloads = []
     original_client = httpx.AsyncClient
 
     def create_ssl_context(*, trust_env):
@@ -158,20 +170,26 @@ def test_prediction_reuses_tls_context_without_sharing_http_clients(monkeypatch)
         created_contexts.append((trust_env, context))
         return context
 
+    def capture_payload(request):
+        payloads.append(json.loads(request.content))
+        return httpx.Response(400)
+
     class PredictionClient(original_client):
         def __init__(self, **kwargs):
-            super().__init__(transport=httpx.MockTransport(lambda _: httpx.Response(400)), **kwargs)
+            super().__init__(transport=httpx.MockTransport(capture_payload), **kwargs)
             created_clients.append((self, kwargs["trust_env"], kwargs.get("verify", True)))
 
     async def run():
-        async def request(base_url):
-            config = ProviderApiConfig("openai", "test-key", base_url, "gpt-5.2", "responses", "none")
+        async def request(base_url, effort="none"):
+            config = ProviderApiConfig("openai", "test-key", base_url, "gpt-5.2", "responses", effort)
             with pytest.raises(openai.BadRequestError):
-                await prediction.request_prediction_text(config, SimpleNamespace(), "Continue", None)
+                await prediction.request_prediction_text(
+                    config, SimpleNamespace(), "Continue", None, explicit_reasoning=effort == "high",
+                )
 
         monkeypatch.setenv("SSL_CERT_FILE", "test-ca-a")
         await request("https://example.invalid/v1")
-        await request("https://example.invalid/v1")
+        await request("https://example.invalid/v1", effort="high")
         await request("http://localhost/v1")
         monkeypatch.setenv("SSL_CERT_FILE", "test-ca-b")
         await request("https://example.invalid/v1")
@@ -191,3 +209,6 @@ def test_prediction_reuses_tls_context_without_sharing_http_clients(monkeypatch)
     ]
     assert len({id(client) for client, _, _ in created_clients}) == 5
     assert all(client.is_closed for client, _, _ in created_clients)
+    assert payloads[0]["reasoning"] == {"effort": "none"}
+    assert payloads[1]["reasoning"] == {"effort": "high"}
+    assert payloads[1]["max_output_tokens"] > payloads[0]["max_output_tokens"]

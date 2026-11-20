@@ -393,6 +393,7 @@
     "inputPredictionDesc": "回复结束后预测你可能想说的话。按 Tab 填入，编辑后再发送。",
     "inputPredictionModel": "补全模型",
     "inputPredictionModelDefault": "跟随主模型",
+    "inputPredictionReasoningDefault": "自动（使用最低支持强度）",
     "inputPredictionModelDesc": "为输入预测选择当前服务商的模型。留空或选择跟随主模型时，使用当前对话模型。",
     "startupAnimation": "启动动画",
     "startupAnimationDesc": "打开 VRCForge 时播放开场动画。",

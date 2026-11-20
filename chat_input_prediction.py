@@ -26,7 +26,9 @@ from vrchat_blendshape_agent import (
     build_gemini_generate_config,
     build_openai_compatible_request_payload,
     normalize_provider_api_type,
+    normalize_reasoning_effort,
     reasoning_effort_variants,
+    reasoning_thinking_budget,
 )
 
 
@@ -60,6 +62,7 @@ class PredictInput(CancelPrediction):
     assistant_tail: str
     provider: str = ""
     model: str = ""
+    reasoning_effort: str = ""
 
 
 def parse_suggestion(raw: str) -> str | None:
@@ -79,19 +82,28 @@ def parse_suggestion(raw: str) -> str | None:
     return suggestion
 
 
-def prediction_reasoning_effort(
+async def prediction_reasoning_effort(
     config: ProviderApiConfig,
     cached_catalog_efforts: Callable[[ProviderApiConfig], list[str] | None],
+    requested: str,
 ) -> str | None:
     if config.provider == "chatgpt":
         from chatgpt_integration.service import get_chatgpt_auth_service
 
-        advertised = get_chatgpt_auth_service().cached_model_reasoning_efforts(config.api_key, config.model)
-        # Account model identifiers are opaque. Without capabilities we cannot
-        # choose an explicit effort, so do not send a background model request.
-        return next((effort for effort in _REASONING_ORDER if effort in (advertised or ())), None)
-    advertised = cached_catalog_efforts(config)
-    supported = advertised if advertised is not None else reasoning_effort_variants(config.provider, config.model, config.api_type)
+        supported = await asyncio.to_thread(
+            get_chatgpt_auth_service().model_reasoning_efforts, config.api_key, config.model,
+        )
+        if not supported:
+            return None
+    else:
+        advertised = cached_catalog_efforts(config)
+        supported = advertised if advertised is not None else reasoning_effort_variants(
+            config.provider, config.model, config.api_type,
+        )
+
+    if requested:
+        selected = normalize_reasoning_effort(requested)
+        return selected if selected and selected in supported else None
     return next((effort for effort in _REASONING_ORDER if effort in supported), "")
 
 
@@ -109,13 +121,16 @@ async def request_prediction_text(
     settings: Settings,
     prompt: str,
     resolve_vertex: Callable[[str], tuple[str, str]],
+    *,
+    explicit_reasoning: bool = False,
 ) -> str:
     """Run exactly one tool-free async provider request, scoped to this prediction."""
     import httpx
 
     _, protocol = normalize_provider_api_type(config.provider, config.model, config.api_type)
     settings.llm_system_instruction = _INSTRUCTIONS
-    settings.llm_max_output_tokens = _OUTPUT_TOKENS
+    reasoning_budget = reasoning_thinking_budget(config.thinking_level) if explicit_reasoning else None
+    settings.llm_max_output_tokens = _OUTPUT_TOKENS + (reasoning_budget or 0)
     host = urlsplit(config.base_url or "").hostname or ""
     try:
         local_model = ip_address(host).is_loopback
@@ -157,7 +172,7 @@ async def request_prediction_text(
             payload = build_anthropic_request_payload(settings, prompt)
             # Disable manual thinking for a short, tool-free prediction. Its
             # provider minimum budget exceeds this request's entire output.
-            if config.provider == "anthropic":
+            if config.provider == "anthropic" and not explicit_reasoning:
                 payload.pop("thinking", None)
             client = AsyncAnthropic(api_key=config.api_key, base_url=base_url, http_client=transport, max_retries=0)
             result = await client.messages.create(**payload, stream=False)
@@ -184,7 +199,7 @@ async def request_prediction_text(
                 "model": config.model,
                 "input": [{"role": "user", "content": prompt}],
                 "instructions": _INSTRUCTIONS,
-                "max_output_tokens": _OUTPUT_TOKENS,
+                "max_output_tokens": settings.llm_max_output_tokens,
                 "store": False,
             }
             if config.thinking_level:
@@ -233,12 +248,17 @@ def build_input_prediction_router(
             ensure_ascii=False,
         )
         try:
-            with configuration.bind_runtime_config(provider=body.provider, model=body.model) as config:
-                effort = prediction_reasoning_effort(config, cached_catalog_efforts)
+            with configuration.bind_runtime_config(
+                provider=body.provider, model=body.model, inherit_reasoning=False,
+            ) as config:
+                requested = body.reasoning_effort.strip()
+                effort = await prediction_reasoning_effort(config, cached_catalog_efforts, requested)
                 if effort is None:
                     return None
                 config = replace(config, thinking_level=effort)
-                raw = await request_prediction_text(config, settings_factory(config), prompt, resolve_vertex)
+                raw = await request_prediction_text(
+                    config, settings_factory(config), prompt, resolve_vertex, explicit_reasoning=bool(requested),
+                )
                 return parse_suggestion(raw)
         except Exception:
             # Prediction is opportunistic and never creates an error chat turn.

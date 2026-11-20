@@ -393,6 +393,7 @@
     "inputPredictionDesc": "返信後に次のメッセージの候補を表示します。Tab で入力欄に反映し、編集してから送信できます。",
     "inputPredictionModel": "補完モデル",
     "inputPredictionModelDefault": "メインモデルに従う",
+    "inputPredictionReasoningDefault": "自動（対応する最低の推論強度）",
     "inputPredictionModelDesc": "入力予測に使うモデルを現在のプロバイダーから選びます。空欄にするか「メインモデルに従う」を選ぶと、現在のチャットモデルを使います。",
     "startupAnimation": "起動アニメーション",
     "startupAnimationDesc": "VRCForge を開くときにオープニングアニメーションを再生します。",

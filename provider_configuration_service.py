@@ -197,12 +197,12 @@ class ProviderConfigurationService:
                 self._configuration_change = None
 
     @contextmanager
-    def bind_runtime_config(self, *, provider: str = "", model: str = ""):
+    def bind_runtime_config(self, *, provider: str = "", model: str = "", inherit_reasoning: bool = True):
         """Bind before turn admission; every exit releases this process-only lease."""
         with self._lock:
             if self._configuration_change == "account":
                 raise ProviderConfigurationBusyError("Model settings are being changed. Try again when the change finishes.")
-            config = self.resolve_session_config(provider=provider, model=model)
+            config = self.resolve_session_config(provider=provider, model=model, inherit_reasoning=inherit_reasoning)
             self._runtime_bindings += 1
         try:
             yield config
@@ -234,7 +234,9 @@ class ProviderConfigurationService:
                 self._api_config = self._load_initial_api_config_locked()
             return self._api_config
 
-    def resolve_session_config(self, *, provider: str = "", model: str = "") -> ProviderApiConfig:
+    def resolve_session_config(
+        self, *, provider: str = "", model: str = "", inherit_reasoning: bool = True,
+    ) -> ProviderApiConfig:
         """Resolve one turn's choice without changing configured defaults.
 
         A model-only choice retains its provider endpoint and credential (including
@@ -242,6 +244,8 @@ class ProviderConfigurationService:
         key and saved endpoint; it must never borrow the current provider's URL.
         """
         current = self.current_api_config()
+        if not inherit_reasoning:
+            current = replace(current, thinking_level="")
         selected_provider = self._policy.normalize_provider_name(provider) if str(provider or "").strip() else current.provider
         selected_model = str(model or "").strip()
         same_provider = selected_provider == current.provider

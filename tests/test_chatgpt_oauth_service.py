@@ -471,6 +471,12 @@ def test_access_token_refresh_is_serialized_and_models_keep_visible_order(tmp_pa
                 {"id": "ignored", "name": "Malformed", "visibility": "list"},
             ]
         }
+        assert service1.cached_model_reasoning_efforts(result["accountId"], "first") is None
+        assert service1.model_reasoning_efforts(result["accountId"], "first") == {"low", "max"}
+        catalog_calls = len(fake.get_calls)
+        assert service1.model_reasoning_efforts(result["accountId"], "second") is None
+        assert service1.model_reasoning_efforts(result["accountId"], "missing") is None
+        assert len(fake.get_calls) == catalog_calls
         assert service1.models(result["accountId"]) == [
             {"id": "first", "name": "First", "contextWindow": 123456, "maxOutputTokens": 4096,
              "supportedReasoningLevels": [{"effort": "low", "description": "Fast"}, {"effort": "max", "description": "Maximum"}],

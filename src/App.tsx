@@ -119,8 +119,10 @@ import {
   loadRunningEnterAction,
   loadInputPredictionEnabled,
   loadInputPredictionModels,
+  loadInputPredictionReasoning,
   persistInputPredictionEnabled,
   persistInputPredictionModels,
+  persistInputPredictionReasoning,
   loadThemePreference,
   persistAutomaticUpdateCheckEnabled,
   persistRunningEnterAction,
@@ -359,6 +361,7 @@ export default function App() {
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [inputPredictionEnabled, setInputPredictionEnabled] = useState(loadInputPredictionEnabled);
   const [inputPredictionModels, setInputPredictionModels] = useState(loadInputPredictionModels);
+  const [inputPredictionReasoning, setInputPredictionReasoning] = useState(loadInputPredictionReasoning);
   const [questionPanelTarget, setQuestionPanelTarget] = useState<HTMLDivElement | null>(null);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
   const actionErrorMessage = useCallback((key: string, cause: unknown, values?: Record<string, string>) => {
@@ -1205,16 +1208,21 @@ export default function App() {
   const sending = Boolean(selectedForegroundTurn || selectedCompaction || activeRuntimeCancelTarget);
   const predictionProvider = normalizeProviderForContext(providerSnapshot.provider);
   const inputPredictionModel = inputPredictionModels[predictionProvider] || "";
-  const latestPredictionReply = useMemo(() => activeChat && inputPredictionEnabled
-    ? predictionTurnForChat(endpoint, activeChat, scopedAgentQuestions, pendingApprovalItems) : undefined,
-  [activeChat, endpoint, inputPredictionEnabled, scopedAgentQuestions, pendingApprovalItems]);
+  const effectivePredictionModel = inputPredictionModel || providerSnapshot.model;
+  const predictionReasoningKey = JSON.stringify([predictionProvider, effectivePredictionModel]);
+  const predictionReasoningEffort = inputPredictionReasoning[predictionReasoningKey] || "";
+  const predictionChat = activeChat ?? displayChat;
+  const latestPredictionReply = useMemo(() => predictionChat && inputPredictionEnabled
+    ? predictionTurnForChat(endpoint, predictionChat, scopedAgentQuestions, pendingApprovalItems) : undefined,
+  [predictionChat, endpoint, inputPredictionEnabled, scopedAgentQuestions, pendingApprovalItems]);
   const inputPrediction = useChatInputPrediction({
     endpoint,
-    owner: chatInputPredictionOwner(endpoint, activeChatId, activeChat?.sessionId || ""),
+    owner: chatInputPredictionOwner(endpoint, activeChatId, predictionChat?.sessionId || ""),
     provider: providerSnapshot.provider,
-    model: inputPredictionModel || providerSnapshot.model,
+    model: effectivePredictionModel,
+    reasoningEffort: predictionReasoningEffort,
     eligible: inputPredictionEnabled && activeView === "chat" && runtimeConnected && providerConfigured
-      && Boolean(activeChat?.sessionId) && !visibleQueued.length
+      && Boolean(predictionChat?.sessionId) && !visibleQueued.length
       && !attachments.length && !attachmentsLoading && !pendingReplyQuestionId && !editingMessage,
     busy: Boolean(activeChatPending || sending),
     hasDraft: Boolean(input),
@@ -4433,6 +4441,16 @@ export default function App() {
               inputPredictionEnabled={inputPredictionEnabled}
               inputPredictionProvider={predictionProvider}
               inputPredictionModel={inputPredictionModel}
+              effectiveInputPredictionModel={effectivePredictionModel}
+              inputPredictionApiType={apiConfig?.api_type ?? apiConfig?.apiType ?? "auto"}
+              inputPredictionReasoningEffort={predictionReasoningEffort}
+              onInputPredictionReasoningChange={(effort) => {
+                const next = { ...inputPredictionReasoning };
+                if (effort) next[predictionReasoningKey] = effort;
+                else delete next[predictionReasoningKey];
+                setInputPredictionReasoning(next);
+                persistInputPredictionReasoning(next);
+              }}
               inputPredictionModelOptions={modelOptionsScope
                 && normalizeProviderForContext(modelOptionsScope.provider) === predictionProvider
                 && modelOptionsScope.baseUrl.trim() === savedBaseUrl.trim() ? modelOptions : []}

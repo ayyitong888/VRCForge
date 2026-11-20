@@ -30,7 +30,7 @@ export function chatInputPredictionOwner(endpoint: string, chatId: string, sessi
 export function recentPredictionInputs(items: ConversationItem[], currentInputId?: string, currentText?: string) {
   const legacyGoalInputs = legacyGoalInputIds(items);
   return items.flatMap((item) => {
-    if (item.type === "question_answer") return item.text.trim() ? [item.text] : [];
+    if (item.type === "question_answer") return item.selectedOptionId !== "skip" && item.text.trim() ? [item.text] : [];
     if (item.type !== "user" || item.goalDeliveryId || item.forwardedByAgent || item.forwardedFrom
       || legacyGoalInputs.has(item.id) || item.composerQueued || item.queueStatus) return [];
     if (item.id === currentInputId) return currentText?.trim() ? [currentText] : [];
@@ -50,7 +50,7 @@ export function predictionTurnForChat(
   approvals: readonly AgentApproval[],
 ): CompletedPredictionTurn | undefined {
   const latest = [...chat.items].reverse().find((item) => item.type === "agent" || item.type === "streaming"
-    || item.type === "user" || item.type === "question_answer");
+    || item.type === "user" || (item.type === "question_answer" && item.selectedOptionId !== "skip"));
   if (latest?.type !== "agent") return undefined;
   const response = latest.response;
   const turnId = response.turnId || response.turn_id;
@@ -90,14 +90,15 @@ type PredictionOptions = {
   owner: string;
   provider: string;
   model: string;
+  reasoningEffort?: string;
   eligible: boolean;
   busy: boolean;
   hasDraft: boolean;
   latestReply?: CompletedPredictionTurn;
 };
 
-export function useChatInputPrediction({ endpoint, owner, provider, model, eligible, busy, hasDraft, latestReply }: PredictionOptions) {
-  const route = JSON.stringify([owner, provider, model]);
+export function useChatInputPrediction({ endpoint, owner, provider, model, reasoningEffort, eligible, busy, hasDraft, latestReply }: PredictionOptions) {
+  const route = JSON.stringify([owner, provider, model, reasoningEffort]);
   const [candidate, setCandidate] = useState<(CompletedPredictionTurn & { route: string }) | null>(null);
   const [display, setDisplay] = useState<{ owner: string; text: string } | null>(null);
   const attempted = useRef<CompletedPredictionTurn | null>(null);
@@ -130,7 +131,7 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, eligi
     lastOffered.current = "";
     setCandidate(null);
     setDisplay(null);
-  }, [owner, provider, model, eligible]);
+  }, [owner, provider, model, reasoningEffort, eligible]);
 
   useLayoutEffect(() => {
     if (busy) setDisplay(null);
@@ -138,7 +139,7 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, eligi
 
   useLayoutEffect(() => {
     if (latestReply && eligible && !busy && !hasDraft) offer(latestReply, generation.current);
-  }, [latestReply, eligible, busy, hasDraft, owner, provider, model]);
+  }, [latestReply, eligible, busy, hasDraft, owner, provider, model, reasoningEffort]);
 
   useLayoutEffect(() => {
     if (!candidate || candidate.route !== route || attempted.current === candidate) return;
@@ -151,7 +152,7 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, eligi
     setDisplay(null);
     const controller = new AbortController();
     pending.current = controller;
-    void requestInputPrediction(endpoint, { ...candidate.context, provider, model }, controller.signal).then((result) => {
+    void requestInputPrediction(endpoint, { ...candidate.context, provider, model, reasoning_effort: reasoningEffort || undefined }, controller.signal).then((result) => {
       if (result?.suggestion && !controller.signal.aborted) {
         setDisplay({ owner, text: result.suggestion });
       }
@@ -159,7 +160,7 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, eligi
       if (pending.current === controller) pending.current = null;
     });
     return () => controller.abort();
-  }, [candidate, endpoint, eligible, busy, hasDraft, owner, provider, model, route]);
+  }, [candidate, endpoint, eligible, busy, hasDraft, owner, provider, model, reasoningEffort, route]);
 
   function offer(turn: CompletedPredictionTurn, submittedGeneration: number) {
     const identity = JSON.stringify([turn.owner, turn.turnId]);

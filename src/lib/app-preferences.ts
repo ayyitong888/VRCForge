@@ -27,6 +27,7 @@ const STARTUP_ANIMATION_KEY = "vrcforge_startup_animation";
 const RUNNING_ENTER_ACTION_KEY = "vrcforge_running_enter_action";
 const INPUT_PREDICTION_KEY = "vrcforge_input_prediction";
 const INPUT_PREDICTION_MODELS_KEY = "vrcforge_input_prediction_models";
+const INPUT_PREDICTION_REASONING_KEY = "vrcforge_input_prediction_reasoning";
 
 export function loadInputPredictionEnabled(): boolean {
   try {
@@ -44,9 +45,9 @@ export function persistInputPredictionEnabled(enabled: boolean): void {
   }
 }
 
-export function loadInputPredictionModels(): Record<string, string> {
+function loadInputPredictionChoices(key: string): Record<string, string> {
   try {
-    const parsed: unknown = JSON.parse(window.localStorage.getItem(INPUT_PREDICTION_MODELS_KEY) || "{}");
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(key) || "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     return Object.fromEntries(Object.entries(parsed)
       .filter((entry): entry is [string, string] => typeof entry[1] === "string" && Boolean(entry[1].trim()))
@@ -56,13 +57,18 @@ export function loadInputPredictionModels(): Record<string, string> {
   }
 }
 
-export function persistInputPredictionModels(models: Record<string, string>): void {
+function persistInputPredictionChoices(key: string, choices: Record<string, string>): void {
   try {
-    window.localStorage.setItem(INPUT_PREDICTION_MODELS_KEY, JSON.stringify(models));
+    window.localStorage.setItem(key, JSON.stringify(choices));
   } catch {
-    // The model preference still applies to the current window.
+    // The preference still applies to the current window.
   }
 }
+
+export const loadInputPredictionModels = () => loadInputPredictionChoices(INPUT_PREDICTION_MODELS_KEY);
+export const persistInputPredictionModels = (models: Record<string, string>) => persistInputPredictionChoices(INPUT_PREDICTION_MODELS_KEY, models);
+export const loadInputPredictionReasoning = () => loadInputPredictionChoices(INPUT_PREDICTION_REASONING_KEY);
+export const persistInputPredictionReasoning = (reasoning: Record<string, string>) => persistInputPredictionChoices(INPUT_PREDICTION_REASONING_KEY, reasoning);
 
 export const DEFAULT_LEFT_PANE_WIDTH = 280;
 export const DEFAULT_RIGHT_PANE_WIDTH = 320;
