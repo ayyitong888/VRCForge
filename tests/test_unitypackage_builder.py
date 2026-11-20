@@ -11,6 +11,15 @@ from pathlib import Path
 import pytest
 
 
+def test_preview_file_version_available_on_first_upgrade_compile():
+    # Unity recompiles previously imported scripts before discovering new GUIDs.
+    editor = Path(__file__).resolve().parents[1] / "Assets/VRCForge/Editor"
+    old_scripts = [editor / "SceneObjectCopyCore.cs", editor / "TextureImportSettingsTool.cs"]
+    first_pass = "\n".join(script.read_text(encoding="utf-8-sig") for script in old_scripts)
+    assert "PreviewAssetFileVersion.Read(" in first_pass
+    assert re.search(r"class PreviewAssetFileVersion\s*\{\s*internal static string Read\(", first_pass)
+
+
 PUBLISHED_1_3_6_COMMON_GUIDS = {
     "Assets/VRCForge": "e5a9931c984c4fa0bffe353deb4f5b32",
     "Assets/VRCForge/Editor": "e953c1262ab344c09d874ea224a23ce8",
