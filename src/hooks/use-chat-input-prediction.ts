@@ -42,7 +42,7 @@ export function recentPredictionInputs(items: ConversationItem[], currentInputId
   }).slice(-20);
 }
 
-export function useChatInputPrediction(endpoint: string, owner: string, eligible: boolean) {
+export function useChatInputPrediction(endpoint: string, owner: string, eligible: boolean, hasDraft: boolean) {
   const [candidate, setCandidate] = useState<CompletedPredictionTurn | null>(null);
   const [display, setDisplay] = useState<{ owner: string; text: string } | null>(null);
   const attempted = useRef<CompletedPredictionTurn | null>(null);
@@ -56,20 +56,29 @@ export function useChatInputPrediction(endpoint: string, owner: string, eligible
     ownerObserved.current = { owner, at: Date.now() };
   }, [owner]);
 
-  const dismiss = () => {
+  const onInputActivity = () => {
     generation.current += 1;
     lastComposerActivity.current = Date.now();
     pending.current?.abort();
+    return generation.current;
+  };
+
+  const dismiss = () => {
+    const revision = onInputActivity();
     setCandidate(null);
     setDisplay(null);
-    return generation.current;
+    return revision;
   };
 
   useLayoutEffect(() => {
     setDisplay(null);
+  }, [owner, eligible]);
+
+  useLayoutEffect(() => {
     if (!candidate || attempted.current === candidate) return;
     attempted.current = candidate;
-    if (!eligible || candidate.owner !== owner) return;
+    if (!eligible || hasDraft || candidate.owner !== owner) return;
+    setDisplay(null);
     const controller = new AbortController();
     pending.current = controller;
     void requestInputPrediction(endpoint, candidate.context, controller.signal).then((result) => {
@@ -80,7 +89,7 @@ export function useChatInputPrediction(endpoint: string, owner: string, eligible
       if (pending.current === controller) pending.current = null;
     });
     return () => controller.abort();
-  }, [candidate, endpoint, eligible, owner]);
+  }, [candidate, endpoint, eligible, hasDraft, owner]);
 
   function offer(turn: CompletedPredictionTurn, submittedGeneration: number) {
     const identity = JSON.stringify([turn.owner, turn.turnId]);
@@ -123,6 +132,7 @@ export function useChatInputPrediction(endpoint: string, owner: string, eligible
 
   return {
     suggestion: eligible && display?.owner === owner ? display.text : undefined,
+    onInputActivity,
     dismiss,
     offer,
     offerAfterResume,

@@ -1,10 +1,13 @@
 import asyncio
 import json
+import ssl
 from contextlib import nullcontext
 from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
+import openai
+import pytest
 from fastapi import FastAPI
 
 import chat_input_prediction as prediction
@@ -142,3 +145,48 @@ def test_private_prediction_routes_cancel_before_start_and_abort_upstream(monkey
                 assert len(prompt["assistant_tail"]) == 2000
 
     asyncio.run(run())
+
+
+def test_prediction_reuses_tls_context_without_sharing_http_clients(monkeypatch):
+    created_contexts = []
+    created_clients = []
+    original_client = httpx.AsyncClient
+
+    def create_ssl_context(*, trust_env):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        created_contexts.append((trust_env, context))
+        return context
+
+    class PredictionClient(original_client):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(lambda _: httpx.Response(400)), **kwargs)
+            created_clients.append((self, kwargs["trust_env"], kwargs.get("verify", True)))
+
+    async def run():
+        async def request(base_url):
+            config = ProviderApiConfig("openai", "test-key", base_url, "gpt-5.2", "responses", "none")
+            with pytest.raises(openai.BadRequestError):
+                await prediction.request_prediction_text(config, SimpleNamespace(), "Continue", None)
+
+        monkeypatch.setenv("SSL_CERT_FILE", "test-ca-a")
+        await request("https://example.invalid/v1")
+        await request("https://example.invalid/v1")
+        await request("http://localhost/v1")
+        monkeypatch.setenv("SSL_CERT_FILE", "test-ca-b")
+        await request("https://example.invalid/v1")
+        await request("http://localhost/v1")
+
+    prediction._prediction_ssl_context.cache_clear()
+    try:
+        monkeypatch.setattr(httpx, "create_ssl_context", create_ssl_context)
+        monkeypatch.setattr(httpx, "AsyncClient", PredictionClient)
+        asyncio.run(run())
+    finally:
+        prediction._prediction_ssl_context.cache_clear()
+
+    assert [trust_env for trust_env, _ in created_contexts] == [True, False, True]
+    assert [(trust_env, context) for _, trust_env, context in created_clients] == [
+        created_contexts[index] for index in (0, 0, 1, 2, 1)
+    ]
+    assert len({id(client) for client, _, _ in created_clients}) == 5
+    assert all(client.is_closed for client, _, _ in created_clients)

@@ -1203,8 +1203,9 @@ export default function App() {
     chatInputPredictionOwner(endpoint, activeChatId, activeChat?.sessionId || "", providerSnapshot.provider, providerSnapshot.model),
     inputPredictionEnabled && activeView === "chat" && runtimeConnected && providerConfigured
       && Boolean(activeChat?.sessionId) && !activeChatPending && !sending && !visibleQueued.length
-      && !input && !attachments.length && !attachmentsLoading && !pendingReplyQuestionId && !editingMessage
+      && !attachments.length && !attachmentsLoading && !pendingReplyQuestionId && !editingMessage
       && !pendingApprovalItems.length && !hasUnresolvedRuntimeState(activeChatId, activeChat?.sessionId || ""),
+    Boolean(input),
   );
   onPredictionResumeRef.current = (event, chatId) => {
     if (!inputPredictionEnabled || activeView !== "chat" || activeChatId !== chatId) return;
@@ -4534,8 +4535,9 @@ export default function App() {
               conversationPending={activeChatPending}
               conversationPendingMessage={t("common.loading")}
               input={input}
-              setInput={(value) => { inputPrediction.dismiss(); setInput(value); }}
+              setInput={(value) => { inputPrediction.onInputActivity(); setInput(value); }}
               inputSuggestion={inputPrediction.suggestion}
+              onInputActivity={inputPrediction.onInputActivity}
               onDismissInputSuggestion={inputPrediction.dismiss}
               sending={sending}
               stopRequested={Boolean(selectedForeground?.stopRequested) || activeChat?.items.some((item) => item.type === "streaming" && item.stopRequested)}

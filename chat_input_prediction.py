@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from functools import lru_cache
 from ipaddress import ip_address
+from ssl import SSLContext
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -92,6 +95,15 @@ def prediction_reasoning_effort(
     return next((effort for effort in _REASONING_ORDER if effort in supported), "")
 
 
+@lru_cache(maxsize=4)
+def _prediction_ssl_context(trust_env: bool, certificate_environment: tuple[str | None, ...]) -> SSLContext:
+    import httpx
+
+    # The environment paths key the cache. HTTPX applies its usual CA selection
+    # and TLS verification once, then uses the context for all proxy mounts.
+    return httpx.create_ssl_context(trust_env=trust_env)
+
+
 async def request_prediction_text(
     config: ProviderApiConfig,
     settings: Settings,
@@ -110,7 +122,12 @@ async def request_prediction_text(
     except ValueError:
         local_model = host.rstrip(".").lower() == "localhost"
     # A system proxy can keep a local provider running after the caller disconnects.
-    async with httpx.AsyncClient(timeout=PREDICTION_TIMEOUT, follow_redirects=False, trust_env=not local_model) as transport:
+    trust_env = not local_model
+    certificate_environment = (os.getenv("SSL_CERT_FILE"), os.getenv("SSL_CERT_DIR")) if trust_env else ()
+    ssl_context = _prediction_ssl_context(trust_env, certificate_environment)
+    async with httpx.AsyncClient(
+        timeout=PREDICTION_TIMEOUT, follow_redirects=False, trust_env=trust_env, verify=ssl_context,
+    ) as transport:
         if protocol == "generate_content":
             from google import genai
             from google.genai import types

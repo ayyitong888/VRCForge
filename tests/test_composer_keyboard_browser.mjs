@@ -19,10 +19,13 @@ const bundle = await build({
       const [sending, setSending] = useState(true);
       const [queueAllowed, setAllowed] = useState(true);
       const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
+      const [suggestion, setSuggestion] = useState();
       window.setSending = setSending;
       window.setAllowed = setAllowed;
+      window.setSuggestion = setSuggestion;
       return <>
         <Composer input={input} setInput={setInput} sending={sending} queueAllowed={queueAllowed}
+          inputSuggestion={suggestion} onDismissInputSuggestion={() => setSuggestion(undefined)}
           runningEnterAction={runningEnterAction} commands={[{name: "goal", title: "Goal"}]}
           onSubmit={e => { e?.preventDefault(); window.calls.push("send"); }}
           onQueue={() => window.calls.push("queue")} onSteerNow={() => window.calls.push("steer")}
@@ -99,8 +102,25 @@ try {
   await input.press("Control+Enter");
   assert.deepEqual((await calls()).slice(-2), ["send", "send"], "idle keys still send a normal message");
   assert.equal(await input.getAttribute("title"), null, "idle input has no floating shortcut hint");
+
+  await input.fill("");
+  await page.evaluate(() => window.setSuggestion("继续检查输入预测"));
+  const preview = page.locator("[data-composer-input-suggestion]");
+  await preview.waitFor();
+  await page.keyboard.insertText("继续");
+  await preview.waitFor({ timeout: 2000 });
+  assert.equal(await preview.innerText(), "检查输入预测");
+  assert.equal(await input.inputValue(), "继续", "preview stays outside the textarea value");
+  await input.press("Shift+ArrowLeft");
+  await preview.waitFor({ state: "hidden", timeout: 2000 });
+  await input.press("End");
+  await preview.waitFor({ timeout: 2000 });
+  const beforeTab = await calls();
+  await input.press("Tab");
+  assert.equal(await input.inputValue(), "继续检查输入预测");
+  assert.deepEqual(await calls(), beforeTab, "Tab accepts the suffix without sending");
   assert.deepEqual(errors, []);
-  console.log("PASS default Enter queue, Ctrl/Meta+Enter steer, settings swap and reload, idle send, slash palette, IME and gate");
+  console.log("PASS composer delivery keys, settings, slash palette, IME, gate and inline prediction");
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

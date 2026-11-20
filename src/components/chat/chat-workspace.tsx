@@ -139,6 +139,7 @@ export function ChatWorkspace({
   input,
   setInput,
   inputSuggestion,
+  onInputActivity,
   onDismissInputSuggestion,
   sending,
   queueAllowed,
@@ -252,6 +253,7 @@ export function ChatWorkspace({
   input: string;
   setInput: (value: string) => void;
   inputSuggestion?: string;
+  onInputActivity?: () => void;
   onDismissInputSuggestion?: () => void;
   sending: boolean;
   queueAllowed: boolean;
@@ -600,6 +602,7 @@ export function ChatWorkspace({
       input={input}
       setInput={setInput}
       inputSuggestion={inputSuggestion}
+      onInputActivity={onInputActivity}
       onDismissInputSuggestion={onDismissInputSuggestion}
       sending={composerSending}
       queueAllowed={queueAllowed}

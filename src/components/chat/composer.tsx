@@ -56,6 +56,7 @@ export function Composer({
   setInput,
   inputSuggestion,
   onDismissInputSuggestion,
+  onInputActivity,
   sending,
   queueAllowed = false,
   runningEnterAction = "queue",
@@ -97,6 +98,7 @@ export function Composer({
   setInput: (value: string) => void;
   inputSuggestion?: string;
   onDismissInputSuggestion?: () => void;
+  onInputActivity?: () => void;
   sending: boolean;
   queueAllowed?: boolean;
   runningEnterAction?: RunningEnterAction;
@@ -199,7 +201,7 @@ export function Composer({
     }
   }
   const paletteOpen = actionMenuOpen || (!paletteDismissed && slashMatches.length > 0);
-  const ghost = !input && !attachments.length && !disabledReason && !submissionBlocked
+  const suggestion = !attachments.length && !disabledReason && !submissionBlocked
     && !sending && !editing && !questionPromptVisible && !paletteOpen ? inputSuggestion : undefined;
   const paletteCommands: ComposerSlashCommand[] = actionMenuOpen ? commandActions : slashMatches;
   const providerModelLabel = [providerLabel?.trim(), model?.trim()].filter(Boolean).join(" · ");
@@ -374,32 +376,19 @@ export function Composer({
         <ComposerLinkInput
           inputRef={inputRef}
           value={input}
-          ghost={ghost}
+          suggestion={suggestion}
+          onDismissSuggestion={onDismissInputSuggestion}
           onChange={(value) => { setPaletteDismissed(false); setInput(value); }}
           className={cn(
             "w-full min-w-0 text-sm",
             questionPromptVisible && "col-start-2 row-start-1",
           )}
           rows={1}
-          placeholder={ghost ? undefined : disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
-          aria-label={ghost ? t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder") : undefined}
+          placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
           disabled={Boolean(disabledReason)}
-          onCompositionStart={onDismissInputSuggestion}
+          onCompositionStart={onInputActivity}
           onKeyDown={(event) => {
-            if (event.key === "Escape" && !paletteOpen) {
-              onDismissInputSuggestion?.();
-              if (ghost) {
-                event.preventDefault();
-                event.stopPropagation();
-                return;
-              }
-            }
-            if (ghost && event.key === "Tab" && !event.shiftKey && !event.ctrlKey
-              && !event.metaKey && !event.altKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              setInput(ghost);
-              return;
-            }
+            if (event.key === "Escape" && !paletteOpen) onDismissInputSuggestion?.();
             if (paletteOpen && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
               event.preventDefault();
               setPaletteIndex((current) => event.key === "ArrowDown"

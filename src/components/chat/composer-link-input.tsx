@@ -1,11 +1,12 @@
-import { Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, type ComponentPropsWithoutRef, type RefObject } from "react";
+import { Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type RefObject } from "react";
 import { chatLinksInText, ChatLinkTitlesContext } from "../../lib/chat-deep-link";
 import { ChatDeepLink } from "./chat-deep-link";
 
 type ComposerInputProps = Omit<ComponentPropsWithoutRef<"textarea">, "value" | "onChange"> & {
   inputRef: RefObject<HTMLTextAreaElement>;
   value: string;
-  ghost?: string;
+  suggestion?: string;
+  onDismissSuggestion?: () => void;
   onChange: (value: string) => void;
 };
 
@@ -35,11 +36,24 @@ function restoreLinks(text: string, spans: ReturnType<typeof projectDraft>["span
   return result + text.slice(cursor, end);
 }
 
-export function ComposerLinkInput({ inputRef, value, className, ghost, onChange, ...props }: ComposerInputProps) {
+const textLayout = "whitespace-pre-wrap break-words px-1 py-1 [overflow-wrap:anywhere]";
+
+function caretAtEnd(input: HTMLTextAreaElement) {
+  return input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
+}
+
+export function ComposerLinkInput({ inputRef, value, className, suggestion, onDismissSuggestion, onChange, ...props }: ComposerInputProps) {
   const titles = useContext(ChatLinkTitlesContext);
   const { text, spans } = useMemo(() => projectDraft(value, titles), [value, titles]);
   const projected = spans.length > 0;
   const overlay = useRef<HTMLDivElement>(null);
+  const suggestionOverlay = useRef<HTMLDivElement>(null);
+  const [caretAtDraftEnd, setCaretAtDraftEnd] = useState(false);
+  const [composing, setComposing] = useState(false);
+  const composingRef = useRef(false);
+  const suffix = !composing && (!text || caretAtDraftEnd) && suggestion?.startsWith(value)
+    ? suggestion.slice(value.length)
+    : "";
   const pendingCaret = useRef<number | null>(null);
   const editSelection = useRef<{ start: number; end: number } | null>(null);
   useEffect(() => {
@@ -54,33 +68,83 @@ export function ComposerLinkInput({ inputRef, value, className, ghost, onChange,
     input.addEventListener("beforeinput", rememberSelection);
     return () => input.removeEventListener("beforeinput", rememberSelection);
   }, [projected, inputRef]);
-  const scrollOverlay = () => {
+  const scrollOverlays = () => {
     const input = inputRef.current;
-    if (!input || !overlay.current) return;
-    overlay.current.style.right = `${input.offsetWidth - input.clientWidth}px`;
-    overlay.current.scrollTop = input.scrollTop;
+    if (!input) return;
+    for (const layer of [overlay.current, suggestionOverlay.current]) {
+      if (!layer) continue;
+      layer.style.right = `${input.offsetWidth - input.clientWidth}px`;
+      layer.scrollTop = input.scrollTop;
+    }
   };
   useLayoutEffect(() => {
     const input = inputRef.current;
     if (!input) return;
     input.style.height = "28px";
     const contentHeight = input.scrollHeight;
-    input.style.height = `${Math.min(128, Math.max(28, contentHeight))}px`;
     input.style.overflowY = contentHeight > 128 ? "auto" : "hidden";
-    scrollOverlay();
+    scrollOverlays();
+    const previewHeight = suggestionOverlay.current?.scrollHeight ?? 0;
+    input.style.height = `${Math.min(128, Math.max(28, contentHeight, previewHeight))}px`;
     if (pendingCaret.current !== null) {
       input.setSelectionRange(pendingCaret.current, pendingCaret.current);
       pendingCaret.current = null;
     }
-  }, [value, text, className, inputRef]);
+    setCaretAtDraftEnd(input === document.activeElement && caretAtEnd(input));
+    scrollOverlays();
+  }, [value, text, suffix, className, inputRef]);
   return <div className={className}>
-    <div className={ghost ? "relative grid" : "relative"}>
+    <div className="relative">
       <textarea {...props} ref={inputRef} value={text}
-        className={`app-scrollbar block min-h-7 w-full resize-none whitespace-pre-wrap break-words bg-transparent px-1 py-1 outline-none [overflow-wrap:anywhere] placeholder:text-muted-foreground ${projected ? "text-transparent caret-foreground" : ""} ${ghost ? "z-10 col-start-1 row-start-1" : ""}`}
-        onScroll={scrollOverlay}
+        className={`app-scrollbar block min-h-7 w-full resize-none bg-transparent outline-none placeholder:text-muted-foreground ${textLayout} ${projected ? "text-transparent caret-foreground" : ""}`}
+        placeholder={suffix ? undefined : props.placeholder}
+        aria-label={props["aria-label"] ?? (suffix ? props.placeholder : undefined)}
+        onScroll={scrollOverlays}
+        onFocus={event => {
+          setCaretAtDraftEnd(caretAtEnd(event.currentTarget));
+          props.onFocus?.(event);
+        }}
+        onBlur={event => {
+          setCaretAtDraftEnd(false);
+          props.onBlur?.(event);
+        }}
+        onSelect={event => {
+          setCaretAtDraftEnd(caretAtEnd(event.currentTarget));
+          props.onSelect?.(event);
+        }}
+        onCompositionStart={event => {
+          composingRef.current = true;
+          setComposing(true);
+          props.onCompositionStart?.(event);
+        }}
+        onCompositionEnd={event => {
+          composingRef.current = false;
+          setComposing(false);
+          props.onCompositionEnd?.(event);
+        }}
+        onKeyDown={event => {
+          if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (suffix && caretAtEnd(event.currentTarget)) {
+            if (event.key === "Escape") {
+              onDismissSuggestion?.();
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            if (suggestion && event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+              event.preventDefault();
+              pendingCaret.current = projectDraft(suggestion, titles).text.length;
+              onChange(suggestion);
+              onDismissSuggestion?.();
+              return;
+            }
+          }
+          props.onKeyDown?.(event);
+        }}
         onChange={event => {
           const next = event.currentTarget.value;
           const caret = event.currentTarget.selectionEnd;
+          setCaretAtDraftEnd(caretAtEnd(event.currentTarget));
           const selection = editSelection.current;
           editSelection.current = null;
           if (!projected) {
@@ -124,8 +188,10 @@ export function ComposerLinkInput({ inputRef, value, className, ghost, onChange,
           onChange(restoreLinks(text, spans, 0, selectionStart) + restoreLinks(text, spans, selectionEnd, text.length));
         }}
       />
-      {ghost && <div aria-hidden="true" data-composer-input-suggestion className="pointer-events-none col-start-1 row-start-1 min-w-0 select-none whitespace-pre-wrap break-words px-1 py-1 text-muted-foreground [overflow-wrap:anywhere]">{ghost}</div>}
-      {projected && <div ref={overlay} className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-1 py-1 [overflow-wrap:anywhere]">
+      {suffix && <div ref={suggestionOverlay} aria-hidden="true" className={`pointer-events-none absolute inset-0 select-none overflow-hidden ${textLayout}`}>
+        <span className="invisible">{text}</span><wbr /><span data-composer-input-suggestion className="text-muted-foreground">{suffix}</span>
+      </div>}
+      {projected && <div ref={overlay} className={`pointer-events-none absolute inset-0 overflow-hidden ${textLayout}`}>
         {spans.map((link, index) => <Fragment key={link.start}>
           <span aria-hidden>{text.slice(spans[index - 1]?.end ?? 0, link.start)}</span>
           <ChatDeepLink className="pointer-events-auto" chatId={link.chatId} href={link.href}>{link.title}</ChatDeepLink>
