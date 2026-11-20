@@ -10265,10 +10265,11 @@ def repair_project_chat_store_sync(params: dict[str, Any]) -> dict[str, Any]:
     result["verified"] = verified
     result["readback"] = verification
     if verified:
-        result["commitState"] = "committed" if result.get("changed") else "no_change"
+        result["committed"] = True
+        result["commitState"] = "complete" if result.get("changed") else "no_change"
         result["mutationStarted"] = bool(result.get("changed"))
         result["mutationApplied"] = bool(result.get("changed"))
-    result["readbackState"] = "complete" if verified else "failed"
+    result["readbackState"] = "verified" if verified else "failed"
     result["toolExecutionStatus"] = "completed" if verified else "failed"
     if not verified:
         result["ok"] = False
@@ -12018,7 +12019,8 @@ def install_verified_unity_core_sync(params: dict[str, Any]) -> dict[str, Any]:
         }
     backup_path = str((result.get("backups") or {}).get("vrcforge") or "")
     installed_identity = _unity_core_tree_identity(target_path)
-    return {
+    from core_upgrade_readiness import installed_core_receipt
+    return installed_core_receipt({
         "ok": True,
         "schema": "vrcforge.unity_core_install.v1",
         "status": "executed",
@@ -12031,10 +12033,9 @@ def install_verified_unity_core_sync(params: dict[str, Any]) -> dict[str, Any]:
         "restoreRequiresApproval": bool(backup_path),
         "mutationStarted": True,
         "committed": True,
-        "commitState": "full",
         "checkpointRecoveryRequired": False,
         "details": result,
-    }
+    })
 
 
 def prepare_verified_unity_core_install_request(
@@ -12159,13 +12160,14 @@ def restore_unity_core_sync(params: dict[str, Any]) -> dict[str, Any]:
         "backupSha256": backup_identity["sha256"],
         "replacedInstalledSha256": installed_identity["sha256"],
         "restoredSha256": restored_identity["sha256"],
+        "persistenceState": "persisted",
         "readbackVerified": True,
         "safetyBackupPath": str(safety_backup),
         "safetyBackupSha256": installed_identity["sha256"],
         "restoredAt": restored_at,
         "mutationStarted": True,
         "committed": True,
-        "commitState": "full",
+        "commitState": "complete",
         "manualRecoveryRequired": False,
     }
 
@@ -12235,19 +12237,20 @@ def open_unity_project_sync(params: dict[str, Any], *, select_in_app: bool = Fal
             except OSError as exc:
                 raise AgentGatewayError(f"Unable to persist the selected Unity project: {exc}", status_code=500) from exc
             DASHBOARD_STATE.unity_instance = root.name
+        from core_upgrade_readiness import editor_process_receipt
         if running is not None:
-            return {
+            return editor_process_receipt({
                 "ok": True, "status": "already_open", "projectPath": project_path,
                 "unityEditorPath": running.get("executablePath"), "processId": running["processId"],
-            }
+            })
         try:
             process = launch_unity_subprocess([str(editor_path), "-projectPath", project_path], editor_path, root)
         except OSError as exc:
             raise AgentGatewayError(f"Unable to start the matching Unity Editor: {exc}", status_code=500) from exc
-        return {
+        return editor_process_receipt({
             "ok": True, "status": "launched", "projectPath": project_path,
             "unityEditorPath": str(editor_path), "processId": int(process.pid),
-        }
+        })
 
 
 @app.post("/api/projects/open")
@@ -15950,6 +15953,7 @@ def capture_avatar_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[s
         "committed": True,
         "commitState": "complete",
         "commitStateKnown": True,
+        "readbackVerified": True,
         **capture,
     }
 
@@ -15992,6 +15996,7 @@ def capture_avatar_multi_screenshot_approved_sync(arguments: dict[str, Any]) -> 
         "committed": True,
         "commitState": "complete",
         "commitStateKnown": True,
+        "readbackVerified": True,
         **payload,
         **capability,
         "data": (
@@ -22665,6 +22670,22 @@ def unity_mcp_write_sync(params: dict[str, Any]) -> dict[str, Any]:
             )
         except AuthoritativeUnityWriteError as exc:
             return {"ok": False, "toolName": tool_name, "error": str(exc)}
+        if (
+            tool_name == ASSET_SAVE_CORE_TOOL and isinstance(validated_payload, dict)
+            and validated_payload.get("schema") == "vrcforge.asset_save.v1"
+            and validated_payload.get("assetPath") == arguments.get("assetPath")
+            and validated_payload.get("ok") is True and validated_payload.get("preview") is False
+            and validated_payload.get("verified") is True and validated_payload.get("committed") is True
+            and (
+                (validated_payload.get("saved") is True and validated_payload.get("verification") == "asset_is_clean_after_save")
+                or (validated_payload.get("noChange") is True and validated_payload.get("verification") == "asset_is_clean")
+            )
+        ):
+            return {
+                **validated_payload, "toolName": tool_name, "result": serialize_result(result),
+                "readbackVerified": True,
+                "readback": {"assetPath": validated_payload["assetPath"], "dirty": False},
+            }
         if strict_result:
             return {
                 **validated_unity_write_receipt_fields(validated_payload),
@@ -24031,7 +24052,7 @@ def run_unity_artifact_scan_sync(
     return payload
 
 
-def _sanitize_animation_binding_continuations(payload: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_animation_binding_continuations(payload: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
     """Keep Core-generated paging requests inside the public read schema."""
     continuation_keys = {"nextRequest", "nextKeyRequest"}
 
@@ -24053,7 +24074,21 @@ def _sanitize_animation_binding_continuations(payload: dict[str, Any]) -> dict[s
                 value[key] = visit(child)
         return value
 
-    return visit(payload)
+    visit(payload)
+    paging = payload.get("paging")
+    if not isinstance(paging, dict):
+        return payload
+    # Drain the earliest unfinished binding before advancing past it. Its
+    # single-binding request will carry the next binding or clip on return.
+    next_args = next((row["nextKeyRequest"] for row in payload.get("bindings", [])
+                      if isinstance(row, dict) and isinstance(row.get("nextKeyRequest"), dict)),
+                     paging.get("nextRequest"))
+    if isinstance(next_args, dict):
+        public_fields = UNITY_READ_TOOL_INPUT_SCHEMAS["vrcforge_scan_animation_bindings"]["properties"]
+        arguments = {key: value for key, value in request.items() if key in public_fields}
+        payload.update(hasMore=True, operationStatus="partial", readbackState="partial",
+                       nextRequest={"tool": "vrcforge_scan_animation_bindings", "arguments": {**arguments, **next_args}})
+    return payload
 
 
 def _summarize_fx_write_defaults(payload: dict[str, Any], *, only: bool = False) -> dict[str, Any]:
@@ -24160,7 +24195,7 @@ def scan_animation_bindings_sync(params: dict[str, Any]) -> dict[str, Any]:
             ) if name in params},
         },
         "animation binding scan",
-        payload_transform=_sanitize_animation_binding_continuations,
+        payload_transform=lambda payload: _sanitize_animation_binding_continuations(payload, params),
     )
 
 
@@ -26617,18 +26652,27 @@ def gesture_manager_set_parameter_sync(params: dict[str, Any]) -> dict[str, Any]
         "value": params.get("value"),
     }
     settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = ensure_dict_payload(
-        extract_tool_result_payload(
-            invoke_unity_mcp(
-                settings,
-                "vrc_gesture_manager_set_parameter",
-                request,
-                preserve_tool_error=True,
-            )
-        ),
-        "Gesture Manager parameter write",
-    )
+    response = invoke_unity_mcp(settings, "vrc_gesture_manager_set_parameter", request, preserve_tool_error=True)
+    payload = ensure_dict_payload(extract_tool_result_payload(response), "Gesture Manager parameter write")
+    if response.exit_code != 0:
+        return {**payload, "ok": False}
     payload.setdefault("ok", True)
+    if (payload.get("ok") is True and payload.get("persistent") is False and payload.get("committed") is True
+            and payload.get("parameterName") == parameter_name and payload.get("managerPath") and payload.get("avatarPath")
+            and (not request["avatarPath"] or payload["avatarPath"].strip("/") == request["avatarPath"].strip("/"))):
+        values = (request["value"], payload.get("requestedValue"), payload.get("afterValue"))
+        if all(type(value) in (int, float) for value in values):
+            try:
+                requested, reported, observed = (shader_storage_value(value) for value in values)
+            except (ValueError, OverflowError):
+                pass
+            else:
+                matches = requested == reported == observed
+                payload.update(
+                    readbackVerified=matches, operationStatus="success" if matches else "partial",
+                    commitState="complete" if matches else "partial",
+                    readback={key: payload[key] for key in ("managerPath", "avatarPath", "parameterName", "requestedValue", "afterValue")},
+                )
     return payload
 
 
@@ -26851,18 +26895,23 @@ def select_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
             "commitState": "not_started",
         }
     settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = ensure_dict_payload(
-        extract_tool_result_payload(
-            invoke_unity_mcp(
-                settings,
-                "vrc_select_scene_object",
-                {"gameObjectPath": object_path},
-                preserve_tool_error=True,
-            )
-        ),
-        "select scene object",
-    )
+    response = invoke_unity_mcp(settings, "vrc_select_scene_object", {"gameObjectPath": object_path}, preserve_tool_error=True)
+    payload = ensure_dict_payload(extract_tool_result_payload(response), "select scene object")
+    if response.exit_code != 0:
+        return {**payload, "ok": False}
     payload.setdefault("ok", True)
+    if payload.get("ok") is True and payload.get("persistent") is False and payload.get("committed") is True:
+        resolved = payload.get("gameObjectPath")
+        requested = object_path.replace("\\", "/").strip("/")
+        if isinstance(resolved, str) and resolved and isinstance(payload.get("selectedAfter"), str):
+            # Core accepts a unique leaf as well as a full Unity hierarchy path.
+            target_matches = resolved == requested or ("/" not in requested and resolved.rsplit("/", 1)[-1] == requested)
+            matches = target_matches and payload["selectedAfter"] == resolved
+            payload.update(
+                readbackVerified=matches, operationStatus="success" if matches else "partial",
+                commitState="complete" if matches else "partial",
+                readback={"gameObjectPath": resolved, "selectedAfter": payload["selectedAfter"]},
+            )
     return payload
 
 
@@ -27500,7 +27549,8 @@ def _project_safe_backup_verification(payload: dict[str, Any]) -> None:
             },
             "mutationStarted": True,
             "mutationApplied": True,
-            "commitState": "committed",
+            "committed": True,
+            "commitState": "complete",
         }
     )
 
@@ -27577,7 +27627,8 @@ def _project_safe_backup_restore_verification(payload: dict[str, Any]) -> None:
             },
             "mutationStarted": True,
             "mutationApplied": True,
-            "commitState": "committed",
+            "committed": True,
+            "commitState": "complete",
         }
     )
 

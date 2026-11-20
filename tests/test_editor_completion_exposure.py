@@ -29,7 +29,7 @@ def execute(tmp_path):
         "confirmation": review_external_proposal(gateway, proposal)
     })
     assert result["ok"] is True and result["readbackState"] == "verified"
-    assert result["commitState"] == "runtime_state_verified"
+    assert result["commitState"] == "complete"
     assert result["result"] == initial  # Preserve original scheduling facts.
     return gateway, result, final
 

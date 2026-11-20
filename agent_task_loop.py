@@ -26,6 +26,8 @@ from agent_tool_result_contract import (
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
 from external_tool_result_contract import INCOMPLETE_OPERATION_STATES, OPERATION_PROGRESS_FIELDS
 from agent_action_targets import action_target
+from core_upgrade_readiness import core_action_binding, ready_process_binding
+from os.path import normcase, normpath
 from background_goal_runtime import classify_runtime_step_failure
 from agent_runtime_turn_identity import MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, continuation_client_turn_id
 from checkpoint_user_policy import (
@@ -62,6 +64,7 @@ _VERIFICATION_PROFILES: dict[str, tuple[tuple[str, Any], ...]] = {
     # The tool-result contract itself is the registered baseline verifier for
     # read actions and host Shell commands that have no stronger postcondition.
     "canonical_tool_result": (),
+    "core_upgrade_ready": (),
     "persisted_scene_write": (
         ("persistedReadback", True),
         ("sceneSaved", True),
@@ -451,6 +454,8 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     for key in (
         *OPERATION_PROGRESS_FIELDS,
+        "coreActionBinding",
+        "coreReadyBinding",
         "questionId",
         "success",
         "ready",
@@ -477,7 +482,7 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
         "safeToRetry",
     ):
         if key in value:
-            result[key] = _bounded_contract_fact(value[key])
+            result[key] = copy.deepcopy(value[key]) if key == "nextRequest" else _bounded_contract_fact(value[key])
     diagnostics = value.get("diagnostics")
     source_error = (
         diagnostics.get("sourceError")
@@ -638,6 +643,8 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
     superseded_by = _bounded_text(value.get("supersededBy"), 80)
     if status == "superseded" and superseded_by:
         result["supersededBy"] = superseded_by
+    if value.get("completionReadActionId"):
+        result["completionReadActionId"] = _bounded_text(value["completionReadActionId"], 80)
     if value.get("continuedBy"):
         result["continuedBy"] = _bounded_text(value["continuedBy"], 80)
     if value.get("preProvider") is True:
@@ -1045,6 +1052,9 @@ def approval_completion(
         verification_profile=_bounded_text(context.get("verificationProfile"), 80),
     )
     status = _status(verified.get("status"))
+    if status == "ok" and verified.get("targetEffectVerified") is True:
+        if binding := core_action_binding(tool, _mapping_views(raw_result)):
+            verified["coreActionBinding"] = binding
     if status == "ok":
         task_status = "completed"
     elif status == "pending" and (runtime_observation_receipt(raw_result) or pending_execution_receipt(raw_result)):
@@ -1675,6 +1685,7 @@ class AgentTaskLoop:
         current = _bounded_action(current_seed)
         if current is not None:
             self._actions[current["actionId"]] = current
+            self._bind_opened_core_process(current)
             if (
                 current["tool"] == "vrcforge_capture_multi_screenshot"
                 and current["status"] == "completed"
@@ -2021,6 +2032,17 @@ class AgentTaskLoop:
                         terminal_status = "completed" if verified_completion else "failed"
                         prior.update(status=terminal_status, runtimeStatus=terminal_status, outcome=dict(effective),
                             completionReadActionId=action_id)
+        if kind == "write" and effective.get("targetEffectVerified") is True:
+            if binding := core_action_binding(tool, _mapping_views(raw_result)):
+                effective["coreActionBinding"] = binding
+                self._bind_opened_core_process(record)
+        if kind == "skill" and tool == "vrcforge_core_upgrade_status" and isinstance(arguments, Mapping):
+            receipt = next((r for r in _mapping_views(raw_result)
+                            if r.get("schema") == "vrcforge.core_upgrade_status.v1"), None)
+            if (receipt and receipt.get("projectPath") and receipt.get("installedAt")
+                    and normcase(normpath(receipt["projectPath"])) == normcase(normpath(str(arguments.get("projectPath") or "")))
+                    and receipt["installedAt"] == arguments.get("installedAt")):
+                self._record_core_readiness(record, receipt)
         self._actions[action_id] = record
         self._latest_action_id = action_id
         # A continuation advances the same read obligation. Preserve every
@@ -2099,6 +2121,54 @@ class AgentTaskLoop:
         if corrected_ids:
             result["correctedActionIds"] = corrected_ids
         return result
+
+    def _bind_opened_core_process(self, action):
+        binding = action["outcome"].get("coreActionBinding") or {}
+        if "processId" not in binding:
+            return
+        for key, requirement in list(self._requirements.items()):
+            expected = requirement.get("target") or {}
+            if (requirement["verificationProfile"] == "core_upgrade_ready"
+                    and expected.get("projectPath") == binding["projectPath"]
+                    and expected.get("processId") != binding["processId"]):
+                del self._requirements[key]
+                self.require_action(kind="skill", tool=requirement["tool"], verification_profile="core_upgrade_ready",
+                                    target={**expected, "processId": binding["processId"]})
+
+    def _record_core_readiness(self, record, receipt):
+        project = normcase(normpath(receipt["projectPath"]))
+        install = process = None
+        for action in self._actions.values():
+            binding = action["outcome"].get("coreActionBinding") or {}
+            if binding.get("projectPath") != project:
+                continue
+            if "installedAt" in binding:
+                install = action
+            elif "processId" in binding:
+                process = action
+        inherited = [r for r in self._requirements.values()
+                     if r["verificationProfile"] == "core_upgrade_ready"
+                     and r.get("target", {}).get("projectPath") == project]
+        if install:
+            expected = dict(install["outcome"]["coreActionBinding"])
+        elif inherited:
+            expected = dict(inherited[-1]["target"])
+        else:
+            return  # An independent health query does not introduce an installation obligation.
+        if process:
+            expected["processId"] = process["outcome"]["coreActionBinding"]["processId"]
+        for previous in inherited:
+            if previous["target"] != expected:
+                del self._requirements[previous["requirementId"]]
+        self.require_action(kind="skill", tool=record["tool"], verification_profile="core_upgrade_ready", target=expected)
+        observed = ready_process_binding(receipt)
+        if (record["status"] != "completed" or not observed
+                or any(observed.get(k) != v for k, v in expected.items())):
+            return
+        record["outcome"]["coreReadyBinding"] = observed
+        for action in (install, process):
+            if action:
+                action.setdefault("completionReadActionId", record["actionId"])
 
     def require_action(
         self,
@@ -2224,6 +2294,13 @@ class AgentTaskLoop:
 
     def _requirement_matched(self, requirement: Mapping[str, Any]) -> bool:
         required_action_id = str(requirement.get("actionId") or "")
+        if requirement.get("verificationProfile") == "core_upgrade_ready":
+            expected = requirement.get("target") or {}
+            if not expected.get("installedAt") or not expected.get("projectPath"):
+                return False
+            return any(action["tool"] == requirement["tool"] and self._action_completion_confirmed(action)
+                       and all((action["outcome"].get("coreReadyBinding") or {}).get(k) == v
+                               for k, v in expected.items()) for action in self._actions.values())
         return any(
             self._action_completion_confirmed(action)
             and (

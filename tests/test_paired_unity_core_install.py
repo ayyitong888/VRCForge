@@ -155,7 +155,8 @@ def test_verified_unity_core_install_retains_previous_tree(monkeypatch: pytest.M
 
     assert result["ok"] is True
     assert result["committed"] is True
-    assert result["commitState"] == "full"
+    assert result["commitState"] == "complete"
+    assert result["readbackVerified"] is True
     if os.name == "nt":
         assert result["details"]["refreshSignal"]["editorRequest"] == {
             "status": "refresh_requested", "unityProcessId": 47, "nextAction": "check_core_upgrade_status"
@@ -342,7 +343,8 @@ def test_manual_core_restore_requires_exact_receipt_and_preserves_safety_copy(
     )
 
     assert restored["ok"] is True
-    assert restored["commitState"] == "full"
+    assert restored["commitState"] == "complete"
+    assert restored["readbackVerified"] is True
     assert (project / "Assets" / "VRCForge" / "old-core.txt").read_text(encoding="utf-8") == "old"
     safety = Path(restored["safetyBackupPath"])
     assert (safety / "new-core.txt").read_text(encoding="utf-8") == "new"

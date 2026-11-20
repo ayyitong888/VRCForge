@@ -100,12 +100,13 @@ def bound_editor_readback(arguments):
 
 
 def verified_editor_receipt(facts, initial, identity_verification=None):
+    changed = initial.get("mutationStarted", True)
     return {
         **facts, "schema": "vrcforge.editor_state_completion.v1", "ok": True,
-        "verified": True, "readback": dict(facts), "persistent": False,
-        "sceneDirty": False, "mutationStarted": initial.get("mutationStarted", True),
-        "committed": True,
+        "verified": True, "readbackVerified": True, "readback": dict(facts), "persistent": False,
+        "sceneDirty": False, "mutationStarted": changed, "committed": True,
+        "operationStatus": "no_change" if changed is False else "success",
+        "commitState": "no_change" if changed is False else "complete",
         "transitionScheduled": False, "verificationRequired": False,
         "identityVerification": dict(identity_verification or {"verified": False, "status": "not_bound"}),
-        "commitState": "no_change" if initial.get("mutationStarted") is False else "runtime_connected" if facts.get("moduleConnected") else "runtime_state_verified",
     }

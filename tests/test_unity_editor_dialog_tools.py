@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.external_mcp_approval_support import target_effect_verified
 import unity_editor_dialog_tools as tools
 
 
@@ -225,6 +226,8 @@ def test_next_dialog_same_window_is_reported_changed_not_closed(context):
     click.side_effect = lambda *_args: windows[0]["controls"][0].update(text="Import completed")
     result = tools.handle_unity_editor_dialog(prepared, source_approval_lookup=lookup)
     assert result["ok"] and result["dialogChanged"] and result["dialogClosed"] is False
+    assert target_effect_verified(result)
+    assert result["assetOperationVerified"] is False
     assert result["assetOperationVerified"] is False
 
 

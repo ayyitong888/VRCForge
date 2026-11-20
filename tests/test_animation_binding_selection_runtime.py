@@ -93,14 +93,23 @@ def test_exact_selection_pages_and_preserves_all_keys(compiled_selection):
  assert all(len(x['keys'])==7 and x['keys'][3]['value']==3 and x['keys'][3]['inTangent']==2 for x in rows)
 
 def test_total_budget_and_key_continuation_are_complete(compiled_selection):
+ from dashboard_server import _sanitize_animation_binding_continuations
+ from agent_tool_result_contract import normalize_agent_tool_result
+ from agent_task_loop import _bounded_outcome
  args={'bindingView':'details','bindingSelectors':[{'path':'bra','propertyName':'m_IsActive'}],'maxTotalKeys':3}
  first=run(compiled_selection,args)['result'];row=first['bindings'][0]
  assert first['summary']['returnedKeyCount']==3 and row['omittedKeyCount']==4 and not first['paging']['allSelectedDetailsReturned']
  values=[k['value'] for k in row['keys']]
+ request=args
+ page=first
  while row.get('nextKeyRequest'):
-  request={**args,**row['nextKeyRequest']};row=run(compiled_selection,request)['result']['bindings'][0];values.extend(k['value'] for k in row['keys'])
+  projection=_sanitize_animation_binding_continuations(page,request)
+  observation=_bounded_outcome(normalize_agent_tool_result(projection,fallback_summary='',write=False))
+  request=observation['nextRequest']['arguments']
+  assert request['bindingSelectors']==args['bindingSelectors'] and request['expectedSnapshotDigest']==first['snapshotDigest']
+  page=run(compiled_selection,request)['result'];row=page['bindings'][0];values.extend(k['value'] for k in row['keys'])
  assert values==list(range(7))
- assert first['paging']['nextRequest']['bindingOffset']==1
+ assert _sanitize_animation_binding_continuations(page,request)['nextRequest']['arguments']['bindingOffset']==1
 
 def test_index_root_and_object_reference_read(compiled_selection):
  r=run(compiled_selection,{'bindingView':'index','bindingSelectors':[{'path':''}],'bindingLimit':1})
@@ -172,7 +181,10 @@ def test_public_animation_continuations_validate_without_internal_handler_fields
         return kwargs['payload_transform'](payload)
 
     monkeypatch.setattr(dashboard, 'run_unity_artifact_scan_sync', fake_scan)
-    result = dashboard.scan_animation_bindings_sync({'clipPaths': ['Assets/Test.anim']})
+    selectors = [{"path": "Actor", "propertyName": "m_IsActive"}]
+    paths = [f"Assets/Test{index}.anim" for index in range(25)]
+    payload['bindings'][0]['nextKeyRequest'].pop('clipPaths')
+    result = dashboard.scan_animation_bindings_sync({'clipPaths': paths, 'bindingSelectors': selectors})
     schema = UNITY_READ_TOOL_INPUT_SCHEMAS['vrcforge_scan_animation_bindings']
     jsonschema.validate(result['paging']['nextRequest'], schema)
     jsonschema.validate(result['bindings'][0]['nextKeyRequest'], schema)
@@ -180,3 +192,13 @@ def test_public_animation_continuations_validate_without_internal_handler_fields
     assert 'refreshAssets' not in result['paging']['nextRequest']
     assert 'outputPath' not in result['bindings'][0]['nextKeyRequest']
     assert 'refreshAssets' not in result['bindings'][0]['nextKeyRequest']
+
+    from agent_tool_result_contract import normalize_agent_tool_result
+    normalized = normalize_agent_tool_result(result, fallback_summary="", write=False)
+    assert normalized["readbackState"] == "partial"
+    assert normalized["hasMore"] is True
+    assert normalized["nextRequest"]["tool"] == "vrcforge_scan_animation_bindings"
+    from agent_task_loop import _bounded_outcome
+    for view in (normalized, _bounded_outcome(normalized)):
+        assert view["nextRequest"]["arguments"]["clipPaths"] == paths
+        assert view["nextRequest"]["arguments"]["bindingSelectors"] == selectors

@@ -341,7 +341,8 @@ class ProjectCatalogRegistrationService:
                 "projectPath": str(project),
                 "mutationStarted": False,
                 "committed": True,
-                "commitState": "complete",
+                "commitState": "no_change",
+                "readbackVerified": True,
                 "reloadRequired": False,
                 "rollback": {"available": False, "reason": "already_registered"},
             }

@@ -129,6 +129,17 @@ def _atomic_write(path: Path, data: bytes, *, overwrite: bool) -> bool:
             pass
 
 
+def _file_write_receipt(verified: bool) -> dict[str, Any]:
+    # The filesystem call returned before the independent target readback.
+    return {
+        "operationStatus": "success" if verified else "unknown",
+        "mutationStarted": True,
+        "committed": True if verified else None,
+        "commitState": "complete" if verified else "unknown",
+        "readbackVerified": verified,
+    }
+
+
 def write_file(
     path: str | os.PathLike[str],
     content: str | bytes,
@@ -144,7 +155,7 @@ def write_file(
     data = content if isinstance(content, bytes) else content.encode(encoding)
     verified = _atomic_write(target, data, overwrite=overwrite)
     return {"path": str(target), "operation": TOOL_WRITE_FILE, "bytes": len(data), "overwritten": overwrite,
-            "readbackVerified": verified}
+            **_file_write_receipt(verified)}
 
 
 def edit_file(
@@ -162,7 +173,7 @@ def edit_file(
         raise FileNotFoundError(str(target))
     data = content if isinstance(content, bytes) else content.encode(encoding)
     verified = _atomic_write(target, data, overwrite=True)
-    return {"path": str(target), "operation": TOOL_EDIT_FILE, "bytes": len(data), "readbackVerified": verified}
+    return {"path": str(target), "operation": TOOL_EDIT_FILE, "bytes": len(data), **_file_write_receipt(verified)}
 
 
 def delete_path(
@@ -182,7 +193,7 @@ def delete_path(
         kind = "file"
     else:
         raise FileNotFoundError(str(target))
-    return {"path": str(target), "operation": TOOL_DELETE_PATH, "kind": kind, "readbackVerified": _absent(target)}
+    return {"path": str(target), "operation": TOOL_DELETE_PATH, "kind": kind, **_file_write_receipt(_absent(target))}
 
 
 def _absent(path: Path) -> bool:
@@ -225,7 +236,7 @@ def move_path(
     except OSError:
         verified = False
     return {"source": str(src), "destination": str(dst), "operation": TOOL_MOVE_PATH,
-            "overwritten": overwrite, "readbackVerified": verified}
+            "overwritten": overwrite, **_file_write_receipt(verified)}
 
 
 def _apply_unified_patch(original: str, patch: str) -> str:
@@ -297,7 +308,7 @@ def apply_patch(
     updated = _apply_unified_patch(original, patch)
     data = updated.encode(encoding)
     verified = _atomic_write(target, data, overwrite=True)
-    return {"path": str(target), "operation": TOOL_APPLY_PATCH, "bytes": len(data), "readbackVerified": verified}
+    return {"path": str(target), "operation": TOOL_APPLY_PATCH, "bytes": len(data), **_file_write_receipt(verified)}
 
 
 __all__ = [

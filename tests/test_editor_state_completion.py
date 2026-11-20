@@ -1,6 +1,6 @@
 import dashboard_server as ds
 import pytest
-from tests.external_mcp_approval_support import review_external_proposal
+from tests.external_mcp_approval_support import review_external_proposal, target_effect_verified
 
 
 def test_gm_completion_has_independent_receipt(monkeypatch):
@@ -37,6 +37,7 @@ def test_gm_completion_refreshes_project_target_after_play_reload(monkeypatch):
 
     assert result["verified"] is True
     assert seen == [refreshed]
+    assert target_effect_verified(result)
 
 
 def test_set_play_mode_has_independent_finalizer():
@@ -89,6 +90,7 @@ def test_play_mode_retries_transient_reload_identity_until_fresh_target(monkeypa
     )
     assert result["verified"] is True
     assert len(calls) == 2
+    assert target_effect_verified(result)
 
 
 def test_play_mode_does_not_retry_permanent_target_drift(monkeypatch):
@@ -169,4 +171,23 @@ def test_verified_editor_receipt_passes_external_completion(tmp_path):
     result = gateway.call_external_mcp_tool(name, {"confirmation": review_external_proposal(gateway, proposal)})
     assert result["ok"] is True
     assert result["readbackState"] == "verified"
-    assert result["commitState"] == "runtime_state_verified"
+    assert result["commitState"] == "complete"
+
+@pytest.mark.parametrize("target_matches", [True, False])
+def test_scene_selection_uses_selected_object_readback(monkeypatch, target_matches):
+    observed = {"gameObjectPath": "Avatar/Body", "selectedAfter": "Avatar/Body" if target_matches else "Avatar/Other",
+                "persistent": False, "committed": True, "commitState": "editor_state_applied"}
+    monkeypatch.setattr(ds, "load_dashboard_settings", lambda _args: None)
+    monkeypatch.setattr(ds, "invoke_unity_mcp", lambda *a, **kw: ds.McpResult(0, "", "", {"data": observed}))
+    result = ds.select_scene_object_sync({"gameObjectPath": "Body"})
+    assert target_effect_verified(result) is target_matches
+
+
+@pytest.mark.parametrize("observed_value", [0.1, 1.0])
+def test_gm_parameter_uses_observed_target_value(monkeypatch, observed_value):
+    raw = {"managerPath": "GM", "avatarPath": "Avatar", "parameterName": "Drive", "requestedValue": 0.1,
+           "afterValue": observed_value, "persistent": False, "committed": True, "commitState": "runtime_applied"}
+    monkeypatch.setattr(ds, "load_dashboard_settings", lambda _args: None)
+    monkeypatch.setattr(ds, "invoke_unity_mcp", lambda *a, **kw: ds.McpResult(0, "", "", {"data": raw}))
+    result = ds.gesture_manager_set_parameter_sync({"avatarPath": "Avatar", "parameterName": "Drive", "value": 0.1})
+    assert target_effect_verified(result) is (observed_value == 0.1)

@@ -5071,6 +5071,7 @@ class AgentApprovalTransactionService:
             )
             completion_outcome.update(
                 {
+                    "operationId": operation_id,
                     "mutationStarted": mutation_started,
                     "mutationApplied": mutation_applied,
                     "commitState": commit_state,

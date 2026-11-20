@@ -1,6 +1,8 @@
 """Record an App decision for the original external MCP proposal in test fixtures."""
 
+from agent_approval_transactions import _domain_write_receipt
 from agent_gateway import AgentGateway
+from agent_tool_result_contract import normalize_agent_tool_result
 
 
 def review_external_proposal(
@@ -19,3 +21,8 @@ def review_external_proposal(
     )
     assert reviewed["ok"], reviewed
     return confirmation
+
+
+def target_effect_verified(result: dict) -> bool:
+    receipt = _domain_write_receipt(result)
+    return normalize_agent_tool_result(receipt, fallback_summary="", write=True)["targetEffectVerified"]

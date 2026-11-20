@@ -163,6 +163,7 @@ from external_tool_result_contract import (
     external_exception_details,
     external_exception_raw_result,
     external_write_failure_view,
+    PAGE_PROGRESS_FIELDS,
     tool_argument_recovery,
 )
 from agent_budget_policy import freeze_agent_budget_policy
@@ -3867,10 +3868,12 @@ class AgentGateway:
                 "mutationStarted": False,
                 "mutationApplied": False,
                 "persistenceState": "not_applicable",
-                "readbackState": "complete" if not explicit_failure else "failed",
+                "readbackState": outcome.get("readbackState", "complete" if not explicit_failure else "failed"),
                 "cleanupState": "not_applicable",
                 "retryable": False,
-                "nextAction": None,
+                "nextAction": self._external_mcp_visible_value(outcome.get("nextAction")),
+                **{key: self._external_mcp_visible_value(outcome[key]) for key in
+                   ("operationStatus", "completionKnown", "jobId", "jobStatus", *PAGE_PROGRESS_FIELDS) if key in outcome},
                 "tool": tool.name,
                 "result": self._external_mcp_visible_value(raw_result),
                 "outcome": self._external_mcp_visible_value(outcome),

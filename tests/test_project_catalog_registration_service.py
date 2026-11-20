@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.external_mcp_approval_support import target_effect_verified
 from project_catalog_registration_service import (
     ProjectCatalogRegistrationError,
     ProjectCatalogRegistrationService,
@@ -73,6 +74,7 @@ def test_registers_exactly_one_catalog_and_is_idempotent_with_approved_rollback(
 
     again = service.register({"catalog": catalog, "projectPath": str(project)})
     assert again["mutationStarted"] is False
+    assert target_effect_verified(again)
     rollback = service.rollback({"receiptId": result["rollback"]["receiptId"]})
     assert rollback["committed"] is True
     assert {item["catalog"]: item for item in service.status({"projectPath": str(project)})["catalogs"]}[catalog]["registered"] is False

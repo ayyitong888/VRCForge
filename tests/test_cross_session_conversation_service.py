@@ -386,6 +386,10 @@ class CrossSessionConversationServiceTests(unittest.TestCase):
         items = harness.chats["offscreen"]["items"]
         items[-1].update(queuedFrom=False, composerQueued=False)
         harness.queue[0]["status"] = "acked"
+        from agent_tool_result_contract import normalize_agent_tool_result
+        absent = service.read_conversation({**trusted_context(), "chatId": "offscreen", "clientTurnId": client_turn_id})
+        self.assertEqual(absent["status"], "result_unavailable")
+        self.assertEqual(normalize_agent_tool_result(absent, fallback_summary="", write=False)["status"], "unknown")
         for turn_id, client_id, session_id, text in [
             ("actual-runtime-turn", client_turn_id, "offscreen-session", "Exact answer."),
             ("old-session-turn", client_turn_id, "old-session", "Old branch."),

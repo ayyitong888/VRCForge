@@ -1,5 +1,7 @@
 """Read-only freshness check for actual compilation-pipeline evidence."""
+from collections.abc import Mapping
 from datetime import datetime
+from os.path import normcase, normpath
 from time import monotonic
 
 
@@ -45,3 +47,44 @@ def compile_snapshot_is_fresh(snapshot, installed_at):
         return installed.utcoffset() is not None and captured >= installed
     except (ValueError, TypeError, OverflowError):
         return False
+
+def editor_process_receipt(result):
+    """The OS confirmed this launch or discovery; Core connectivity is a separate read."""
+    return {
+        **result, "schema": "vrcforge.unity_editor_launch.v1", "persistent": False,
+        "operationStatus": "no_change" if result["status"] == "already_open" else "success",
+        "readbackVerified": True,
+        "readback": {key: result[key] for key in ("projectPath", "processId", "status")},
+    }
+
+
+def installed_core_receipt(result):
+    """Called only after the installer has copied and checked the managed Core files."""
+    return {
+        **result, "commitState": "complete", "persistenceState": "persisted", "readbackVerified": True,
+        "readback": {"scope": "installed_core_files", "projectPath": result["projectPath"],
+                     "installedSha256": result["installedSha256"]},
+    }
+
+
+def core_action_binding(tool, views):
+    for receipt in views:
+        schema = receipt.get("schema")
+        if not receipt.get("projectPath") or receipt.get("ok") is not True:
+            continue
+        project = normcase(normpath(receipt["projectPath"]))
+        if tool == "vrcforge_install_unity_core" and schema == "vrcforge.unity_core_install.v1" and receipt.get("installedAt"):
+            return {"projectPath": project, "installedAt": receipt["installedAt"]}
+        if tool == "vrcforge_open_unity_project" and schema == "vrcforge.unity_editor_launch.v1" and type(receipt.get("processId")) is int:
+            return {"projectPath": project, "processId": receipt["processId"]}
+    return None
+
+
+def ready_process_binding(receipt):
+    core = receipt.get("runtimeCoreInfo")
+    if not (receipt.get("ready") is True and receipt.get("runtimeIdentityMatchesTarget") is True
+            and receipt.get("compileSnapshotFresh") is True and receipt.get("consoleErrorCount") == 0
+            and isinstance(core, Mapping) and type(core.get("processId")) is int and core["processId"] > 0):
+        return None
+    return {"projectPath": normcase(normpath(receipt["projectPath"])), "installedAt": receipt["installedAt"],
+            "processId": core["processId"]}

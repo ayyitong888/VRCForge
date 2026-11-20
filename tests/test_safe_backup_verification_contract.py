@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import patch
 from types import SimpleNamespace
 
+from tests.external_mcp_approval_support import target_effect_verified
 import dashboard_server
 
 
@@ -84,6 +85,7 @@ def test_create_safe_backup_projects_core_hash_readback_as_standard_receipt() ->
         )
 
     assert result["schema"] == "vrcforge.safe_backup_receipt.v1"
+    assert target_effect_verified(result)
     assert result["verified"] is True
     assert result["readback"]["fileCount"] == 1
     assert result["readback"]["files"][0]["sha256"] == "abc123"
@@ -124,6 +126,7 @@ def test_restore_safe_backup_projects_every_file_hash_readback() -> None:
         )
 
     assert result["schema"] == "vrcforge.safe_backup_restore_receipt.v1"
+    assert target_effect_verified(result)
     assert result["verified"] is True
     assert result["readback"]["fileCount"] == 2
     assert result["readback"]["files"][0]["sha256"] == "after-mat"

@@ -3,6 +3,7 @@ import ast
 import os
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -87,8 +88,8 @@ def test_select_scene_object_handler_preserves_reported_path(handler, key):
         "load_dashboard_settings": lambda value: value,
         "build_agent_connection_request": lambda value: value,
         "ensure_dict_payload": lambda value, *args: value,
-        "extract_tool_result_payload": lambda value: value,
-        "invoke_unity_mcp": lambda settings, tool, arguments, **kwargs: calls.append(arguments) or {"ok": True},
+        "extract_tool_result_payload": lambda value: value.payload,
+        "invoke_unity_mcp": lambda settings, tool, arguments, **kwargs: calls.append(arguments) or SimpleNamespace(exit_code=0, payload={"ok": True}),
         "toggle_scene_object_direct": lambda settings, path, active, save: calls.append({"objectPath": path}) or {"ok": True},
         "emit_log": lambda *args: None,
     }

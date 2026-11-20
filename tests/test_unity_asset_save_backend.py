@@ -136,6 +136,7 @@ def test_registered_asset_save_handler_calls_core_once_and_normalizes_saved_and_
         }, False, "no_change"),
     )
     for raw, changed, commit_state in samples:
+        raw["verification"] = "asset_is_clean_after_save" if changed else "asset_is_clean"
         calls = []
 
         def invoke(_settings, tool_name, arguments, **_kwargs):
@@ -156,6 +157,7 @@ def test_registered_asset_save_handler_calls_core_once_and_normalizes_saved_and_
         receipt = _domain_write_receipt(transport)
         outcome = normalize_agent_tool_result(receipt, fallback_summary=handler.description, write=True)
         assert outcome["status"] == "ok"
+        assert outcome["targetEffectVerified"] is True
         assert outcome["mutationStarted"] is changed
         assert outcome["committed"] is True
         if changed:

@@ -30,7 +30,8 @@ def test_native_scan_is_persisted_slim_and_legacy_ref_expires_normally_next_turn
     second = run(gateway, tmp_path, message="Follow up", clientTurnId="later")
     assert len(invoked) == 1
     read = next(row for row in second["steps"] if row["tool"] == "vrcforge_read_tool_result")
-    assert read["status"] == "executed"
+    assert read["status"] == "unknown"
+    assert read["outcome"]["completionKnown"] is False
     assert read["result"]["status"] == "needs_rescan" and read["result"]["ok"] is True
     assert read["result"]["reason"] == "core_scope_unavailable"
     assert model.requests[2]["messages"][:len(old_history)] == old_history

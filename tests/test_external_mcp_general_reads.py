@@ -162,3 +162,18 @@ def test_local_gateway_audit_preserves_arguments_and_values(tmp_path):
     gateway.append_audit({"event": "local-original-values", "arguments": original})
     row = json.loads(gateway.audit_log_path.read_text(encoding="utf-8").splitlines()[-1])
     assert row["arguments"] == original
+
+
+@pytest.mark.parametrize("state", ["partial", "pending"])
+def test_external_read_keeps_observed_progress_and_followup(tmp_path, state):
+    gateway = _gateway(tmp_path)
+    tool = "vrcforge_read_text_file"
+    continuation = {"tool": tool, "arguments": {"path": "one.txt", "startLine": 2}}
+    gateway.register_tool(tool, "Read next page", "read/debug", lambda _: {
+        "ok": True, "operationStatus": state, "readbackState": state,
+        "completionKnown": False, "nextAction": continuation, "nextRequest": continuation,
+    })
+    reply = gateway.call_external_mcp_tool(tool, {"projectPath": str(tmp_path), "path": "one.txt"})
+    assert reply["status"] == reply["readbackState"] == state
+    assert reply["operationStatus"] == state and reply["completionKnown"] is False
+    assert reply["nextAction"] == reply["nextRequest"] == continuation

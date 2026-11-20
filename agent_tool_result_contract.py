@@ -8,6 +8,7 @@ failure or an unverified write into a successful completion claim.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 import math
 import re
 from typing import Any
@@ -720,11 +721,24 @@ def normalize_agent_tool_result(
         )
     ):
         causal_views = [gateway_outcome, *causal_views]
+    # Only the operation owner can attest to an observed non-persistent effect.
+    # An embedded window/process result cannot confirm its enclosing asset write.
+    runtime_effect = write and status == "ok" and (
+        (owner is receipt and receipt.get("persistent") is False
+         and receipt.get("readbackVerified") is True and isinstance(receipt.get("readback"), Mapping)
+         and bool(receipt["readback"]) and receipt.get("operationStatus") in {"success", "no_change"})
+        or (receipt.get("tool") and receipt.get("operationId")
+            and receipt.get("persistenceState") == "not_applicable" and receipt.get("readbackState") == "verified"
+            and isinstance(gateway_outcome, Mapping) and gateway_outcome.get("schema") == TOOL_RESULT_SCHEMA
+            and gateway_outcome.get("operationId") == receipt["operationId"]
+            and gateway_outcome.get("targetEffectVerified") is True)
+    )
     canonical_facts = canonical_result_facts(
         causal_views,
         success=status == "ok" if status in {"failed", "ok"} else None,
         status=status,
         write=write,
+        persistent=not runtime_effect,
     )
     canonical_facts.pop("status", None)
     result.update(canonical_facts)
@@ -735,14 +749,19 @@ def normalize_agent_tool_result(
     elif status == "needs_user_action" and needs_action and not verification_needs_action:
         operation = "user_confirmation_required"
     result["operationStatus"] = operation
-    for key in ("completionKnown", "lastKnownStatus", "nextRequest"):
+    if not write:
+        if isinstance(owner.get("readbackState"), str):
+            result["readbackState"] = "failed" if status == "failed" else owner["readbackState"]
+        elif status in INCOMPLETE_OPERATION_STATES | {"pending"}:
+            result["readbackState"] = status
+    for key in ("completionKnown", "lastKnownStatus"):
         if key in owner:
             result[key] = _bounded_value(owner[key])
     page = next((view for view in _views(value, nested_keys=_CARRIER_KEYS) if type(view.get("hasMore")) is bool
                  or type(view.get("truncated")) is bool), None)
     if page is not None:
         for key in PAGE_PROGRESS_FIELDS:
-            if key in page:
+            if key != "nextRequest" and key in page:
                 result[key] = _bounded_value(page[key])
         if not write and (page.get("hasMore") or page.get("truncated")):
             result.setdefault("readbackState", "partial")
@@ -750,6 +769,11 @@ def normalize_agent_tool_result(
         for key in ("nextCursor", "remainingCount"):
             if key in owner:
                 result[key] = _bounded_value(owner[key])
+    # Continuations are executable coordinates. Summarizing their selectors
+    # or trimming a list of clip paths changes the operation to be resumed.
+    request_owner = page if page is not None and "nextRequest" in page else owner
+    if "nextRequest" in request_owner:
+        result["nextRequest"] = deepcopy(request_owner["nextRequest"])
     if job := job_receipt(value):
         result["jobId"] = job.get("jobId") or job.get("job_id")
         result["jobStatus"] = job.get("lastKnownStatus") or job.get("status")
@@ -757,8 +781,8 @@ def normalize_agent_tool_result(
         result["targetEffectVerified"] = bool(
             status == "ok" and operation not in INCOMPLETE_OPERATION_STATES | {"pending", "preview"}
             and result.get("readbackState") == "verified"
-            and result.get("commitState") in {"complete", "no_change"}
-            and result.get("committed") is True
+            and (runtime_effect or (result.get("commitState") in {"complete", "no_change"}
+                 and result.get("committed") is True))
             and not any(
                 view.get("verified") is False or view.get("persistedReadback") is False
                 or view.get("partial") is True or view.get("preview") is True

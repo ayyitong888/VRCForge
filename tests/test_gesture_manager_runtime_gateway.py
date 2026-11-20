@@ -240,9 +240,10 @@ def test_gesture_manager_enter_play_mode_finalizer_returns_only_connection_ident
         "sceneDirty": False,
         "mutationStarted": True,
         "committed": True,
-        "commitState": "runtime_connected",
+        "commitState": "complete",
     }
     assert result == {**expected, "schema": "vrcforge.editor_state_completion.v1", "verified": True,
+                      "operationStatus": "success", "readbackVerified": True,
                       "transitionScheduled": False, "verificationRequired": False,
                       "identityVerification": {"verified": False, "status": "not_bound"},
                       "readback": {key: value for key, value in expected.items() if key not in {"persistent", "sceneDirty", "mutationStarted", "committed", "commitState"}}}

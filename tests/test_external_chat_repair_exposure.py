@@ -9,7 +9,7 @@ import pytest
 import dashboard_server
 from agent_gateway import AgentGateway, EXPOSURE_LAYER_EXECUTION, EXPOSURE_LAYER_PLANNING
 from session_store_integrity import SessionStoreTarget, verify_session_store_repair
-from tests.external_mcp_approval_support import review_external_proposal
+from tests.external_mcp_approval_support import review_external_proposal, target_effect_verified
 
 
 @pytest.mark.parametrize("partial", [False, True])
@@ -26,6 +26,7 @@ def test_repair_readback_preserves_records_and_rejects_damaged_backup(tmp_path, 
     args = {"projectPath": str(project), "storeId": store_id, "expectedDigest": digest}
     result = dashboard_server.repair_project_chat_store_sync(args)
     assert result["ok"] and result["verified"]
+    assert target_effect_verified(result)
     assert result["status"] == ("repaired" if partial else "quarantined")
     if partial:
         assert json.loads(path.read_text())["chats"] == [valid]
@@ -33,6 +34,7 @@ def test_repair_readback_preserves_records_and_rejects_damaged_backup(tmp_path, 
         assert not path.exists()
     repeated = dashboard_server.repair_project_chat_store_sync(args)
     assert repeated["status"] == "already_repaired" and repeated["verified"]
+    assert target_effect_verified(repeated)
     backup = path.parent / result["backupBasename"]
     if damage == "missing":
         backup.unlink()

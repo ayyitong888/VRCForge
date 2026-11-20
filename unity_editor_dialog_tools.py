@@ -216,7 +216,17 @@ def handle_unity_editor_dialog(
         if after.get("available") is True and not after.get("probeError") and after.get("unityProcessId") == snapshot["unityProcessId"]:
             current = next((d for d in after["dialogs"] if d["windowHandle"] == dialog["windowHandle"]), None)
             if current is None or current["dialogId"] != dialog["dialogId"]:
-                return {**result, "ok": True, "dialogClosed": current is None, "dialogChanged": current is not None}
+                readback = {
+                    "projectPath": after["projectPath"],
+                    "unityProcessId": after["unityProcessId"],
+                    "windowHandle": dialog["windowHandle"],
+                    "dialogClosed": current is None,
+                    "dialogChanged": current is not None,
+                }
+                return {
+                    **result, **readback, "ok": True, "persistent": False,
+                    "operationStatus": "success", "readbackVerified": True, "readback": readback,
+                }
             message = "The dialog action was dispatched, but the dialog did not close or change within two seconds."
         else:
             # A closing HWND may disappear during enumeration. Keep observing

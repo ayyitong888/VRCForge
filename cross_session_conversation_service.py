@@ -320,18 +320,20 @@ class CrossSessionConversationService:
                 return {**result, "status": "running" if reason == "waiting_for_tool" else reason}
             if outcome:
                 return {**result, "status": outcome, "completed": outcome == "completed", "reason": reason}
-            return {**result, "status": plan.get("nextStep") or "result_unavailable"}
+            if plan.get("nextStep"):
+                return {**result, "status": plan["nextStep"]}
 
-        queue_status = next((row.get("status") for row in self._list_followups()
-                             if isinstance(row, Mapping) and row.get("sessionId") == chat_id
-                             and row.get("clientTurnId") == client_turn_id), "")
-        if queue_status == "claimed":
-            return {**result, "status": "running"}
-        if queue_status in {"paused", "cancelled", "failed"}:
-            return {**result, "status": queue_status}
-        if queue_status == "acked":
-            return {**result, "status": "result_unavailable"}
-        return {**result, "status": item.get("queueStatus") or "queued"}
+        else:
+            queue_status = next((row.get("status") for row in self._list_followups()
+                                 if isinstance(row, Mapping) and row.get("sessionId") == chat_id
+                                 and row.get("clientTurnId") == client_turn_id), "")
+            if queue_status == "claimed":
+                return {**result, "status": "running"}
+            if queue_status in {"paused", "cancelled", "failed"}:
+                return {**result, "status": queue_status}
+            if queue_status != "acked":
+                return {**result, "status": item.get("queueStatus") or "queued"}
+        return {**result, "status": "result_unavailable", "operationStatus": "unknown", "completionKnown": False}
 
     @staticmethod
     def _persisted_followup_response(

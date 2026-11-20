@@ -766,7 +766,8 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
             changed = project_structured_tool_evidence(
                 {"changedAssetPaths": saved.get("changedAssetPaths", [])}, sanitize_text=sanitize, max_chars=1500)
             reply = {"schema": PAGE_SCHEMA, "ok": True, "authority": "untrusted_tool_output",
-                    "status": "needs_rescan", "expired": True, "freshness": "unverified",
+                    "status": "needs_rescan", "operationStatus": "unknown", "completionKnown": False,
+                    "expired": True, "freshness": "unverified",
                     "resultRef": ref, "source": source, "items": [], "hasMore": False,
                     "reason": saved["reason"], "capturedAt": saved.get("capturedAt"),
                     "rescanScope": scope.get("data", {}), "rescanScopeTruncated": scope.get("truncated", False),
@@ -776,7 +777,7 @@ def read_tool_result(params: Mapping[str, Any], *, sanitize: Callable[[object, i
             replacement = saved.get("replacement")
             if isinstance(replacement, dict) and isinstance(replacement.get("step"), dict):
                 fresh = replacement["step"]
-                reply.update(status="replaced", replacementRef=replacement["resultRef"],
+                reply.update(status="replaced", operationStatus="partial", hasMore=True, replacementRef=replacement["resultRef"],
                              replacementSummary=scan_result_summary(fresh, sanitize),
                              nextRequest={"tool": TOOL_NAME, "arguments": {"resultRef": replacement["resultRef"]}},
                              interpretation="Historical content is unchanged. The host already rescanned; page the replacement reference without invoking the scan tool.")

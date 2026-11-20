@@ -205,7 +205,7 @@ def _bounded_contract_value(value: Any, *, depth: int = 0) -> Any:
 
 def canonical_result_facts(
     sources: list[Mapping[str, Any]], *, success: bool | None = None, status: str | None = None,
-    write: bool = False,
+    write: bool = False, persistent: bool = True,
 ) -> dict[str, Any]:
     """Project the shared result/cause fields for internal and external agents."""
 
@@ -360,7 +360,7 @@ def canonical_result_facts(
             commit_state = "complete"
         if commit_state in _KNOWN_COMMIT_STATES:
             facts["commitState"] = commit_state
-    if not commit_state and (
+    if persistent and not commit_state and (
         "mutationStarted" in facts or "committed" in facts
     ):
         if facts.get("mutationStarted") is False and facts.get("committed") is False:
@@ -370,7 +370,7 @@ def canonical_result_facts(
         facts["commitState"] = commit_state
     raw_persistence = _first_present(expanded_sources, "persistenceState")
     raw_readback = _first_present(expanded_sources, "readbackState")
-    if write and not commit_state:
+    if write and persistent and not commit_state:
         commit_state = facts["commitState"] = "unknown"
     if (
         commit_state == "not_started"
@@ -447,7 +447,11 @@ def canonical_result_facts(
                 },
             )
 
-    if write:
+    if write and not persistent:
+        facts.setdefault("commitState", "not_applicable")
+        facts["persistenceState"] = "not_applicable"
+        facts["readbackState"] = "verified"
+    elif write:
         persistence_state = str(raw_persistence).strip().casefold() if isinstance(raw_persistence, str) else ""
         readback_state = str(raw_readback).strip().casefold() if isinstance(raw_readback, str) else ""
         saved_false = any(source.get("saved") is False or source.get("sceneSaved") is False for source in expanded_sources)

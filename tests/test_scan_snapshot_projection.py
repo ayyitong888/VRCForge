@@ -71,6 +71,8 @@ def test_owned_expired_reference_is_business_result_and_leaves_history_untouched
     assert page["ok"] is True and page["status"] == "needs_rescan"
     assert page["expired"] is True and page["items"] == []
     assert page["reason"] == "core_scope_unavailable"
+    from agent_tool_result_contract import normalize_agent_tool_result
+    assert normalize_agent_tool_result(page, fallback_summary="", write=False)["status"] == "unknown"
     assert step == old
 
 

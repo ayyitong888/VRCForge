@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import agent_gateway
+from tests.external_mcp_approval_support import target_effect_verified
 import dashboard_server
 from prepared_unity_execution import PREPARED_UNITY_EXECUTION_ARGUMENT_KEY, prepared_call
 
@@ -338,6 +339,7 @@ def test_single_capture_handler_accepts_windows_slash_normalization_and_requires
 
     assert result["ok"] is True
     assert Path(result["imagePath"]) == output_path.resolve()
+    assert target_effect_verified(result)
 
 
 def test_single_capture_handler_strips_execution_target_before_request_validation(tmp_path, monkeypatch) -> None:
@@ -499,6 +501,7 @@ def test_multi_capture_handler_issues_one_task_owned_managed_receipt(tmp_path, m
 
     assert result["ok"] is True
     assert result["captureEvidenceId"] == consumed["captureEvidenceId"]
+    assert target_effect_verified(result)
     assert result["data"]["angles"] == ["front", "back"]
     assert result["evidence"] == consumed["evidence"]
 
