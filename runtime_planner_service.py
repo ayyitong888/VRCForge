@@ -48,7 +48,7 @@ from agent_handoff_graph import parse_handoff_graph
 from agent_runtime_session_state import (
     NATIVE_RUNTIME_CONTEXT_PREFIX, NATIVE_RUNTIME_STATE_PREFIX,
     inject_native_handoff_context, model_handoff_continuation, model_handoff_payload, native_handoff_message_sources,
-    native_model_history, native_runtime_state_content,
+    native_model_history, native_runtime_state_content, quote_tool_history_without_reasoning,
 )
 from agent_native_handoff_blocks import fit_handoff_post_context, legacy_transaction_pointer, project_legacy_handoff_blocks
 from native_request_composition import (
@@ -967,6 +967,16 @@ class PlannerTurnMetadata:
     native_binding: str = ""
     provider: str = ""
     model: str = ""
+    provider_route: str = ""
+    thinking_level: str = ""
+    override_base: str = ""
+
+
+class _RequestRouteChanged(Exception):
+    """The prepared request must be measured and encoded for a new route."""
+
+    def __init__(self, retries: int):
+        self.retries = retries
 
 
 class PlannerTurnPort(Protocol):
@@ -2289,10 +2299,17 @@ class RuntimePlannerService:
                 self._turn_metadata.reset(token)
 
     def native_conversation_binding(self, project_root: str) -> str:
-        route = self._turn_metadata.get().native_binding
+        from agent_native_history_store import project_native_binding
+
+        return project_native_binding(project_root) if self._turn_metadata.get().native_binding else ""
+
+    def legacy_native_route(self, project_root: str) -> tuple[str, str]:
+        metadata = self._turn_metadata.get()
+        route = metadata.native_binding
         if not route:
-            return ""
-        return hashlib.sha256((route + "\n" + ntpath.normcase(ntpath.normpath(project_root or ""))).encode()).hexdigest()
+            return "", ""
+        legacy = hashlib.sha256((route + "\n" + ntpath.normcase(ntpath.normpath(project_root or ""))).encode()).hexdigest()
+        return legacy, metadata.provider_route
 
     def native_result_observation(self, step: Mapping[str, object], *, project_context_active: bool = False, retained_tool_definitions: Mapping[str, Mapping[str, object]] | None = None) -> dict[str, object]:
         """Use the established bounded, trust-labelled observation/readback projection."""
@@ -2402,6 +2419,18 @@ class RuntimePlannerService:
                 projected[key]["page"] = {**page, "nextRequest": {**page["nextRequest"], "tool": tool.name}}
         return projected
 
+    def _project_provider_history(
+        self, messages: list[dict[str, Any]], *, handoff_snapshot=None, resume_read_projection=None,
+    ) -> list[dict[str, Any]]:
+        metadata = self._turn_metadata.get()
+        projected = native_model_history(messages, handoff_snapshot=handoff_snapshot,
+                                         provider_route=metadata.provider_route)
+        if resume_read_projection:
+            resume_read_projection(projected)
+        if metadata.provider == "deepseek" and metadata.thinking_level != "none":
+            return quote_tool_history_without_reasoning(projected)
+        return projected
+
     def native_context_guard(
         self,
         request: Mapping[str, object],
@@ -2409,6 +2438,7 @@ class RuntimePlannerService:
         context_usage: Mapping[str, object] | None = None,
         handoff_snapshot: dict[str, Any] | None = None,
         resume_read_projection: Callable[[list[dict[str, Any]]], None] | None = None,
+        messages_projected: bool = False,
     ) -> dict[str, object] | None:
         """Measure one serialized native request against the host-bound limit.
 
@@ -2421,10 +2451,9 @@ class RuntimePlannerService:
         if not isinstance(context_limit, int) or context_limit <= 0:
             return None
         messages = request.get("messages")
-        if isinstance(messages, list):
-            projected_messages = native_model_history(messages, handoff_snapshot=handoff_snapshot)
-            if resume_read_projection:
-                resume_read_projection(projected_messages)
+        if isinstance(messages, list) and not messages_projected:
+            projected_messages = self._project_provider_history(messages, handoff_snapshot=handoff_snapshot,
+                                                                resume_read_projection=resume_read_projection)
             request = {**request, "messages": projected_messages}
         serialized = json.dumps(
             _native_measurement_projection(dict(request)),
@@ -2436,15 +2465,19 @@ class RuntimePlannerService:
         last_input_tokens = usage_int(usage.get("lastInputTokens"))
         previous_prompt_tokens = usage_int(usage.get("lastPromptEstimatedTokens"))
         usage_exact = bool(usage.get("lastUsageExact", usage.get("exact")))
+        prior_guard = ensure_dict(usage.get("nativeContextGuard"))
+        changed_route = (
+            prior_guard.get("observedProvider") and prior_guard["observedProvider"] != metadata.provider
+            or prior_guard.get("observedModel") and prior_guard["observedModel"] != metadata.model
+        )
         provider_overhead = (
             max(0, last_input_tokens - previous_prompt_tokens)
-            if usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None
+            if usage_exact and not changed_route and last_input_tokens is not None and previous_prompt_tokens is not None
             else 0
         )
         projected_tokens = provider_overhead + request_tokens
         image_count = _native_image_count(request)
         message_count = len(request.get("messages") or [])
-        prior_guard = ensure_dict(usage.get("nativeContextGuard"))
         prior_input = usage_int(prior_guard.get("observedInputTokens"))
         prior_messages = usage_int(prior_guard.get("messageCount"))
         soft_projection = {}
@@ -2548,7 +2581,8 @@ class RuntimePlannerService:
         # Only the history and its projection boundaries affect compaction;
         # tool exposure/recovery metadata must not restart a failed attempt.
         def compaction_source(value):
-            return {"messages": [row for row in value["messages"] if not native_runtime_state_content(row)],
+            return {"contextLimit": guard["contextLimit"],
+                    "messages": [row for row in value["messages"] if not native_runtime_state_content(row)],
                     "activeTurnStart": value.get("activeTurnStart"),
                     "humanUserMessageIndices": value.get("humanUserMessageIndices")}
 
@@ -2781,26 +2815,33 @@ class RuntimePlannerService:
             instruction_snapshot = load_project_instructions(
                 params.get("projectRoot") or params.get("projectPath")
             )
-            llm_plan = self._llm_plan_agent_turn(
-                message,
-                observe,
-                history or [],
-                loop_state,
-                context_usage=context_usage,
-                reasoning_trace=reasoning_trace,
-                prompt_loop_state=prompt_loop_state,
-                propagate_provider_errors=bool(params.get("_backgroundGoalRun")),
-                exposure_layer=exposure_layer,
-                planner_label=planner_label,
-                project_context_active=params.get("_projectContextActive") is not False,
-                project_path=params.get("projectPath") or params.get("projectRoot"),
-                internal_tool_blocks=params.get("_internalToolBlocks"),
-                global_instructions=self._read_global_instructions(),
-                project_instructions=instruction_snapshot.content,
-                native_turn=native_turn,
-                provider_retry_callback=provider_retry_callback,
-                provider_retry_wait=provider_retry_wait,
-            )
+            retry_attempts = 0
+            while True:
+                try:
+                    llm_plan = self._llm_plan_agent_turn(
+                        message,
+                        observe,
+                        history or [],
+                        loop_state,
+                        context_usage=context_usage,
+                        reasoning_trace=reasoning_trace,
+                        prompt_loop_state=prompt_loop_state,
+                        propagate_provider_errors=bool(params.get("_backgroundGoalRun")),
+                        exposure_layer=exposure_layer,
+                        planner_label=planner_label,
+                        project_context_active=params.get("_projectContextActive") is not False,
+                        project_path=params.get("projectPath") or params.get("projectRoot"),
+                        internal_tool_blocks=params.get("_internalToolBlocks"),
+                        global_instructions=self._read_global_instructions(),
+                        project_instructions=instruction_snapshot.content,
+                        native_turn=native_turn,
+                        provider_retry_callback=provider_retry_callback,
+                        provider_retry_wait=provider_retry_wait,
+                        retry_attempts=retry_attempts,
+                    )
+                    break
+                except _RequestRouteChanged as changed:
+                    retry_attempts = changed.retries
             if llm_plan is not None:
                 return llm_plan
             return self._planner_failure_plan(
@@ -3157,6 +3198,12 @@ class RuntimePlannerService:
 
 
 
+    def _refresh_request_metadata(self) -> PlannerTurnMetadata:
+        refresh = getattr(self._turn, "refresh_request", None)
+        if callable(refresh) and (metadata := refresh()) is not None:
+            self._turn_metadata.set(metadata)
+        return self._turn_metadata.get()
+
     def _llm_plan_agent_turn(
             self,
             message: str,
@@ -3177,6 +3224,7 @@ class RuntimePlannerService:
             native_turn: NativeRuntimeTurn | None = None,
             provider_retry_callback: Callable[[dict[str, object]], None] | None = None,
             provider_retry_wait: Callable[[float], bool] | None = None,
+            retry_attempts: int = 0,
         ) -> dict[str, object] | None:
             model_port = self._model
             if model_port is None:
@@ -3190,12 +3238,13 @@ class RuntimePlannerService:
                 else "initial"
             )
             format_correction: dict[str, object] = {}
-            retry_attempts = 0
             retry_decision = ""
             actual_model = ""
             native_call_ids: list[str] = []
             try:
                 native = native_turn is not None
+                metadata = self._refresh_request_metadata()
+                planner_label = metadata.planner_label or planner_label
                 queued_receipt = native_turn.next_receipt() if native and native_turn.has_queued_calls else None
                 persist_scan_policy = getattr(native_turn, "persist_scan_result_policy", None) if native else None
                 if queued_receipt is None and callable(persist_scan_policy):
@@ -3206,6 +3255,11 @@ class RuntimePlannerService:
                 tool_block_ids = ["core", *(row["id"] for row in canonical_tool_tree()["roots"])]
                 binding_tool_definition = self._binding_tool_definition(project_context_active) if queued_receipt is None else None
                 if native and queued_receipt is None:
+                    if metadata.provider_route and native_turn.provider_route != metadata.provider_route:
+                        native_turn.provider_turn_state.clear()
+                        if native_turn.provider_route:
+                            native_turn.output_truncation.max_output_tokens = None
+                        native_turn.provider_route = metadata.provider_route
                     tool_block_ids = native_turn.freeze_tool_block_ids(tool_block_ids)
                     if project_context_active:
                         binding_tool_definition = native_turn.freeze_binding_tool_definition(binding_tool_definition)
@@ -3273,10 +3327,10 @@ class RuntimePlannerService:
                         if tool_image_content:
                             native_request = bind_tool_images(native_request, tool_image_content, active_turn_start=active_turn_start)
                     state_message = native_request["messages"][-1]
-                    provider_messages = native_model_history(native_request["messages"], handoff_snapshot=native_turn.snapshot())
-                    project_resume_reads(provider_messages)
+                    provider_messages = self._project_provider_history(native_request["messages"], handoff_snapshot=native_turn.snapshot(),
+                                                                       resume_read_projection=project_resume_reads)
                     native_request = copy_native_request(native_request, {"messages": provider_messages})
-                    native_guard = self.native_context_guard(native_request, context_usage=context_usage)
+                    native_guard = self.native_context_guard(native_request, context_usage=context_usage, messages_projected=True)
                     # Refresh only the private diagnostic provenance after
                     # recovery/compaction/image projection.  The provider sees
                     # instructions/messages/tools only; the sidecar is removed
@@ -3291,8 +3345,11 @@ class RuntimePlannerService:
                         context_usage["nativeContextGuard"] = native_guard
                     last_compaction = native_turn.compaction or {}
                     if (native_turn.cancelled() or native_guard is not None and native_guard.get("blocked")
-                            or last_compaction.get("applied") and last_compaction.get("blocked")):
+                            or last_compaction.get("applied") and last_compaction.get("blocked")
+                            and last_compaction.get("contextLimit") == metadata.verified_context_limit):
                         cancelled = native_turn.cancelled()
+                        if not cancelled and self._refresh_request_metadata() != metadata:
+                            raise _RequestRouteChanged(retry_attempts)
                         blocked_plan = self._planner_failure_plan(
                             cause_code="context_compaction_required", phase=phase, planner_label=planner_label,
                         )
@@ -3328,6 +3385,11 @@ class RuntimePlannerService:
                     rejected_native_batch = False
                     try:
                         while True:
+                            if queued_receipt is None:
+                                selected = self._refresh_request_metadata()
+                                if native and selected != metadata:
+                                    raise _RequestRouteChanged(retry_attempts)
+                                metadata = selected
                             try:
                                 raw_response = (
                                     PlannerModelResult("", assistant_message=queued_receipt, finish_reason="tool_calls")
@@ -3370,6 +3432,8 @@ class RuntimePlannerService:
                                         raise RuntimeError("Provider retry cancelled by user.") from provider_exc
                                 else:
                                     time.sleep(delay)
+                    except _RequestRouteChanged:
+                        raise
                     except Exception as exc:
                         from provider_runtime_adapters import ProviderNativeToolRejection
 
@@ -3408,6 +3472,8 @@ class RuntimePlannerService:
                     parse_diagnostics: dict[str, object] = {}
                     if native:
                         receipt = deepcopy(dict(raw_response.assistant_message))
+                        if queued_receipt is None and metadata.provider_route:
+                            receipt["providerRoute"] = metadata.provider_route
                         truncated = raw_response.finish_reason == "length"
                         if raw_response.finish_reason not in {"stop", "tool_calls", "length"} or receipt.get("role") != "assistant":
                             raise ValueError("Invalid native assistant response finish state.")
@@ -3529,6 +3595,8 @@ class RuntimePlannerService:
                         "No tool was dispatched from that invalid response. Parser error: "
                         + json.dumps(format_error, ensure_ascii=False)
                     )
+            except _RequestRouteChanged:
+                raise
             except Exception as exc:  # noqa: BLE001 - interactive failures become a bounded typed result.
                 if propagate_provider_errors:
                     raise

@@ -1396,7 +1396,7 @@
     "description": "完全权限会跳过手动审批提示，并保留审计记录。请确保你理解风险。"
   },
   "provider": {
-    "runtimeConfigLocked": "任务运行或等待批准、回答时，暂时不能修改模型配置。任务结束或停止后即可修改。",
+    "runtimeConfigLocked": "模型和推理强度从下一次模型请求起生效。任务运行或等待处理时，可添加新供应商，已有连接的凭据和地址暂时锁定。",
     "apiProvider": "API 供应商",
     "apiKey": "访问密钥",
     "baseUrl": "接口地址",
@@ -1418,6 +1418,7 @@
     "protocolAutoNegotiationHint": "仅为你选择的模型协商可用的通信协议，不会更换模型。",
     "customEndpoint": "自定义兼容接口",
     "noKeyNeeded": "无需密钥",
+    "chooseModelToSave": "请先输入模型 ID，或点「刷新模型列表」并选择模型，然后保存。",
     "selectModel": "请选择模型",
     "savedKeyTestHint": "密钥已保存。如有其他修改，请先保存，再点击“测试连接”验证配置。",
     "savedKeyHint": "已保存密钥，留空即沿用",
@@ -1431,7 +1432,8 @@
     "noModelsReturned": "该供应商未返回模型列表，可手动填写模型名",
     "modelPlaceholder": "点击右侧刷新拉取模型列表，或手动填写",
     "reasoningEffort": "推理强度",
-    "reasoningNextTurnHint": "从下一轮生效，当前任务保留已绑定的推理强度。",
+    "changeModel": "切换模型，当前为 {{model}}",
+    "reasoningNextTurnHint": "从下一次模型请求起生效。",
     "reasoningEffortHint": "只显示当前模型支持的选项。“默认”沿用模型设置；“无”关闭推理。",
     "reasoning_default": "默认",
     "reasoning_none": "无",

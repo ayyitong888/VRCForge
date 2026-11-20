@@ -49,7 +49,7 @@ export const recordAgentRunQueued=async(_endpoint,payload)=>{
   return {ok:true,accepted:true,mode:'followup',queueId:'queued-answer'};
 };
 export const sendAgentMessage=async(_e,_m,sessionId,_h,_a,options)=>{
-  window.sends.push({sessionId,clientTurnId:options.clientTurnId});
+  window.sends.push({sessionId,clientTurnId:options.clientTurnId,model:options.model,provider:options.provider});
   if((window.fixture.name.startsWith('unseen-child')||window.fixture.name==='child-already-delivered')&&window.sends.length===1){
     window.childNowVisible=window.fixture.name!=='child-already-delivered';
     const code='sub_agent_parent_delivery_pending';
@@ -88,6 +88,8 @@ try {
    await page.evaluate(()=>{window.childNowVisible=false;return window.controller.resumeQueuedTurns();});
    await page.waitForFunction(()=>window.controller.queued.length===0&&window.chats[0].items.some(i=>i.type==='agent'));
    assert.deepEqual(await page.evaluate(()=>window.sends.map(x=>x.clientTurnId)),['fresh-input','fresh-input']);
+   assert.deepEqual(await page.evaluate(()=>window.sends.map(x=>[x.provider ?? null,x.model ?? null])),
+     [['fixture','fixture'],[null,null]],'fresh selection applies directly; drained default resolves on the host');
  }
  await page.goto(`http://127.0.0.1:${server.address().port}/?case=child-already-delivered`);
  await page.waitForFunction(()=>window.controller);

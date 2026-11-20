@@ -1545,7 +1545,11 @@ export function useChatRunController({
         throw new AgentTurnDeliveryUnconfirmedError("The chat changed before the Agent turn could start.");
       }
       runtimeRequestStarted = true;
-      const confirmProviderConnection = bindRuntimeProviderConnection?.(targetEndpoint, turn.provider, turn.model);
+      // A desktop follow-up stores the composer defaults for its local history.
+      // Let the host resolve the active selection when the queued message is actually sent.
+      const useCurrentModel = !background && Boolean(turn.queuedFrom || turn.queueId);
+      const confirmProviderConnection = useCurrentModel ? undefined
+        : bindRuntimeProviderConnection?.(targetEndpoint, turn.provider, turn.model);
       const owner: DispatchedTurn = { chatId, clientTurnId: turn.id, sessionId: chatSessionId,
         endpoint: targetEndpoint, confirmProviderConnection, followup };
       if (lane) {
@@ -1563,10 +1567,9 @@ export function useChatRunController({
         chatId,
         projectPath: chat?.projectPath || undefined,
         projectType: chat?.projectType || (chat?.projectPath ? "unity" : "general"),
-        provider: turn.provider,
-        providerLabel: turn.providerLabel,
-        model: turn.model,
-        contextLimit: turn.contextLimit,
+        ...(!useCurrentModel && {
+          provider: turn.provider, providerLabel: turn.providerLabel, model: turn.model, contextLimit: turn.contextLimit,
+        }),
         maxAgenticTurns: background ? DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS : undefined,
         clientTurnId: turn.id,
         goalDeliveryId: turn.goalDelivery?.deliveryId,

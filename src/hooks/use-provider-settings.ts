@@ -270,9 +270,10 @@ export function useProviderSettings({
   function handleProviderChange(provider: string) {
     previousExplicitProtocol.current = null;
     setApiProvider(provider);
+    setApiKey("");
     setApiModel(defaultModelForProvider(provider));
     setApiType("auto");
-    setApiBaseUrl(defaultBaseUrlForProvider(provider));
+    setApiBaseUrl(apiConfig?.savedProviderBaseUrls?.[provider] ?? defaultBaseUrlForProvider(provider));
     setApiThinkingLevel("default");
     setReasoningVariants(null);
     setModelOptions([]);
@@ -411,8 +412,6 @@ export function useProviderSettings({
       setModelOptionsScope({ provider: payload.provider || apiProvider, baseUrl: payload.baseUrl || apiBaseUrl.trim() });
       if (models.length === 0) {
         setModelsError(t("provider.noModelsReturned"));
-      } else if (!apiModel.trim()) {
-        handleApiModelChange(payload.selectedModel && models.some((item) => item.id === payload.selectedModel) ? payload.selectedModel : models[0].id);
       }
     } catch (cause) {
       setModelOptions([]);

@@ -627,7 +627,7 @@ def test_skip_blocking_question_saves_without_resuming_and_allows_next_message(t
     assert json.loads(results[0]["content"])["status"] == "skipped"
 
 
-@pytest.mark.parametrize("native_history", ["shared", "compacted", "different-binding"])
+@pytest.mark.parametrize("native_history", ["shared", "compacted", "changed-provider"])
 def test_skip_older_question_during_newer_native_request(tmp_path, monkeypatch, native_history):
     session_id = "native-continuation-session"
     original_question = "Should the original asset be imported?"
@@ -647,7 +647,7 @@ def test_skip_older_question_during_newer_native_request(tmp_path, monkeypatch, 
     gateway.register_tool("vrcforge_fixture_read", "When to use: read. When NOT to use: write.", "read/debug", lambda _p: {"ok": True})
     assert _run(gateway, tmp_path)["plan"]["nextStep"] == "needs_user_action"
     [question] = gateway.questions.list(session_id=session_id)["questions"]
-    if native_history == "different-binding":
+    if native_history == "changed-provider":
         monkeypatch.setattr(gateway.runtime_planner._turn, "bind", lambda _request: nullcontext(
             PlannerTurnMetadata(native_binding="fixture-independent-provider-route")))
     elif native_history == "compacted":
@@ -693,7 +693,7 @@ def test_skip_older_question_during_newer_native_request(tmp_path, monkeypatch, 
     before_skip, after_skip = model.requests[1:]
     assert not skipped_questions(before_skip)
     assert old_tool_results(before_skip) == old_tool_results(after_skip)
-    if native_history == "shared":
+    if native_history in {"shared", "changed-provider"}:
         [old_result] = old_tool_results(before_skip)
         assert json.loads(old_result["content"])["status"] == "execution_unknown"
         assert skipped_questions(after_skip) == [{"questionId": question["questionId"], "question": original_question}]

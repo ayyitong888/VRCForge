@@ -8,12 +8,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 from atomic_file_replace import replace_with_retry
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+
+def project_native_binding(project_root: str) -> str:
+    project = ntpath.normcase(ntpath.normpath(project_root)) if project_root else ""
+    return "project:v1:" + hashlib.sha256(project.encode()).hexdigest()
 
 
 class NativeHistoryPersistenceError(OSError):
@@ -42,6 +48,15 @@ class NativeHistoryStore:
             path = max(paths, key=lambda p: p.stat().st_mtime_ns)
         else:
             path = self._path(session_id, binding)
+        return self._read(path, session_id, binding)
+
+    def legacy_snapshots(self, session_id: str) -> Iterator[dict[str, Any]]:
+        for path in sorted(self._paths(session_id), key=lambda item: item.stat().st_mtime_ns, reverse=True):
+            saved = self._read(path, session_id)
+            if saved and not saved["native"]["binding"].startswith("project:"):
+                yield saved
+
+    def _read(self, path: Path, session_id: str, binding: str | None = None) -> dict[str, Any] | None:
         try:
             with path.open("rb") as stream:
                 raw = stream.read()
@@ -52,7 +67,8 @@ class NativeHistoryStore:
         value = json.loads(raw)
         if not isinstance(value, dict) or value.get("version") != 1 or value.get("sessionId") != session_id:
             raise ValueError("Saved native history identity is invalid")
-        if binding is not None and value.get("native", {}).get("binding") != binding:
+        source = value.get("native", {}).get("binding")
+        if not isinstance(source, str) or path != self._path(session_id, source) or (binding is not None and source != binding):
             raise ValueError("Saved native history binding is invalid")
         return value
 

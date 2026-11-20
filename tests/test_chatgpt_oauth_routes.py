@@ -230,7 +230,7 @@ def test_models_expose_only_advertised_direct_reasoning_levels():
 
 
 @pytest.mark.parametrize("state", ["running", "waiting"])
-def test_activate_reasoning_only_during_task_preserves_binding_and_context_cap(tmp_path, state):
+def test_activate_configured_account_and_model_during_task_preserves_bound_turn(tmp_path, state):
     from tests.test_provider_runtime_configuration_lock import setup_owner
     from provider_configuration_service import ProviderApiConfig
     owner, gateway = setup_owner(tmp_path)
@@ -257,7 +257,10 @@ def test_activate_reasoning_only_during_task_preserves_binding_and_context_cap(t
         for changed in ({"account_id": "other-account"}, {"model": "second-model"}):
             assert client.post("/api/chatgpt/activate", json={
                 "account_id": "account", "model": "available-model", "thinking_level": "high", **changed,
-            }).status_code == 409
+            }).status_code == 200
+            assert owner.current_api_config().api_key == changed.get("account_id", "account")
+            assert owner.current_api_config().model == changed.get("model", "available-model")
+            assert bound is original
 
 
 def test_provider_error_body_never_reaches_ui():

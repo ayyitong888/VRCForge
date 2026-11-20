@@ -129,7 +129,13 @@ def _write_gateway_for_mode(
 
     def handler(arguments: dict) -> dict:
         invoked.append(dict(arguments))
-        return dict(handler_result) if handler_result is not None else {"ok": True, "status": "written"}
+        if handler_result is not None:
+            return dict(handler_result)
+        target = project / "after.txt"
+        value = str(arguments.get("value", ""))
+        target.write_text(value, encoding="utf-8")
+        verified = target.read_text(encoding="utf-8") == value
+        return {"ok": verified, "status": "written", "commitState": "complete", "committed": True, "persistedReadback": verified}
 
     gateway.register_tool(
         "fixture_write",

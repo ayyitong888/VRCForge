@@ -1398,7 +1398,7 @@
     "description": "Full Permission skips manual approval prompts and keeps an audit trail. Make sure you understand the risk."
   },
   "provider": {
-    "runtimeConfigLocked": "Model settings are locked while a task is running or waiting for approval or an answer. Finish or stop the task to change them.",
+    "runtimeConfigLocked": "Model and reasoning changes apply to the next model request. During active or pending work, you can add a provider. Existing connection credentials and endpoints are locked.",
     "apiProvider": "API Provider",
     "apiKey": "API Key",
     "baseUrl": "Base URL",
@@ -1420,6 +1420,7 @@
     "protocolAutoNegotiationHint": "Negotiate an available communication protocol for your selected model without changing the model.",
     "customEndpoint": "Custom Compatible Endpoint",
     "noKeyNeeded": "No key needed",
+    "chooseModelToSave": "To save, enter a model ID or refresh the model list and select a model.",
     "selectModel": "Select a model",
     "savedKeyTestHint": "Your key is saved. After saving any other changes, click Test connection to verify the configuration.",
     "savedKeyHint": "Key saved; leave blank to keep current",
@@ -1433,7 +1434,8 @@
     "noModelsReturned": "Provider returned no model list; you can type the model name manually",
     "modelPlaceholder": "Click refresh to fetch model list, or type manually",
     "reasoningEffort": "Reasoning effort",
-    "reasoningNextTurnHint": "Applies from the next turn. The current task keeps its bound reasoning effort.",
+    "changeModel": "Change model, currently {{model}}",
+    "reasoningNextTurnHint": "Applies to the next model request.",
     "reasoningEffortHint": "Only options supported by the current model are shown. Default follows the model settings; None disables reasoning.",
     "reasoning_default": "Default",
     "reasoning_none": "None",

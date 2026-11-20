@@ -84,6 +84,7 @@ export function Composer({
   providerReasoningEndpoint,
   providerReasoningLevel,
   onProviderReasoningActivated,
+  onOpenModelSettings,
   goalEndpoint,
   activeGoal,
   editing = false,
@@ -126,6 +127,7 @@ export function Composer({
   providerReasoningEndpoint?: string;
   providerReasoningLevel?: string;
   onProviderReasoningActivated?: () => void | Promise<void>;
+  onOpenModelSettings?: () => void;
   goalEndpoint?: string;
   activeGoal?: AgentGoal | null;
   editing?: boolean;
@@ -592,9 +594,12 @@ export function Composer({
               "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1",
               questionPromptVisible ? "col-start-4 row-start-1 max-w-[min(28vw,16rem)] flex-nowrap whitespace-nowrap" : "col-span-2 col-start-1 row-start-2 xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:flex-nowrap xl:whitespace-nowrap",
             )}>
-              <span className="min-w-0 truncate text-sm text-muted-foreground" data-app-tooltip={providerModelLabel} aria-label={providerModelLabel}>
-                {providerModelLabel}
-              </span>
+              {onOpenModelSettings ? (
+                <button type="button" onClick={onOpenModelSettings} aria-label={t("provider.changeModel", { model: providerModelLabel })}
+                  className="min-w-0 truncate rounded-md px-1 text-sm text-muted-foreground hover:bg-muted/60 focus-visible:ring-1 focus-visible:ring-ring">
+                  {providerModelLabel}
+                </button>
+              ) : <span className="min-w-0 truncate text-sm text-muted-foreground">{providerModelLabel}</span>}
               {providerReasoningEndpoint && onProviderReasoningActivated ? (
                 <ChatGptOAuthComposerReasoningControl
                   endpoint={providerReasoningEndpoint}

@@ -6,6 +6,51 @@ from agent_handoff_sources import package_preflight_edits
 from runtime_planner_service import native_handoff_retained_evidence
 
 
+def test_damaged_legacy_inspection_is_recoverable_in_a_later_model_request():
+    from agent_handoff_operations import lookup_native_handoff_receipt
+    from agent_runtime_session_state import native_model_history
+    from context_compaction import LEGACY_HANDOFF_PREFIX, NATIVE_TRANSACTION_PREFIX
+
+    ref = "result_" + "a" * 32
+    source = "Accessory_Materials.zip"
+    call = {"role": "assistant", "tool_calls": [{"id": "old-inspect", "function": {
+        "name": "call_tool", "arguments": json.dumps({"packagePath": "private-path"})}}]}
+    observation = {"runtimeTool": "vrcforge_inspect_outfit_package", "outcome": {"status": "ok"},
+                   "observation": '; resultContinuation={"resultRef":"' + ref + '"}; summary={"materialCount":3}; '
+                                  'structuredEvidence={"source":{"name":"' + source + '"},"summary":{"nestedPathnamesTruncated":true}}'}
+    reply = {"role": "tool", "tool_call_id": "old-inspect", "content": json.dumps({"observations": [observation]})}
+    transaction = json.dumps([call, reply]).replace("private-path", r"\{{path:ed32b5d44ffc}}")
+    with pytest.raises(ValueError):
+        json.loads(transaction)
+    archive = {"sourceDigest": "d" * 64, "sourceEntries": [{"role": "tool", "text": NATIVE_TRANSACTION_PREFIX + transaction}]}
+    messages = [{"role": "assistant", "content": LEGACY_HANDOFF_PREFIX + "Source material not found."}]
+    snapshot = {"messages": messages, "compactionRecovery": [archive]}
+    projected = native_model_history(messages, handoff_snapshot=snapshot)
+    facts = json.loads(projected[-1]["content"].partition(": ")[2])["partialPackageInspections"]
+    assert len(facts) == 1
+    assert facts[0]["historicalResultRef"] == ref and facts[0]["packageName"] == source
+    assert facts[0]["observedMaterialCount"] == 3 and facts[0]["partialInventory"] is True
+    assert lookup_native_handoff_receipt(snapshot, "old-inspect")["packageInspection"] == facts[0]
+    assert lookup_native_handoff_receipt(snapshot, "unrelated") is None
+    assert len(messages) == 1
+
+
+def test_new_complete_inspection_of_same_scope_supersedes_the_archived_partial_inventory():
+    from agent_handoff_package_inventory import archived_package_inventories
+    from context_compaction import NATIVE_TRANSACTION_PREFIX
+
+    def rows(call_id, scope, partial):
+        receipt = {"source": {"name": "Kit.zip", "scopeKey": scope}, "inventory": {"truncated": partial}}
+        obs = {"runtimeTool": "vrcforge_inspect_outfit_package", "observation": "; importReceipt=" + json.dumps(receipt)}
+        return [{"role": "assistant", "tool_calls": [{"id": call_id}]},
+                {"role": "tool", "tool_call_id": call_id, "content": json.dumps({"observations": [obs]})}]
+
+    prior = rows("first-scan", "one", True) + rows("another-source", "two", True)
+    archive = {"sourceDigest": "d" * 64, "sourceEntries": [{"role": "tool", "text": NATIVE_TRANSACTION_PREFIX + json.dumps(prior)}]}
+    facts = archived_package_inventories({"messages": rows("new-scan", "one", False), "compactionRecovery": [archive]})
+    assert [fact["callId"] for fact in facts] == ["another-source"]
+
+
 def native_plan(call_id, *, ready=True, selected="Assets/Clothing/Dark.prefab", ref="a",
                 verified=True, owner_scope_matches=True, target_folder=None,
                 package_path="C:/workspace/package.unitypackage"):

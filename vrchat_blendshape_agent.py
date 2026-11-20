@@ -391,7 +391,7 @@ def _native_messages_to_gemini(
                     continue
                 native_call = next(native_calls, None)
                 provider_id = str(get_value(native_call, "id") or "") if native_call else ""
-                call_bindings[call_id] = name, provider_id
+                call_bindings[call_id] = name, provider_id if replaying else call_id
                 if replaying:
                     continue
                 try:
@@ -400,7 +400,10 @@ def _native_messages_to_gemini(
                     args = {}
                 if not isinstance(args, dict):
                     args = {}
-                parts.append({"functionCall": {"name": name, "args": args}})
+                # A migrated call has no Google-issued signature. This documented
+                # migration sentinel keeps its structured call/result pair usable.
+                parts.append({"functionCall": {"id": call_id, "name": name, "args": args},
+                              "thoughtSignature": "skip_thought_signature_validator"})
             if parts:
                 contents.append({"role": "model", "parts": parts})
             continue
@@ -2111,7 +2114,7 @@ def request_responses_plan_with_metadata(
                 stream_callback=stream_callback,
                 cancel_event=cancel_event,
                 stream_activity_callback=stream_activity_callback,
-                **({"reasoning_effort": _responses_reasoning_effort(settings)} if provider in {"chatgpt", "deepseek"} else {}),
+                reasoning_effort=_responses_reasoning_effort(settings),
                 **{"max_output_tokens": llm_max_output_tokens(settings)},
             )
             parsed = _native_chat_response(
@@ -2221,11 +2224,11 @@ def request_deepseek_responses_plan_with_metadata(
 
 def _responses_reasoning_effort(settings: Settings) -> str:
     provider = normalize_provider_name(settings.llm_provider)
-    if provider == "chatgpt":
-        return normalize_reasoning_effort(settings.gemini_thinking_level)
-    if provider != "deepseek":
-        return ""
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
+    if provider == "chatgpt":
+        return level
+    if provider != "deepseek":
+        return level if level in reasoning_effort_variants(provider, settings.llm_model, "responses") else ""
     # The configuration boundary validates catalog support. Model-name tables
     # here would silently discard newly advertised, explicitly chosen efforts.
     return _deepseek_documented_effort(level)
@@ -3673,7 +3676,7 @@ def _native_chat_response(settings: Settings, response: Any, *, source: str, res
     if reasoning_content is not None:
         receipt["reasoning_content"] = reasoning_content
     responses_output = get_value(message, "responses_output")
-    if source in {"chatgpt-responses", "deepseek-responses"} and responses_output is not None:
+    if source.endswith("-responses") and responses_output is not None:
         receipt["responses_output"] = responses_output
     return LlmPlanResponse(
         text=extract_openai_message_text(response),

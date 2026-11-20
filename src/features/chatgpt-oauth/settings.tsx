@@ -18,6 +18,7 @@ const STATUS_POLL_INTERVAL_MS = 2000;
 const STATUS_POLL_LIMIT_MS = 5 * 60 * 1000;
 
 type ChatGptOAuthSettingsProps = {
+  credentialsLocked?: boolean;
   endpoint: string;
   runtimeConnected: boolean;
   apiProvider: string;
@@ -32,6 +33,7 @@ type ChatGptOAuthSettingsProps = {
 };
 
 export function ChatGptOAuthSettings({
+  credentialsLocked = false,
   endpoint,
   runtimeConnected,
   apiProvider,
@@ -404,7 +406,7 @@ export function ChatGptOAuthSettings({
             type="button"
             variant="outline"
             className="w-full"
-            disabled={!runtimeConnected || Boolean(busy) || Boolean(status?.pending) || savingApiConfig}
+            disabled={credentialsLocked || !runtimeConnected || Boolean(busy) || Boolean(status?.pending) || savingApiConfig}
             onClick={() => void runAction(
               "login",
               () => beginChatGptOAuthLogin(
@@ -422,7 +424,7 @@ export function ChatGptOAuthSettings({
             type="button"
             variant="outline"
             className="w-full"
-            disabled={!runtimeConnected || Boolean(busy) || Boolean(status?.pending) || savingApiConfig}
+            disabled={credentialsLocked || !runtimeConnected || Boolean(busy) || Boolean(status?.pending) || savingApiConfig}
             onClick={() => void runAction(
               "login",
               () => beginChatGptOAuthLogin(endpoint, ""),
@@ -447,7 +449,7 @@ export function ChatGptOAuthSettings({
               type="button"
               variant="outline"
               className="w-full"
-              disabled={Boolean(busy) || !runtimeConnected}
+              disabled={credentialsLocked || Boolean(busy) || !runtimeConnected}
               onClick={() => void logoutSelectedAccount()}
             >
               {busy === "logout" ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}

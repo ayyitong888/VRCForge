@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import hashlib
-import ntpath
+from agent_native_history_store import project_native_binding
 import json
 
 from agent_gateway import AgentGateway
@@ -95,9 +94,7 @@ def test_one_native_response_runs_two_independent_reads_once_each(tmp_path):
     assert result["ok"] is True
     assert len(model.requests) == 2
     assert invoked == {"vrcforge_read_alpha": [{}], "vrcforge_read_beta": [{}]}
-    binding = hashlib.sha256(
-        ("fixture-provider-model-route\n" + ntpath.normcase(ntpath.normpath(str(tmp_path)))).encode()
-    ).hexdigest()
+    binding = project_native_binding(str(tmp_path))
     conversation = gateway.runtime_sessions.native_conversation(
         "two-independent-reads",
         binding=binding,

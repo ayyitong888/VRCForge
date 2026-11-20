@@ -147,6 +147,7 @@ export type ProviderCapabilityKey = "text" | "structured_json" | "vision" | "rea
 
 export type ApiConfig = {
   runtimeLocked?: boolean;
+  savedProviderBaseUrls?: Record<string, string>;
   /** Persisted authentication prerequisites; does not imply a successful test. */
   configured: boolean;
   provider: string;

@@ -18,7 +18,7 @@ def setup_owner(tmp_path):
     return owner, gateway
 
 
-@pytest.mark.parametrize("field,value", [("model", "new-model"), ("api_key", "fixture-new-key"), ("base_url", "https://fixture.invalid"), ("context_window", 2048), ("provider", "other"), ("api_type", "responses")])
+@pytest.mark.parametrize("field,value", [("api_key", "fixture-new-key"), ("base_url", "https://fixture.invalid")])
 def test_active_turn_rejects_binding_changes_before_disk_write(tmp_path, field, value):
     owner, _ = setup_owner(tmp_path)
     original = owner.current_api_config()
@@ -63,10 +63,10 @@ def test_waiting_locks_until_cancel_then_allows_change(tmp_path, payload):
     original = owner.current_api_config()
     owner.save_api_config(replace(original, thinking_level="high"))
     assert owner.current_api_config().thinking_level == "high"
-    disk = owner.config_path.read_bytes()
+    owner.save_api_config(replace(owner.current_api_config(), model="new-model"))
+    assert owner.current_api_config().model == "new-model"
     with pytest.raises(ProviderConfigurationBusyError):
-        owner.save_api_config(replace(owner.current_api_config(), model="new-model"))
-    assert owner.config_path.read_bytes() == disk
+        owner.save_api_config(replace(owner.current_api_config(), api_key="fixture-replacement"))
     state.mark_cancel_requested(session_id="fixture", turn_id="turn", client_turn_id="client")
     owner.save_api_config(replace(original, model="new-model"))
     assert owner.current_api_config().model == "new-model"
@@ -130,7 +130,7 @@ def test_config_save_and_runtime_binding_share_one_lock(tmp_path):
     try:
         assert ready.wait(5)
         with pytest.raises(ProviderConfigurationBusyError):
-            owner.save_api_config(replace(owner.current_api_config(), model="racing-save"))
+            owner.save_api_config(replace(owner.current_api_config(), api_key="fixture-replacement"))
     finally:
         release.set()
         thread.join(5)
@@ -138,30 +138,34 @@ def test_config_save_and_runtime_binding_share_one_lock(tmp_path):
     owner.save_api_config(replace(owner.current_api_config(), model="idle-save"))
 
 
-def test_actual_approval_wait_prevents_original_binding_change(tmp_path):
+def test_approval_wait_allows_new_provider_and_resumes_verified_write_once(tmp_path):
     from tests.test_native_multi_call_admission import _receipt
     from tests.test_native_permission_modes import _set_mode, _write_gateway_for_mode
     from tests.test_native_runtime_gateway import call, finish, run
     project = str(tmp_path / "UnityProject")
+    target = tmp_path / "UnityProject" / "after.txt"
     gateway, model, writes = _write_gateway_for_mode(tmp_path, [_receipt(
         call("write", "fixture_write", {"projectRoot": project, "value": "approved"}),
         call("after", "vrcforge_read_text_file", {"path": "after.txt"})), finish])
     gateway.register_tool("vrcforge_read_text_file", "When to use: read. When NOT to use: write.",
-                          "plan/preview", lambda _: {"text": "readback"})
+                          "plan/preview", lambda args: {"text": (target.parent / args["path"]).read_text(encoding="utf-8")})
     _set_mode(gateway, "approval")
     owner = _owner(tmp_path / "provider.json")
     owner.runtime_waiting = gateway.runtime_sessions.runtime_waiting_for_configuration
     initial = run(gateway, tmp_path, message="Write and read", maxAgenticTurns=2)
     assert owner.runtime_configuration_locked(), initial
     owner.save_api_config(replace(owner.current_api_config(), thinking_level="high"))
-    with pytest.raises(ProviderConfigurationBusyError):
-        owner.save_api_config(replace(owner.current_api_config(), model="changed-model"))
+    owner.save_api_config(replace(owner.current_api_config(), model="changed-model"))
+    assert owner.current_api_config().model == "changed-model"
+    owner.save_api_config(replace(owner.current_api_config(), provider="other", api_key="fixture-second-key", base_url="https://second.invalid"))
+    assert owner.current_api_config().provider == "other"
     approval_id = initial["approval_id"]
     approval = gateway._approvals[approval_id]
     gateway.approval_transactions.approve(approval_id)
     applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
     resumed = gateway.resume_runtime_task_after_approval(approval, applied)
     assert resumed["plan"]["nextStep"] == "done"
+    assert target.read_text(encoding="utf-8") == "approved"
     assert len(writes) == 1 and len(model.requests) == 2
     assert not owner.runtime_configuration_locked()
     owner.save_api_config(replace(owner.current_api_config(), thinking_level="high"))

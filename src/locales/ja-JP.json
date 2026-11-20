@@ -1391,7 +1391,7 @@
     "description": "フル権限は手動承認プロンプトをスキップし、監査記録を保持します。リスクを理解してください。"
   },
   "provider": {
-    "runtimeConfigLocked": "タスクの実行中、承認待ち、回答待ちはモデル設定を変更できません。タスクの終了または停止後に変更できます。",
+    "runtimeConfigLocked": "モデルと推論強度の変更は次のモデルリクエストから適用されます。タスクの実行中または応答待ちの間は、新規プロバイダーを追加できます。既存の接続先と認証情報はロックされます。",
     "apiProvider": "API プロバイダ",
     "apiKey": "APIキー",
     "baseUrl": "ベースURL",
@@ -1413,6 +1413,7 @@
     "protocolAutoNegotiationHint": "選択したモデルの通信プロトコルだけを交渉します。モデルは変更しません。",
     "customEndpoint": "カスタム互換エンドポイント",
     "noKeyNeeded": "キー不要",
+    "chooseModelToSave": "保存するには、モデル ID を入力するか、モデル一覧を更新してモデルを選んでください。",
     "selectModel": "モデルを選択",
     "savedKeyTestHint": "キーは保存されています。他の変更を保存してから、「接続テスト」で設定を確認してください。",
     "savedKeyHint": "キー保存済み。空欄のままで現在のキーを維持",
@@ -1426,7 +1427,8 @@
     "noModelsReturned": "プロバイダーがモデルリストを返しませんでした。モデル名を手動入力できます",
     "modelPlaceholder": "右の更新ボタンでモデルリストを取得、または手動入力",
     "reasoningEffort": "推論強度",
-    "reasoningNextTurnHint": "次のターンから適用されます。現在のタスクは開始時の推論強度を維持します。",
+    "changeModel": "モデルを変更（現在は {{model}}）",
+    "reasoningNextTurnHint": "次のモデルリクエストから適用されます。",
     "reasoningEffortHint": "現在のモデルが対応する選択肢だけを表示します。「デフォルト」はモデル設定に従い、「なし」は推論を無効にします。",
     "reasoning_default": "デフォルト",
     "reasoning_none": "なし",

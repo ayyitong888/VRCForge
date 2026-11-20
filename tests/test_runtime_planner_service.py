@@ -3583,6 +3583,7 @@ def test_owner_surface_has_no_dynamic_host_or_execution_authority() -> None:
         "getattr(response, 'headers', None)",
         "getattr(response, 'status_code', None)",
         "getattr(self, '_catalog', None)",
+        "getattr(self._turn, 'refresh_request', None)",
     ])
     assert "__getattr__" not in source
     assert "_impl" not in source

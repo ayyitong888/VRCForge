@@ -23,11 +23,12 @@ const fixtureSource = `
   i18n.use(initReactI18next).init({ lng: "en-US", resources: { "en-US": { translation: en } } });
   function Fixture() {
     const [level, setLevel] = useState("");
+    const [draft, setDraft] = useState("");
     const [updatePrompt, setUpdatePrompt] = useState(null);
     window.deliverStartupUpdate = () => setUpdatePrompt({ source: "startup", result: { status: "update_available" } });
     return <main className="relative flex h-screen flex-col overflow-hidden">
       <div className="flex-1" data-fixture-outside><button data-set-ultra onClick={() => setLevel("ultra")}>ultra fixture</button></div>
-      <Composer input="" setInput={() => {}} sending={true} queueAllowed={true}
+      <Composer input={draft} setInput={setDraft} onOpenModelSettings={() => { window.openedModelSettings=true; }} sending={true} queueAllowed={true}
         onSubmit={() => {}} onSwitchMode={() => {}} providerLabel="ChatGPT" model="gpt-6.1-sol"
         providerReasoningEndpoint={location.origin} providerReasoningLevel={level} onProviderReasoningActivated={async () => {
           const status = await fetch('/api/chatgpt/status').then(r => r.json());
@@ -93,7 +94,12 @@ try {
   const trigger = page.locator("[data-chatgpt-composer-reasoning-trigger]");
   await wait(async () => (await trigger.count()) === 1 && !(await trigger.isDisabled()), "server-supported levels loaded");
   assert.equal(await trigger.getAttribute("aria-label"), "Reasoning effort", "accessible name is retained");
-  assert.match(await trigger.getAttribute("data-app-tooltip"), /next turn/, "running tasks retain their existing effort while the next turn can be configured");
+  assert.match(await trigger.getAttribute("data-app-tooltip"), /next model request/);
+  const draft=page.getByRole("textbox").first();
+  await draft.fill("unsent draft");
+  await page.getByRole("button",{name:"Change model, currently ChatGPT · gpt-6.1-sol"}).click();
+  assert.ok(await page.evaluate(()=>window.openedModelSettings));
+  assert.equal(await draft.inputValue(),"unsent draft");
   assert.match(await trigger.getAttribute("class"), /border-0/);
   assert.match(await trigger.getAttribute("class"), /bg-transparent/);
   assert.equal(await page.locator("select").count(), 0, "reasoning uses the application menu instead of the native select popup");

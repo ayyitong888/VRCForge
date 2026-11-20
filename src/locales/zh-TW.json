@@ -1391,7 +1391,7 @@
     "description": "完全權限會跳過手動審批提示，並保留審計記錄。請確保你理解風險。"
   },
   "provider": {
-    "runtimeConfigLocked": "任務執行或等待批准、回答時，暫時無法修改模型設定。任務結束或停止後即可修改。",
+    "runtimeConfigLocked": "模型和推理強度從下一次模型請求起生效。任務執行或等待處理時，可新增供應商，既有連線的憑證和位址暫時鎖定。",
     "apiProvider": "API 供應商",
     "apiKey": "存取金鑰",
     "baseUrl": "介面位址",
@@ -1413,6 +1413,7 @@
     "protocolAutoNegotiationHint": "僅為你選擇的模型協商可用的通訊協定，不會更換模型。",
     "customEndpoint": "自訂相容介面",
     "noKeyNeeded": "無需金鑰",
+    "chooseModelToSave": "請先輸入模型 ID，或點「刷新模型列表」並選擇模型，然後儲存。",
     "selectModel": "請選擇模型",
     "savedKeyTestHint": "金鑰已儲存。如有其他修改，請先儲存，再點擊「測試連線」驗證設定。",
     "savedKeyHint": "已儲存金鑰，留空即沿用",
@@ -1426,7 +1427,8 @@
     "noModelsReturned": "該供應商未回傳模型列表，可手動填寫模型名",
     "modelPlaceholder": "點擊右側刷新拉取模型列表，或手動填寫",
     "reasoningEffort": "推理強度",
-    "reasoningNextTurnHint": "從下一輪生效，目前任務保留已綁定的推理強度。",
+    "changeModel": "切換模型，目前為 {{model}}",
+    "reasoningNextTurnHint": "從下一次模型請求起生效。",
     "reasoningEffortHint": "只顯示目前模型支援的選項。「預設」沿用模型設定；「無」會關閉推理。",
     "reasoning_default": "預設",
     "reasoning_none": "無",

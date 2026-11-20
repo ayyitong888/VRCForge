@@ -7,6 +7,10 @@ from provider_runtime_adapters import OpenAIResponsesAdapter, ProviderResponseEr
 
 
 def test_openai_responses_native_transport_preserves_openai_reasoning_and_budget():
+    from dataclasses import replace
+    from tests.test_deepseek_native_runtime import _settings
+    from vrchat_blendshape_agent import request_responses_plan_with_metadata
+
     payloads = []
     output = [
         {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "cipher"},
@@ -24,13 +28,12 @@ def test_openai_responses_native_transport_preserves_openai_reasoning_and_budget
         client.close = lambda: None
         return client
 
-    adapter = OpenAIResponsesAdapter(api_key="safe-key", base_url="https://example.invalid",
-                                     client_factory=factory, max_retries=0)
-    result = adapter.send_native_request(
-        model="test-model",
-        messages=[{"role": "system", "content": "policy"}, {"role": "user", "content": "read"}],
-        tools=[{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
-        max_output_tokens=8192,
+    result = request_responses_plan_with_metadata(
+        replace(_settings(provider="openai"), llm_model="gpt-5.2", gemini_thinking_level="high",
+                llm_sdk_max_retries=0),
+        "", native_messages=[{"role": "system", "content": "policy"}, {"role": "user", "content": "read"}],
+        native_tools=[{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+        client_factory=factory,
     )
 
     assert result.finish_reason == "tool_calls"
@@ -39,6 +42,7 @@ def test_openai_responses_native_transport_preserves_openai_reasoning_and_budget
     assert payloads[0]["input"][0]["role"] == "developer"
     assert payloads[0]["tools"][0]["name"] == "read_file"
     assert payloads[0]["max_output_tokens"] == 8192
+    assert payloads[0]["reasoning"]["effort"] == "high"
     assert payloads[0]["store"] is False and payloads[0]["stream"] is True
 
 

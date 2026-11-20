@@ -72,9 +72,10 @@ def test_deepseek_responses_binding_is_explicit_and_route_scoped() -> None:
     )
     assert automatic.native_binding()
     assert automatic.native_binding() != binding
-    assert ProviderApiConfig(
+    openai_binding = ProviderApiConfig(
         "openai", "secret-a", "https://api.openai.com/v1", "gpt-4.1-mini", api_type="responses"
-    ).native_binding() == ""
+    ).native_binding()
+    assert openai_binding and openai_binding != binding
 
 
 def test_chatgpt_and_chat_completions_native_bindings_remain_unchanged() -> None:
@@ -135,13 +136,18 @@ def test_missing_deepseek_protocol_rejects_native_payloads(
 
 @pytest.mark.parametrize("provider", ["openai", "custom"])
 @pytest.mark.parametrize("native_field", ["native_messages", "native_tools"])
-def test_other_responses_providers_reject_native_payloads(
-    provider: str, native_field: str
+def test_other_responses_providers_route_native_payloads_to_responses(
+    provider: str, native_field: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with pytest.raises(ValueError):
-        request_llm_plan_with_metadata(
-            _settings(provider=provider), "continue", **{native_field: []}
-        )
+    def request(settings, _prompt, **kwargs):
+        assert settings.llm_provider == provider and settings.llm_api_type == "responses"
+        assert kwargs[native_field] == []
+        return LlmPlanResponse(text="continued", reasoning={})
+    monkeypatch.setattr(vrchat_blendshape_agent, "request_responses_plan_with_metadata", request)
+    result = request_llm_plan_with_metadata(
+        _settings(provider=provider), "continue", **{native_field: []}
+    )
+    assert result.text == "continued"
 
 
 def test_deepseek_responses_dispatches_native_receipt_usage_and_callbacks(
@@ -173,6 +179,7 @@ def test_deepseek_responses_dispatches_native_receipt_usage_and_callbacks(
     }
     native_response = SimpleNamespace(
         assistant_message=assistant_message,
+        model="deepseek-v4-flash", truncation={},
         usage={
             "input_tokens": 18,
             "output_tokens": 9,
@@ -289,6 +296,7 @@ def test_deepseek_raw_response_survives_store_restart_and_native_replay(
     replay_calls: list[dict[str, Any]] = []
     native_response = SimpleNamespace(
         assistant_message=assistant,
+        model="deepseek-v4-flash", truncation={},
         usage={},
         reasoning_summary=[],
         finish_reason="tool_calls",

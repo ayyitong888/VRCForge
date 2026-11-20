@@ -70,6 +70,7 @@ type SettingsWorkspaceProps = {
   apiThinkingLevel: string;
   reasoningVariants: ProviderReasoningVariants | null;
   apiKeySaved: boolean;
+  apiConnectionSaved?: boolean;
   savingApiConfig: boolean;
   modelOptions: ProviderModelInfo[];
   loadingModels: boolean;
@@ -180,6 +181,7 @@ export function SettingsWorkspace({
   apiThinkingLevel,
   reasoningVariants,
   apiKeySaved,
+  apiConnectionSaved,
   savingApiConfig,
   modelOptions,
   loadingModels,
@@ -528,10 +530,11 @@ export function SettingsWorkspace({
               </Button>
             ))}
           </div>
-          <fieldset disabled={providerConfigurationLocked} className="mt-4 min-w-0 disabled:opacity-60">
+          <div className="mt-4 min-w-0">
             <div id="subscription-model-settings" data-settings-panel="account" hidden={visibleProvider !== "subscription"}
               data-onboarding-provider={visibleProvider === "subscription" && apiProvider === "chatgpt" ? "connection" : undefined}>
               <ChatGptOAuthSettings
+                credentialsLocked={providerConfigurationLocked}
                 endpoint={endpoint}
                 runtimeConnected={runtimeConnected}
                 apiProvider={apiProvider}
@@ -548,6 +551,7 @@ export function SettingsWorkspace({
             <div id="api-model-settings" data-settings-panel="api" hidden={visibleProvider !== "api"}>
               {visibleProvider === "api" ? (
                 <ProviderSetup
+                  credentialsLocked={providerConfigurationLocked && Boolean(apiConnectionSaved || apiKeySaved)}
                   provider={apiProvider}
                   apiKey={apiKey}
                   baseUrl={apiBaseUrl}
@@ -581,7 +585,7 @@ export function SettingsWorkspace({
                 />
               ) : null}
             </div>
-          </fieldset>
+          </div>
           <details className="group mt-6 rounded-xl border border-border bg-card px-4" data-settings-panel="vision">
             <summary className="flex min-w-0 cursor-pointer list-none flex-wrap items-center gap-2 rounded-md py-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
               <Eye className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />

@@ -908,6 +908,7 @@ def approval_task_context(
     )
     context = {
         "schema": TASK_APPROVAL_CONTEXT_SCHEMA,
+        **({"_modelOverrideBase": base} if (base := _bounded_snapshot_digest(seed.get("_modelOverrideBase"))) else {}),
         "taskId": _bounded_text(seed.get("taskId"), 80),
         "objective": objective,
         "sessionId": _bounded_text(seed.get("sessionId"), 180),
@@ -1134,10 +1135,11 @@ def prepare_approval_task_continuation(
         "session_id": _bounded_text(context.get("sessionId"), 180),
         "clientTurnId": continuation_client_turn_id(original_client_turn_id, continuation_marker, approval_id),
         "projectRoot": _bounded_text(context.get("projectRoot"), 600),
-        "provider": _bounded_text(context.get("provider"), 80),
-        "providerLabel": _bounded_text(context.get("providerLabel"), 160),
-        "model": _bounded_text(context.get("model"), 160),
-        "_requestedContextLimit": context.get("contextLimit"),
+        # Old context fields describe the request that produced the receipt.
+        # Only an explicit override carries proof of the default it overrode.
+        **({"_resumeModelSelection": {"base": base, "provider": _bounded_text(context.get("provider"), 80),
+                                      "model": _bounded_text(context.get("model"), 160)}}
+           if (base := _bounded_snapshot_digest(context.get("_modelOverrideBase"))) else {}),
         "history": _approval_history(context.get("history")),
     }
     parent_chat_id = _bounded_text(context.get("parentChatId"), 180)
@@ -1536,6 +1538,7 @@ class AgentTaskLoop:
     plan_mode: bool = False
     approval_revision_used: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
+    model_override_base: str = ""
     _actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     _requirements: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Requirements seeded from the previous turn's pending obligations, mapped
@@ -1586,6 +1589,7 @@ class AgentTaskLoop:
             provider=_bounded_text(context.get("provider"), 80),
             provider_label=_bounded_text(context.get("providerLabel"), 160),
             model=_bounded_text(context.get("model"), 160),
+            model_override_base=_bounded_snapshot_digest(context.get("_modelOverrideBase")),
             context_limit=(
                 int(context.get("contextLimit"))
                 if isinstance(context.get("contextLimit"), int)
@@ -1725,6 +1729,7 @@ class AgentTaskLoop:
             "clientTurnId": _bounded_text(self.client_turn_id, MAX_RUNTIME_CLIENT_TURN_ID_LENGTH),
             "projectRoot": _bounded_text(self.project_root, 600),
             "agentName": _bounded_text(self.agent_name, 160),
+            **({"_modelOverrideBase": self.model_override_base} if self.model_override_base else {}),
             "provider": _bounded_text(self.provider, 80),
             "providerLabel": _bounded_text(self.provider_label, 160),
             "model": _bounded_text(self.model, 160),

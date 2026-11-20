@@ -342,6 +342,7 @@ def test_write_queue_is_serial_and_stop_prevents_later_writes(tmp_path, cancel):
     _set_mode(gateway, "auto")
     gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "allow_auto"
     gate = threading.Lock()
+    write = gateway.approval_transactions._ports.state.write_handlers["fixture_write"].handler
     invoked = []
     def handler(args):
         assert gate.acquire(blocking=False), "Only one writer may be in flight"
@@ -350,7 +351,7 @@ def test_write_queue_is_serial_and_stop_prevents_later_writes(tmp_path, cancel):
             if cancel:
                 gateway.request_runtime_cancel({"sessionId": "native-session"})
             time.sleep(0.01)
-            return {"ok": True}
+            return write(args)
         finally:
             gate.release()
     gateway.approval_transactions.register_write_handler("fixture_write", "Write fixture", "medium", handler)

@@ -103,7 +103,9 @@ def _planner_loopback(
                 self.end_headers()
                 return
             payload = responses[len(records) - 1]
-            if native:
+            if native and isinstance(payload.get("assistant_text"), str):
+                events = [{"choices": [{"index": 0, "delta": {"content": payload["assistant_text"]}, "finish_reason": "stop"}]}]
+            elif native:
                 function_name, arguments = native_call(payload)
                 if function_name == "vrcforge_runtime_action":
                     arguments = {key: payload[key] for key in (

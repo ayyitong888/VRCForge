@@ -453,7 +453,7 @@ def test_internal_tool_index_lists_only_tools_visible_in_the_requested_planner_l
     )
 
 
-def test_turn_binding_freezes_one_provider_config_and_resets_it_in_finally() -> None:
+def test_binding_changes_selection_at_request_boundary_and_resets_in_finally() -> None:
     binding = dashboard_server._RuntimePlannerProviderTurnBinding()
     config = fixture_config()
 
@@ -474,9 +474,14 @@ def test_turn_binding_freezes_one_provider_config_and_resets_it_in_finally() -> 
                 assert metadata.planner_label.endswith("fixture-model")
                 assert "fixture-secret-key" not in repr(metadata)
                 assert binding.current_config() is config
+                changed = replace(config, model="changed", thinking_level="high")
+                current_api_config.return_value = changed
+                assert binding.current_config() is config
+                refreshed = binding.refresh_request()
+                assert refreshed.model == "changed" and refreshed.thinking_level == "high"
+                assert binding.current_config() is changed
                 raise RuntimeError("stop")
 
-    current_api_config.assert_called_once_with()
     with pytest.raises(RuntimeError, match="not bound"):
         binding.current_config()
 
@@ -528,7 +533,6 @@ def test_model_and_compactor_share_the_exact_bound_config_without_projecting_sec
                 {"targetTokens": 100, "realContextLimit": metadata.verified_context_limit},
             )
 
-    current_api_config.assert_called_once_with()
     assert probe_settings.call_count == 1
     assert all(call.args[0] is config for call in probe_settings.call_args_list)
     assert model_result.planner_label.endswith("fixture-model")
@@ -634,7 +638,6 @@ def test_model_worker_routes_three_visual_journey_samples_through_one_turn_owner
         ):
             results = [model.plan(f"visual-journey-sample-{index}") for index in range(3)]
 
-    current_api_config.assert_called_once_with()
     assert request_model.call_count == 3
     assert prompts == [
         "visual-journey-sample-0",

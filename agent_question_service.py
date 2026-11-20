@@ -822,11 +822,20 @@ class AgentQuestionService:
             native_call_id = seed.get("_nativeCallId")
             conversation = seed.get("_nativeConversation")
             if (not isinstance(native_call_id, str) or not native_call_id
-                    or not isinstance(conversation, Mapping) or conversation.get("binding") != binding):
+                    or not isinstance(conversation, Mapping)):
                 continue
             owner_project = str(question.get("projectRoot") or "")
             if (self._scope.normalize_path(owner_project) if owner_project else "") != expected_project:
                 continue
+            source = conversation.get("binding")
+            if source != binding:
+                from agent_native_history_store import project_native_binding
+
+                if (not isinstance(source, str) or not source or source.startswith("project:")
+                        or binding != project_native_binding(project_root)
+                        or seed.get("sessionId") != session_id or "projectRoot" not in seed
+                        or project_native_binding(str(seed["projectRoot"] or "")) != binding):
+                    continue
             receipts.append({"callId": native_call_id, "questionId": str(question["questionId"]),
                              "question": self._sanitize_answer_for_model(str(question["question"]))})
         return receipts

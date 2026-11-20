@@ -97,6 +97,13 @@ try {
     await page.waitForFunction(() => document.querySelector('[data-testid="loading"]').textContent === "false");
     assert.equal(await page.getByTestId("model").inputValue(), model, "catalog refresh must not select its first or recommended model");
   }
+  await page.getByTestId("model").fill("");
+  await Promise.all([
+    page.waitForResponse(response => response.url().endsWith("/api/models")),
+    page.getByTestId("refresh").click(),
+  ]);
+  await page.waitForFunction(() => document.querySelector('[data-testid="loading"]').textContent === "false");
+  assert.equal(await page.getByTestId("model").inputValue(), "", "a new connection requires an explicit selection");
   for (const [provider, model, protocol] of [
     ["openai", "selected-openai", "chat_completions"],
     ["deepseek", "deepseek-v4-pro", "messages"],

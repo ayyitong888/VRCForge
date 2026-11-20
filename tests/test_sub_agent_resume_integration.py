@@ -76,24 +76,21 @@ def test_same_child_resumes_two_tool_history_and_role_scope_is_applied(tmp_path)
 
 
 @pytest.mark.parametrize(
-    ("child_session_id", "provider", "expected_fragment"),
-    [
-        ("resumable-child", "changed-provider", "original child history is unavailable"),
-        ("missing-child", "fixture-provider", "original child history is unavailable"),
-    ],
+    ("child_session_id", "requested_project"),
+    [("resumable-child", "other-project"), ("missing-child", ".")],
 )
-def test_resume_rejects_changed_route_or_missing_history_before_provider(
-    tmp_path, child_session_id, provider, expected_fragment,
+def test_resume_rejects_changed_project_or_missing_history_before_provider(
+    tmp_path, child_session_id, requested_project,
 ):
     gateway, model, _invoked = _child_gateway(tmp_path, [_finish])
     gateway.runtime_planner._turn = RoutedTurn()
     if child_session_id == "resumable-child":
         _run(gateway, tmp_path, task="Create history", turn_id="initial-turn")
-    with pytest.raises(Exception, match=expected_fragment):
+    with pytest.raises(Exception, match="original child history is unavailable"):
         gateway.run_sub_agent_llm(
             task="Resume history", child_session_id=child_session_id,
-            provider=provider, model="fixture-child-model",
-            system_prompt="Continue.", max_steps=2, project_path=str(tmp_path),
+            provider="fixture-provider", model="fixture-child-model",
+            system_prompt="Continue.", max_steps=2, project_path=str(tmp_path / requested_project),
             selected_materials=[], cancel_event=threading.Event(),
             client_turn_id="resume-turn", is_resume=True,
             allowed_tools=("vrcforge_read_text_file",),

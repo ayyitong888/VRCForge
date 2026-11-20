@@ -615,7 +615,7 @@ def _real_provider_policy() -> ProviderConfigurationPolicyPorts:
 
 
 @pytest.mark.parametrize("model", ["deepseek-chat", "deepseek-v4-flash"])
-def test_real_policy_cross_provider_session_uses_destination_default_and_saved_key(tmp_path: Path, model: str) -> None:
+def test_real_policy_cross_provider_session_uses_destination_saved_endpoint_and_key(tmp_path: Path, model: str) -> None:
     owner = _owner(tmp_path / "providers.json", policy=_real_provider_policy())
     owner.save_api_config(ProviderApiConfig("deepseek", "fixture-deepseek-key", "https://old-route.invalid/v1", "deepseek-chat"))
     current = ProviderApiConfig("openai", "fixture-openai-key", "https://current-route.invalid/v1", "gpt-4.1-mini")
@@ -626,27 +626,31 @@ def test_real_policy_cross_provider_session_uses_destination_default_and_saved_k
 
     assert selected.provider == "deepseek"
     assert selected.model == model
-    assert selected.base_url == "https://api.deepseek.com"
+    assert selected.base_url == "https://old-route.invalid/v1"
     assert selected.api_key == "fixture-deepseek-key"
     assert selected.api_type == ("auto" if model == "deepseek-v4-flash" else "chat_completions")
     assert owner.current_api_config() is current
     assert owner.config_path.read_bytes() == before
 
 
-def test_real_policy_cross_provider_custom_without_default_endpoint_stays_rejected(tmp_path: Path) -> None:
+def test_saved_custom_provider_switch_uses_its_own_endpoint_during_another_turn(tmp_path: Path) -> None:
     from provider_endpoint_policy import ProviderEndpointError
 
     owner = _owner(tmp_path / "providers.json", policy=_real_provider_policy())
+    with pytest.raises(ProviderEndpointError, match="Base URL is empty"):
+        owner.resolve_session_config(provider="custom", model="custom-model")
     owner.save_api_config(ProviderApiConfig("custom", "fixture-custom-key", "https://custom-route.invalid/v1", "custom-model"))
     current = ProviderApiConfig("openai", "fixture-openai-key", "https://current-route.invalid/v1", "gpt-4.1-mini")
     owner.save_api_config(current)
-    before = owner.config_path.read_bytes()
-
-    with pytest.raises(ProviderEndpointError, match="Base URL is empty"):
-        owner.resolve_session_config(provider="custom", model="custom-model")
-
-    assert owner.current_api_config() is current
-    assert owner.config_path.read_bytes() == before
+    with owner.bind_runtime_config() as bound:
+        selected = owner.resolve_session_config(provider="custom", model="custom-model")
+        assert selected.api_key == "fixture-custom-key"
+        assert selected.base_url == "https://custom-route.invalid/v1"
+        assert owner.serialize_app_api_config()["savedProviderBaseUrls"]["custom"] == selected.base_url
+        with pytest.raises(ValueError, match="new endpoint"):
+            owner.resolve_api_request(ApiRequest(provider="custom", base_url=current.base_url, model="custom-model"))
+        owner.save_api_config(selected)
+        assert bound == current and owner.current_api_config() == selected
 
 
 def test_real_policy_explicit_empty_endpoint_stays_rejected(tmp_path: Path) -> None:

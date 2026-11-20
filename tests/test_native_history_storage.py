@@ -154,3 +154,28 @@ def test_switch_binding_then_switch_back_preserves_both_histories(tmp_path):
     assert other["messages"][-1]["content"] == "second"
     restarted.discard_session("s")
     assert not list(tmp_path.glob("*.json"))
+
+def test_legacy_history_needs_project_proof_before_cross_provider_adoption(tmp_path):
+    from agent_native_history_store import project_native_binding
+    from agent_runtime_session_state import NATIVE_RUNTIME_STATE_PREFIX
+
+    state = owner(tmp_path)
+    binding = project_native_binding(str(tmp_path))
+    host = NATIVE_RUNTIME_STATE_PREFIX + json.dumps({
+        "projectPath": str(tmp_path), "projectContextActive": True,
+        "exposureLayer": "planning", "allowedRuntimeActions": [], "availableToolNames": [],
+    })
+    old = {"binding": "old-route", "turnId": "t", "activeTurnStart": 0,
+           "messages": [{"role": "user", "content": "keep this history"}, {"role": "system", "content": host}]}
+    store = NativeHistoryStore(tmp_path)
+    store.save("s", old, {})
+    # A newer unscoped file in the same session cannot prove ownership through user text.
+    store.save("s", {**old, "binding": "unknown", "messages": [{"role": "user", "content": host}]}, {})
+    state.prepare_project_history("s", binding, "new-route", "b" * 64)
+    assert state.native_conversation("s", binding=binding)["messages"] == old["messages"]
+    foreign = project_native_binding(str(tmp_path / "other"))
+    state.prepare_project_history("s", foreign, "new-route", "b" * 64)
+    assert state.native_conversation("s", binding=foreign) is None
+    with pytest.raises(ValueError, match="does not belong"):
+        state.prepare_project_history("s", foreign, "new-route", "b" * 64, frozen=old, scoped_source=True)
+    assert owner(tmp_path).native_conversation("s", binding=binding)["messages"] == old["messages"]

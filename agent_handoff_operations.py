@@ -447,6 +447,12 @@ def lookup_native_handoff_receipt(snapshot, execution_id):
                 **({"handoffReceipt": receipt} if receipt else {})}
     if saved := _package_selector_receipt(snapshot, execution_id):
         return saved
+    # Historical transactions with damaged path escaping still have a paired
+    # call ID and a bounded, readable package inventory record.
+    from agent_handoff_package_inventory import archived_package_inventories
+    for inventory in archived_package_inventories(snapshot):
+        if execution_id == inventory["callId"]:
+            return {"id": execution_id, "kind": "receipt", "packageInspection": inventory}
     if execution_id == snapshot.get("activeDispatchCallId"):
         return {"id": execution_id, "kind": "receipt", "status": "executing"}
     return None

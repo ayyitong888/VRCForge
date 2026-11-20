@@ -46,7 +46,7 @@ import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
-import type { SettingsSearchSelection } from "./lib/settings-search";
+import { SETTINGS_SEARCH_ENTRIES, type SettingsSearchSelection } from "./lib/settings-search";
 import { CheckpointQuotaNotice } from "./components/settings/checkpoint-quota-notice";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { TransientFailureToast } from "./components/ui/transient-failure-toast";
@@ -4441,6 +4441,7 @@ export default function App() {
               apiThinkingLevel={apiThinkingLevel}
               reasoningVariants={reasoningVariants}
               apiKeySaved={apiKeySaved}
+              apiConnectionSaved={Boolean(apiConfig?.configured && apiConfig.provider === apiProvider || apiConfig?.savedProviderBaseUrls?.[apiProvider] !== undefined)}
               savingApiConfig={savingApiConfig}
               providerConfigurationLocked={chatRunSending || Boolean(apiConfig?.runtimeLocked)}
               modelOptions={modelOptions}
@@ -4592,6 +4593,12 @@ export default function App() {
               providerReasoningEndpoint={providerSnapshot.provider === "chatgpt" ? endpoint : undefined}
               providerReasoningLevel={apiConfig?.thinking_level || ""}
               onProviderReasoningActivated={() => refresh(endpoint)}
+              onOpenModelSettings={() => {
+                openSettingsSection("models");
+                const id = providerSnapshot.provider === "chatgpt" ? "account:chatgptOAuth.model" : "api:provider.model";
+                const entry = SETTINGS_SEARCH_ENTRIES.find(item => item.id === id);
+                if (entry) setSettingsSearchSelection({ entry, requestId: 1 });
+              }}
               activeGoal={activeAgentGoal}
               onGoalChanged={upsertAgentGoal}
               goalEndpoint={endpoint}

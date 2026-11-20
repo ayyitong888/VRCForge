@@ -102,6 +102,7 @@ def build_responses_input(
                 "call_id": call_id,
                 "name": name,
                 "arguments": arguments,
+                **({"namespace": namespace} if namespace is not None else {}),
             })
         if content is None and not calls:
             raise ValueError("Native Responses assistant history is empty.")

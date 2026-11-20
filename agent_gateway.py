@@ -111,7 +111,7 @@ from agent_runtime_turn_identity import (
     MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH, continuation_client_turn_id, continuation_identity,
     dispatch_turn_id,
 )
-from agent_native_history_store import NativeHistoryStore
+from agent_native_history_store import NativeHistoryStore, project_native_binding
 from agent_runtime_native_turn import NativeRuntimeTurn
 from agent_progress_evidence import accepted_receipt, completion_checks, matched_checks
 from channel_project_selection import TOOL_NAME as PROJECT_SELECTION_TOOL, register_channel_project_selection
@@ -2051,7 +2051,9 @@ class AgentGateway:
         snapshot = ensure_dict(seed.get("_nativeConversation"))
         binding = str(snapshot.get("binding") or "")
         if session_id and binding and seed.get("_toolLoopPause") is not True:
-            current = self._runtime_session_state.native_conversation(session_id, binding=binding)
+            current = self._runtime_session_state.native_conversation(
+                session_id, binding=project_native_binding(str(seed.get("projectRoot") or "")),
+            ) or self._runtime_session_state.native_conversation(session_id, binding=binding)
             if current is not None:
                 if current["turnId"] != snapshot.get("turnId"):
                     return True
@@ -2258,9 +2260,7 @@ class AgentGateway:
         self._signal_background_activity("question_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
-            with self.runtime_planner.bind_turn(params) as metadata:
-                params["_contextCompactionLimit"] = metadata.verified_context_limit
-                params["_plannerAttemptLabel"] = metadata.planner_label
+            with self._bind_runtime_model(params) as metadata:
                 with self._desktop.runtime_turn_context(
                     params, browser_parent_turn_id=str(seed.get("clientTurnId") or ""),
                     browser_open_decision=(browser_open["url"], browser_open.get("browser", ""), browser_approved) if browser_open else None,
@@ -2288,7 +2288,7 @@ class AgentGateway:
 
         planner = self.runtime_planner
         state = self.runtime_sessions
-        binding = planner.native_conversation_binding(project_root)
+        binding = self._scoped_history_binding(session_id, project_root)
         snapshot = state.native_conversation(session_id, binding=binding) if binding and session_id else None
         if snapshot is None:
             return None
@@ -5496,19 +5496,12 @@ class AgentGateway:
             if len(session_id) > MAX_RUNTIME_SESSION_ID_LENGTH or len(client_turn_id) > MAX_RUNTIME_CLIENT_TURN_ID_LENGTH:
                 raise AgentGatewayError("Runtime sessionId or clientTurnId exceeds its length limit.", status_code=400)
             self._signal_background_activity("runtime_message")
-            with self.runtime_planner.bind_turn(params) as metadata:
-                params["_contextCompactionLimit"] = metadata.verified_context_limit
-                params["_plannerAttemptLabel"] = metadata.planner_label
-                if agent_name == "sub-agent":
-                    if metadata.provider:
-                        params["provider"] = metadata.provider
-                    if metadata.model:
-                        params["model"] = metadata.model
+            with self._bind_runtime_model(params) as metadata:
                 if params.pop("_requireNativeHistory", False):
-                    binding = self.runtime_planner.native_conversation_binding(str(params.get("projectRoot") or ""))
                     session_id = str(params.get("session_id") or params.get("sessionId") or "")
+                    binding = self._scoped_history_binding(session_id, str(params.get("projectRoot") or ""))
                     if not binding or self.runtime_sessions.native_conversation(session_id, binding=binding) is None:
-                        raise AgentGatewayError("The original child history is unavailable for this provider/model route; no new conversation was started.", status_code=409)
+                        raise AgentGatewayError("The original child history is unavailable for this project and session.", status_code=409)
                 with self._desktop.runtime_turn_context(
                     params, browser_available=browser_available, browser_requested=browser_requested,
                     browser_adult_confirmed=browser_adult_confirmed,
@@ -5548,7 +5541,7 @@ class AgentGateway:
             if isinstance(native_ref, dict):
                 session_id = str(native_ref.get("sessionId") or trusted_context.get("sessionId") or "").strip()
                 binding = str(native_ref.get("binding") or "").strip()
-                if not session_id or not binding:
+                if not session_id or not binding or session_id != trusted_context.get("sessionId"):
                     raise AgentGatewayError(
                         "Private approval continuation reference is invalid; inspect the operation before retrying.",
                         status_code=409,
@@ -5601,9 +5594,7 @@ class AgentGateway:
         self._signal_background_activity("approval_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
-            with self.runtime_planner.bind_turn(params) as metadata:
-                params["_contextCompactionLimit"] = metadata.verified_context_limit
-                params["_plannerAttemptLabel"] = metadata.planner_label
+            with self._bind_runtime_model(params) as metadata:
                 with self._desktop.runtime_turn_context(params):
                     return self._runtime_message_impl(
                         params,
@@ -5661,9 +5652,7 @@ class AgentGateway:
         self._signal_background_activity("shell_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
-            with self.runtime_planner.bind_turn(params) as metadata:
-                params["_contextCompactionLimit"] = metadata.verified_context_limit
-                params["_plannerAttemptLabel"] = metadata.planner_label
+            with self._bind_runtime_model(params) as metadata:
                 with self._desktop.runtime_turn_context(params):
                     return self._runtime_message_impl(
                         params,
@@ -5941,9 +5930,7 @@ class AgentGateway:
         self._signal_background_activity("sub_agent_task_continuation")
         agent_name = str(prepared.get("agentName") or "desktop-agent")
         try:
-            with self.runtime_planner.bind_turn(params) as metadata:
-                params["_contextCompactionLimit"] = metadata.verified_context_limit
-                params["_plannerAttemptLabel"] = metadata.planner_label
+            with self._bind_runtime_model(params) as metadata:
                 with self._desktop.runtime_turn_context(params):
                     return self._runtime_message_impl(
                         params,
@@ -5953,6 +5940,20 @@ class AgentGateway:
                     )
         except DesktopActionBrokerError as exc:
             raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+
+    @contextmanager
+    def _bind_runtime_model(self, params: dict[str, Any]):
+        # Only values present before binding are caller selections. Publish the
+        # resolved model separately for the run ledger and task receipts.
+        with self.runtime_planner.bind_turn(dict(params)) as metadata:
+            params["_contextCompactionLimit"] = metadata.verified_context_limit
+            params["_plannerAttemptLabel"] = metadata.planner_label
+            params["_modelOverrideBase"] = metadata.override_base
+            if metadata.provider:
+                params["provider"] = metadata.provider
+            if metadata.model:
+                params["model"] = metadata.model
+            yield metadata
 
     def _runtime_message_impl(
         self,
@@ -6424,6 +6425,10 @@ class AgentGateway:
             self._runtime_session_state.restore_session(session_id, history, now)
         project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
         self._register_runtime_project_scope(project_root)
+        try:
+            native_binding = self._scoped_history_binding(session_id, project_root, continuation_context)
+        except ValueError as exc:
+            raise AgentGatewayError(str(exc), status_code=409) from exc
         project_context_active = (
             params.get("_projectContextActive") is not False
             if "_projectContextActive" in params
@@ -6537,6 +6542,10 @@ class AgentGateway:
                     generation=int(obligation.get("generation") or 0),
                     target=obligation.get("target"),
                 )
+        task_loop.model_override_base = str(params.get("_modelOverrideBase") or "")
+        if task_loop.model_override_base:
+            task_loop.provider = str(params.get("provider") or "")
+            task_loop.model = str(params.get("model") or "")
         # Persist the host-resolved bound in every continuation seed, including
         # questions restored before the frontend had discovered model capacity.
         bound_context_limit = params.get("_contextCompactionLimit")
@@ -6719,7 +6728,6 @@ class AgentGateway:
                                              planner_policy.sanitize_planner_observation_text)
                 completed_step["resultRead"] = reader
                 completed_observation.update({"result": approved_result, "resultRead": reader})
-        native_binding = self.runtime_planner.native_conversation_binding(project_root)
         for member in [*batch_continuations, continuation]:
             observation = ensure_dict(member.get("plannerObservation"))
             if member is not continuation and observation:
@@ -10953,12 +10961,30 @@ class AgentGateway:
         entry["requirementIds"] = list(links)
         return set(links)
 
+    def _scoped_history_binding(self, session_id: str, project_root: str, context: dict[str, Any] | None = None) -> str:
+        binding = self.runtime_planner.native_conversation_binding(project_root)
+        if binding and session_id:
+            legacy, route = self.runtime_planner.legacy_native_route(project_root)
+            frozen = (context or {}).get("_nativeConversation")
+            trusted = bool(frozen and context.get("sessionId") == session_id and "projectRoot" in context
+                           and project_native_binding(str(context["projectRoot"] or "")) == binding)
+            if frozen and "sessionId" in context and context["sessionId"] != session_id:
+                raise ValueError("Frozen native history does not belong to this session.")
+            if frozen and "projectRoot" in context and project_native_binding(str(context["projectRoot"] or "")) != binding:
+                raise ValueError("Frozen native history does not belong to this project.")
+            adopted = self.runtime_sessions.prepare_project_history(
+                session_id, binding, legacy, route, frozen=frozen, scoped_source=trusted,
+            )
+            if adopted is not None:
+                context["_nativeConversation"] = adopted
+        return binding
+
     def _current_requirement_graph(self, session_id: str, project_root: str) -> dict[str, Any] | None:
         if not session_id:
             return None
 
         def native_graph() -> dict[str, Any] | None:
-            binding = self.runtime_planner.native_conversation_binding(project_root)
+            binding = self._scoped_history_binding(session_id, project_root)
             return self.runtime_sessions.native_handoff_graph(session_id, binding=binding) if binding else None
 
         scope = self._runtime_skill_scope.get()

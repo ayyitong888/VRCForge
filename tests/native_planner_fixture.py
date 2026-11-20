@@ -14,6 +14,8 @@ class NativePlannerFixture:
         self.compaction = None
         self.compaction_attempted_snapshot = None
         self.output_truncation = OutputTruncation()
+        self.provider_route = ""
+        self.provider_turn_state = {}
         self._tool_order = []
         self._queued_calls = []
         self.admitted_tool_names = set()

@@ -45,6 +45,15 @@ class NativeRuntimeTurn:
         binding = str(snapshot.get("binding") or "").strip()
         if not binding:
             return []
+        if "projectRoot" in seed:
+            from agent_native_history_store import project_native_binding
+
+            scope = project_native_binding(str(seed["projectRoot"] or ""))
+            if binding != scope:
+                snapshot = state.prepare_project_history(
+                    session_id, scope, "", "", frozen=dict(snapshot), scoped_source=True,
+                )
+                binding = scope
         save_only = skipped or answer_saved
         if save_only:
             if state.session_busy(session_id) and not state.owns_turn(
@@ -168,6 +177,7 @@ class NativeRuntimeTurn:
         self._binding = binding
         # Transport-only state belongs to this turn, never durable conversation history.
         self.provider_turn_state: dict[str, str] = {}
+        self.provider_route = ""
         from agent_output_truncation import OutputTruncation
         self.output_truncation = OutputTruncation(**dict((continuation_context or {}).get("_outputTruncation") or {}))
         self._loop_state = loop_state

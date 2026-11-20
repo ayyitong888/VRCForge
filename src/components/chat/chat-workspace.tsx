@@ -174,6 +174,7 @@ export function ChatWorkspace({
   providerReasoningEndpoint,
   providerReasoningLevel,
   onProviderReasoningActivated,
+  onOpenModelSettings,
   activeGoal,
   onGoalChanged,
   goalEndpoint,
@@ -288,6 +289,7 @@ export function ChatWorkspace({
   providerReasoningEndpoint?: string;
   providerReasoningLevel?: string;
   onProviderReasoningActivated?: () => void | Promise<void>;
+  onOpenModelSettings?: () => void;
   activeGoal: AgentGoal | null;
   onGoalChanged: (goal: AgentGoal) => void;
   goalEndpoint: string;
@@ -632,6 +634,7 @@ export function ChatWorkspace({
       providerReasoningEndpoint={providerReasoningEndpoint}
       providerReasoningLevel={providerReasoningLevel}
       onProviderReasoningActivated={onProviderReasoningActivated}
+      onOpenModelSettings={onOpenModelSettings}
       goalEndpoint={goalEndpoint}
       activeGoal={activeGoal}
       projects={projects}

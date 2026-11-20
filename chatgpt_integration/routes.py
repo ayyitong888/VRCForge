@@ -167,7 +167,7 @@ def build_chatgpt_oauth_router(
         ):
             config = replace(config, context_window=current.context_window)
         try:
-            with configuration_change(api_config=config):
+            with configuration_change(api_config=config, verified_account=True):
                 return await activate(config)
         except ProviderConfigurationBusyError as exc:
             raise HTTPException(409, str(exc)) from exc

@@ -40,15 +40,21 @@ function Fixture() {
  const [section,setSection] = useState('general'); const [selection,setSelection] = useState(null); const [developer,setDeveloper] = useState(false);
  const [collapsed, setCollapsed] = useState(false);
  const [apiProvider,setApiProvider] = useState('chatgpt');
+ const [running,setRunning] = useState(false);
+ const [model,setModel] = useState("a-model");
  const [visionEnabled,setVisionEnabled] = useState(false);
  const select = entry => {setSection(entry.section);setSelection(previous=>({entry,requestId:(previous?.requestId||0)+1}));};
- window.fixture = {select, setDeveloper, setCollapsed, apiProvider, setApiProvider, visionEnabled, setVisionEnabled, language:code=>i18n.changeLanguage(code), entries:SETTINGS_SEARCH_ENTRIES,
+ window.fixture = {select, setModel, setRunning, setDeveloper, setCollapsed, apiProvider, setApiProvider, visionEnabled, setVisionEnabled, language:code=>i18n.changeLanguage(code), entries:SETTINGS_SEARCH_ENTRIES,
   search:query=>searchSettings(query,key=>i18n.t(key),developer), label:key=>i18n.t(key)};
  return <div style={{display:'grid',gridTemplateColumns:(collapsed?'56px':'260px')+' minmax(0,1fr)',height:'100vh'}}>
  <AppSidebar collapsed={collapsed} activeView='settings' activeSettingsSection={section} developerOptionsEnabled={developer}
   projectItems={[]} chatSidebar={{temporaryChats:[],testChats:[],projectChatsByPath:new Map()}}
   onOpenSettingsSection={next=>{setSelection(null);setSection(next);}} onSelectSettingsSearchResult={select} onBackFromSettings={()=>{}} />
- <SettingsWorkspace {...props} apiProvider={apiProvider} visionEnabled={visionEnabled} activeSection={section} developerOptionsEnabled={developer} searchSelection={selection}/>
+ <SettingsWorkspace {...props} apiConnectionSaved={apiProvider === 'openai'} runtimeConnected={running} providerConfigurationLocked={running}
+  modelOptions={[{id:'a-model'},{id:'b-model'}]} apiModel={model} apiThinkingLevel="high"
+  reasoningVariants={{variants:[{key:'high',displayKey:'provider.reasoning_high'},{key:'low',displayKey:'provider.reasoning_low'}]}}
+  onApiModelChange={model=>{window.pickedModel=model;setModel(model);}} onApiThinkingLevelChange={effort=>{window.pickedEffort=effort;}}
+  onSaveApiProvider={e=>{e.preventDefault();window.savedSelection=true;}} apiProvider={apiProvider} visionEnabled={visionEnabled} activeSection={section} developerOptionsEnabled={developer} searchSelection={selection}/>
  </div>;
 }
 createRoot(document.getElementById('root')).render(<Fixture/>);
@@ -60,6 +66,9 @@ const server=createServer((req,res)=>{
  if(req.method !== 'GET') writes.push(req.url);
  if(req.url==='/fixture.js'){res.setHeader('Content-Type','text/javascript');res.end(bundle.outputFiles[0].text);}
  else if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end('<!doctype html><style>'+appStyles+'\n'+css.css+'</style><div id="root"></div><script type="module" src="/fixture.js"></script>');}
+ else if(req.url==='/api/chatgpt/status'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({accounts:[{id:'fixture',label:'Fixture',connected:true}],activeAccountId:'fixture',activeModel:'a-model',activeThinkingLevel:'high'}));}
+ else if(req.url==='/api/chatgpt/models'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({models:['a-model','b-model'].map(id=>({id,name:id,supportedReasoningLevels:[{effort:'low'},{effort:'high'}]}))}));}
+ else if(req.url==='/api/chatgpt/activate'){res.setHeader('Content-Type','application/json');res.end('{"ok":true}');}
  else if(req.url?.includes('telegram')){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({configured:false,enabled:false,state:'disabled',ownerId:0,projects:[],proxyMode:'environment'}));}
  else if(req.url?.includes('data-root')){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({path:'/fixture',writable:true,inProgramFiles:false,migrated:false}));}
  else {res.statusCode=404;res.end('{}');}
@@ -207,6 +216,35 @@ try {
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
  assert.equal(await page.evaluate(()=>window.mutations),0,'search must not activate a setting or command');
  assert.deepEqual(writes,[],'search must not send a mutating request');
+ // A live turn keeps credential edits locked and allows the next model selection in both provider panels.
+ await page.evaluate(()=>{window.fixture.setRunning(true);window.fixture.setApiProvider('chatgpt');window.fixture.select(window.fixture.entries.find(e=>e.id==='account:chatgptOAuth.model'));});
+ const model=page.locator('[data-chatgpt-model-select]');
+ await model.locator('option[value="b-model"]').waitFor({state:'attached'});
+ await model.selectOption('b-model');
+ await page.locator('[data-chatgpt-reasoning-select]').selectOption('high');
+ const activate=page.getByRole('button',{name:await page.evaluate(()=>window.fixture.label('chatgptOAuth.activate')),exact:true});
+ assert.ok(await activate.isEnabled());
+ assert.ok(await page.getByRole('button',{name:await page.evaluate(()=>window.fixture.label('chatgptOAuth.logout')),exact:true}).isDisabled());
+ const submitted=page.waitForRequest(req=>req.url().endsWith('/api/chatgpt/activate'));
+ await activate.click();
+ const activated=await submitted;
+ assert.equal(activated.postDataJSON().model,'b-model');
+ assert.equal(activated.postDataJSON().thinking_level,'high');
+ await page.evaluate(()=>{window.fixture.setApiProvider('openai');window.fixture.select(window.fixture.entries.find(e=>e.id==='api:provider.model'));});
+ const api=page.locator('[data-settings-panel="api"]');
+ await api.locator('[data-onboarding-provider="model"] select').selectOption('b-model');
+ await api.locator('select').filter({has:page.locator('option[value="low"]')}).selectOption('low');
+ assert.ok(await api.locator('input[type=password]').isDisabled());
+ assert.ok(await api.locator('[data-onboarding-provider="endpoint"] input').isDisabled());
+ await api.locator('button[type="submit"]').click();
+ assert.deepEqual(await page.evaluate(()=>[window.pickedModel,window.pickedEffort,window.savedSelection]),['b-model','low',true]);
+ await page.evaluate(()=>{window.fixture.setApiProvider('custom');window.fixture.setModel('');window.fixture.select(window.fixture.entries.find(e=>e.id==='api:provider.model'));});
+ assert.ok(await api.locator('input[type=password]').isEnabled());
+ assert.ok(await api.locator('[data-onboarding-provider="endpoint"] input').isEnabled());
+ assert.ok(await api.locator('button[type="submit"]').isDisabled());
+ await api.getByText(await page.evaluate(()=>window.fixture.label('provider.chooseModelToSave')),{exact:true}).waitFor();
+ await api.locator('[data-onboarding-provider="model"] select').selectOption('a-model');
+ assert.ok(await api.locator('button[type="submit"]').isEnabled());
  assert.deepEqual(errors,[]);
  console.log('PASS real sidebar/settings: '+entries.length+' ordinary landing targets, subscription/API tabs, vision disclosure, startup animation, developer visibility, label/help search, keyboard, clear, no result, 4 locales, Telegram disclosure, no mutations');
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

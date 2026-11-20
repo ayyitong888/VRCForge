@@ -9,6 +9,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 
 type ProviderSetupProps = {
+  credentialsLocked?: boolean;
   provider: string;
   apiKey: string;
   baseUrl: string;
@@ -63,6 +64,7 @@ type VisionProfileSetupProps = {
 
 const PROVIDERS_REQUIRING_BASE_URL = ["openai", "deepseek", "openrouter", "ollama", "vertexai", "custom"];
 export function ProviderSetup({
+  credentialsLocked = false,
   provider,
   apiKey,
   baseUrl,
@@ -117,6 +119,10 @@ export function ProviderSetup({
     thinkingLevel !== "default" && !supportedReasoningVariants.some((variant) => variant.key === thinkingLevel);
   const protocolAutoNegotiation = apiType === "auto";
   const hasModelList = models.length > 0;
+  const missingModel = !model.trim() || model === "deepseek-auto";
+  const readyForModel = Boolean(apiKey.trim() || keySaved || !providerNeedsApiKey(provider));
+  const saveHint = missingModel && readyForModel ? i18n.t("provider.chooseModelToSave")
+    : !modelsError && keySaved && !apiKey.trim() ? i18n.t("provider.savedKeyTestHint") : "";
   const capabilities = providerCapabilities(modelCapabilities, capabilitySource);
   const apiTypeOptions = supportedApiTypeOptions(provider, model);
   const knownContextWindow = resolveContextLimit(provider, model, selectedModelInfo);
@@ -185,6 +191,7 @@ export function ProviderSetup({
           {providerNeedsApiKey(provider) ? (
             <input
               value={apiKey}
+              disabled={credentialsLocked}
               onChange={(event) => onApiKeyChange(event.target.value)}
               type="password"
               placeholder={keySaved ? i18n.t("provider.savedKeyHint") : i18n.t("provider.apiKeyPlaceholder")}
@@ -203,6 +210,7 @@ export function ProviderSetup({
           <SettingsFieldLabel label={i18n.t("provider.baseUrl")} onboardingTarget="endpoint">
             <input
               value={baseUrl}
+              disabled={credentialsLocked}
               onChange={(event) => onBaseUrlChange(event.target.value)}
               className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
             />
@@ -349,7 +357,7 @@ export function ProviderSetup({
         ) : null}
       </div>
       <div data-onboarding-provider="actions" className="mt-5 flex flex-wrap justify-end gap-2">
-        <div aria-live="polite" className="min-h-5 w-full text-xs text-muted-foreground">{providerTestMessage || (!modelsError && keySaved && !apiKey.trim() ? i18n.t("provider.savedKeyTestHint") : "")}</div>
+        <div aria-live="polite" className="min-h-5 w-full text-xs text-muted-foreground">{providerTestMessage || saveHint}</div>
         <Button type="button" variant="outline" disabled={!runtimeConnected || saving || Boolean(testingProvider) || model === "deepseek-auto"} onClick={() => onTestProvider("text")}>
           {testingProvider === "text" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
           {i18n.t("provider.testConnection")}
@@ -362,7 +370,7 @@ export function ProviderSetup({
           {testingProvider === "vision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
           {i18n.t("provider.testVision")}
         </Button>
-        <Button disabled={!runtimeConnected || saving || !contextWindowValid || hasUnsupportedReasoningVariant || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim() || model === "deepseek-auto"} type="submit">
+        <Button disabled={!runtimeConnected || saving || !contextWindowValid || hasUnsupportedReasoningVariant || !readyForModel || missingModel} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {i18n.t("common.save")}
         </Button>

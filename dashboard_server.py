@@ -17039,56 +17039,89 @@ def _runtime_planner_model_id(value: object) -> str:
     return model[7:] if model.startswith("models/") else model
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _PlannerRequestSelection:
+    request: Mapping[str, object]
+    saved: ProviderApiConfig
+    config: ProviderApiConfig
+    metadata: PlannerTurnMetadata
+
+
 class _RuntimePlannerProviderTurnBinding:
-    """Keep one full Provider config inside the host for exactly one runtime turn."""
+    """Bind a turn lease and capture the current selection for each model request."""
 
     def __init__(self) -> None:
-        self._config: ContextVar[ProviderApiConfig | None] = ContextVar(
+        self._selection: ContextVar[_PlannerRequestSelection | None] = ContextVar(
             "vrcforge_runtime_planner_provider_config",
             default=None,
         )
 
     @contextmanager
     def bind(self, request: Mapping[str, object]):
+        saved = PROVIDER_CONFIGURATION.current_api_config()
+        requested = request
+        resumed = request.get("_resumeModelSelection")
+        if isinstance(resumed, Mapping):
+            requested = resumed if resumed.get("base") == saved.native_binding() else {}
         with PROVIDER_CONFIGURATION.bind_runtime_config(
-            provider=str(request.get("provider") or ""),
-            model=str(request.get("model") or ""),
+            provider=str(requested.get("provider") or ""),
+            model=str(requested.get("model") or ""),
         ) as config:
-            requested_limit = request.get("_requestedContextLimit")
-            verified_limit = PROVIDER_MODEL_CATALOG.resolve_context_limit(config)
-            requested_provider = str(request.get("provider") or "").strip()
-            requested_model = _runtime_planner_model_id(request.get("model"))
-            if requested_limit is not None and requested_provider and requested_model:
-                try:
-                    provider_matches = normalize_provider_name(requested_provider) == normalize_provider_name(config.provider)
-                except RuntimeError:
-                    provider_matches = False
-                if provider_matches and requested_model == _runtime_planner_model_id(config.model):
-                    requested_bound = int(requested_limit)
-                    if requested_bound > 0:
-                        verified_limit = min(verified_limit, requested_bound) if verified_limit else requested_bound
-            label = " · ".join(
-                part
-                for part in (provider_display_name(config.provider), str(config.model or "").strip())
-                if part
-            )
-            token = self._config.set(config)
+            metadata = self._resolve_metadata(requested, config)
+            if (requested.get("provider") or requested.get("model")) and (config.provider, config.model) != (saved.provider, saved.model):
+                metadata = replace(metadata, override_base=saved.native_binding())
+            selection = _PlannerRequestSelection(request, saved, config, metadata)
+            token = self._selection.set(selection)
             try:
-                yield PlannerTurnMetadata(
-                    verified_context_limit=verified_limit,
-                    planner_label=label,
-                    native_binding=config.native_binding(),
-                    provider=config.provider,
-                    model=config.model,
-                )
+                yield selection.metadata
             finally:
-                self._config.reset(token)
+                self._selection.reset(token)
+
+    def refresh_request(self) -> PlannerTurnMetadata | None:
+        selection = self._selection.get()
+        if selection is None:
+            return None
+        saved = PROVIDER_CONFIGURATION.current_api_config()
+        if saved is not selection.saved:
+            selection = _PlannerRequestSelection(selection.request, saved, saved, self._resolve_metadata(selection.request, saved))
+            self._selection.set(selection)
+        return selection.metadata
+
+    @staticmethod
+    def _resolve_metadata(request: Mapping[str, object], config: ProviderApiConfig) -> PlannerTurnMetadata:
+        requested_limit = request.get("_requestedContextLimit")
+        verified_limit = PROVIDER_MODEL_CATALOG.resolve_context_limit(config)
+        requested_provider = str(request.get("provider") or "").strip()
+        requested_model = _runtime_planner_model_id(request.get("model"))
+        if requested_limit is not None and requested_provider and requested_model:
+            try:
+                provider_matches = normalize_provider_name(requested_provider) == normalize_provider_name(config.provider)
+            except RuntimeError:
+                provider_matches = False
+            if provider_matches and requested_model == _runtime_planner_model_id(config.model):
+                requested_bound = int(requested_limit)
+                if requested_bound > 0:
+                    verified_limit = min(verified_limit, requested_bound) if verified_limit else requested_bound
+        label = " · ".join(
+            part
+            for part in (provider_display_name(config.provider), str(config.model or "").strip())
+            if part
+        )
+        return PlannerTurnMetadata(
+            verified_context_limit=verified_limit,
+            planner_label=label,
+            native_binding=config.native_binding(),
+            provider=config.provider,
+            model=config.model,
+            provider_route=replace(config, thinking_level="").native_binding(),
+            thinking_level=config.thinking_level,
+        )
 
     def current_config(self) -> ProviderApiConfig:
-        config = self._config.get()
-        if config is None:
+        selection = self._selection.get()
+        if selection is None:
             raise RuntimeError("runtime planner provider turn is not bound")
-        return config
+        return selection.config
 
 
 class RuntimePlannerProviderCancelledError(CancelledError, RuntimeError):
@@ -17200,6 +17233,8 @@ class _RuntimePlannerModel:
         # construction and lets tests replace the provider leaf in isolation.
         from provider_request_ledger import ProviderRequestLedger, ledger_scope
 
+        if native_request is None and (refresh := getattr(self._turn, "refresh_request", None)):
+            refresh()
         config = self._turn.current_config()
         if provider_requires_api_key(config.provider) and not config.api_key:
             raise PlannerProviderNotConfiguredError("LLM API key is not configured.")

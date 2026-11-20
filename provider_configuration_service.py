@@ -151,7 +151,7 @@ class ProviderConfigurationService:
         self._api_config: ProviderApiConfig | None = None
         self._vision_config: ProviderVisionConfig | None = None
         self._runtime_bindings = 0
-        self._configuration_changes = 0
+        self._configuration_change: str | None = None
         self._configuration_change_owner: ContextVar[bool] = ContextVar("provider_configuration_change", default=False)
         self.runtime_waiting: Callable[[], bool] = lambda: False
 
@@ -159,37 +159,48 @@ class ProviderConfigurationService:
         with self._lock:
             return bool(self._runtime_bindings or self.runtime_waiting())
 
-    def _assert_configuration_idle(self, api_config: ProviderApiConfig | None = None) -> None:
-        # Turns retain an immutable config snapshot; a reasoning-only save can
-        # change the next turn's default without changing the active binding.
-        reasoning_only = False
-        if api_config is not None:
-            current = self.current_api_config()
-            reasoning_only = replace(api_config, thinking_level=current.thinking_level) == current
-        if (self.runtime_configuration_locked() and not reasoning_only) or (self._configuration_changes and not self._configuration_change_owner.get()):
+    def _assert_configuration_idle(self, api_config: ProviderApiConfig | None = None, *, verified_account: bool = False) -> None:
+        if self._configuration_change_owner.get():
+            return
+        if self._configuration_change:
+            raise ProviderConfigurationBusyError("An account change is in progress. Try again when it finishes.")
+        if self.runtime_configuration_locked() and not verified_account:
+            if api_config is not None:
+                current = self.current_api_config()
+                if api_config.provider == current.provider:
+                    if (api_config.base_url, api_config.api_key) == (current.base_url, current.api_key):
+                        return
+                else:
+                    keys, vision_keys = self._load_provider_key_maps_locked()
+                    endpoints = self._saved_api_endpoints_locked()
+                    if api_config.provider not in endpoints and not (keys.get(api_config.provider) or vision_keys.get(api_config.provider)):
+                        return
+                    if (api_config.provider in endpoints and api_config.base_url == endpoints[api_config.provider]
+                            and api_config.api_key == (keys.get(api_config.provider) or vision_keys.get(api_config.provider) or "")):
+                        return
             raise ProviderConfigurationBusyError(
-                "Model settings are locked while a task is running or waiting for approval or an answer. Finish or stop the task before changing them."
+                "Finish or stop the active task before changing account credentials or connection settings."
             )
 
     @contextmanager
-    def configuration_change(self, *, api_config: ProviderApiConfig | None = None):
+    def configuration_change(self, *, api_config: ProviderApiConfig | None = None, verified_account: bool = False):
         """Reserve one async account/config mutation without holding a lock across awaits."""
         with self._lock:
-            self._assert_configuration_idle(api_config)
-            self._configuration_changes += 1
+            self._assert_configuration_idle(api_config, verified_account=verified_account)
+            self._configuration_change = "account" if api_config is None else "model"
         token = self._configuration_change_owner.set(True)
         try:
             yield
         finally:
             self._configuration_change_owner.reset(token)
             with self._lock:
-                self._configuration_changes -= 1
+                self._configuration_change = None
 
     @contextmanager
     def bind_runtime_config(self, *, provider: str = "", model: str = ""):
         """Bind before turn admission; every exit releases this process-only lease."""
         with self._lock:
-            if self._configuration_changes:
+            if self._configuration_change == "account":
                 raise ProviderConfigurationBusyError("Model settings are being changed. Try again when the change finishes.")
             config = self.resolve_session_config(provider=provider, model=model)
             self._runtime_bindings += 1
@@ -228,7 +239,7 @@ class ProviderConfigurationService:
 
         A model-only choice retains its provider endpoint and credential (including
         a ChatGPT account reference). A different provider resolves its own saved
-        key and default endpoint; it must never borrow the current provider's URL.
+        key and saved endpoint; it must never borrow the current provider's URL.
         """
         current = self.current_api_config()
         selected_provider = self._policy.normalize_provider_name(provider) if str(provider or "").strip() else current.provider
@@ -239,7 +250,9 @@ class ProviderConfigurationService:
         if same_provider:
             request = replace(current, model=selected_model)
         else:
-            request = ProviderApiConfig(provider=selected_provider, api_key="", base_url=self._policy.get_provider_defaults(selected_provider)["base_url"], model=selected_model)
+            with self._lock:
+                base_url = self._saved_api_endpoints_locked().get(selected_provider, self._policy.get_provider_defaults(selected_provider)["base_url"])
+            request = ProviderApiConfig(provider=selected_provider, api_key="", base_url=base_url, model=selected_model)
         return self.resolve_api_request(request)
 
     def current_vision_config(self) -> ProviderVisionConfig:
@@ -361,6 +374,7 @@ class ProviderConfigurationService:
         request: ProviderApiConfigRequestPort,
         *,
         catalog_only: bool = False,
+        saved_endpoint: str | None = None,
     ) -> ProviderApiConfig:
         provider = self._policy.normalize_provider_name(request.provider)
         defaults = self._policy.get_provider_defaults(provider)
@@ -368,7 +382,7 @@ class ProviderConfigurationService:
         base_url = self._policy.normalize_base_url(
             request.base_url,
             provider,
-            defaults["base_url"],
+            defaults["base_url"] if saved_endpoint is None else saved_endpoint,
         )
         # Model discovery precedes selecting a model and its execution protocol.
         requested_api_type = None
@@ -439,7 +453,10 @@ class ProviderConfigurationService:
     ) -> ProviderApiConfig:
         """Normalize a request, reuse the provider's saved key, then revalidate."""
 
-        config = self.normalize_api_request(request, catalog_only=catalog_only)
+        provider = self._policy.normalize_provider_name(request.provider)
+        with self._lock:
+            saved_endpoint = self._saved_api_endpoints_locked().get(provider)
+        config = self.normalize_api_request(request, catalog_only=catalog_only, saved_endpoint=saved_endpoint)
         if not config.api_key.strip():
             with self._lock:
                 saved = self.current_api_config()
@@ -449,6 +466,8 @@ class ProviderConfigurationService:
                     if saved.provider == config.provider and saved.api_key.strip()
                     else api_keys.get(config.provider) or vision_keys.get(config.provider) or ""
                 )
+            if saved_key and saved_endpoint is not None and config.base_url != saved_endpoint:
+                raise ValueError("Enter a credential for the new endpoint, or choose the saved provider endpoint.")
             if saved_key:
                 config = replace(config, api_key=saved_key)
         self._policy.validate_provider_api_key(config.api_key)
@@ -561,6 +580,19 @@ class ProviderConfigurationService:
             api_keys, vision_keys = self._load_provider_key_maps_locked()
             return sorted(set(api_keys) | set(vision_keys))
 
+    def _saved_api_endpoints_locked(self, document: dict[str, Any] | None = None) -> dict[str, str]:
+        document = document if document is not None else self._load_config_document_locked()
+        stored = document.get("provider_base_urls")
+        endpoints = {k: v for k, v in stored.items() if isinstance(v, str)} if isinstance(stored, dict) else {}
+        for section in ("vision", "api"):
+            entry = document.get(section)
+            if isinstance(entry, dict) and isinstance(entry.get("base_url"), str) and entry.get("provider"):
+                if section == "vision":
+                    endpoints.setdefault(entry["provider"], entry["base_url"])
+                else:
+                    endpoints[entry["provider"]] = entry["base_url"]
+        return endpoints
+
     def _validated_key(self, value: str) -> str:
         self._policy.validate_provider_api_key(value)
         return value
@@ -629,7 +661,11 @@ class ProviderConfigurationService:
                     if target.get("chatgpt") == _clear_chatgpt_account_id:
                         target.pop("chatgpt", None)
             api_descriptor = self._policy.provider_config_descriptor(api)
+            endpoints = self._saved_api_endpoints_locked(document)
+            endpoints[committed_api.provider] = committed_api.base_url
+            endpoints[api.provider] = api.base_url
             payload: dict[str, Any] = {
+                "provider_base_urls": endpoints,
                 "api": {
                     "provider": api.provider,
                     "api_key": api.api_key,
@@ -704,6 +740,7 @@ class ProviderConfigurationService:
             "apiKeyRequired": requires_key,
             "configured": not requires_key or bool(config.api_key),
             "runtimeLocked": self.runtime_configuration_locked(),
+            "savedProviderBaseUrls": self._saved_api_endpoints_locked(),
             "savedKeyProviders": self._saved_key_providers(),
         }
 

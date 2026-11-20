@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import ntpath
+from agent_native_history_store import project_native_binding
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -69,9 +68,7 @@ def _run(gateway, tmp_path, **extra):
 
 
 def _binding(tmp_path):
-    return hashlib.sha256(
-        ("fixture-provider-model-route\n" + ntpath.normcase(ntpath.normpath(str(tmp_path)))).encode()
-    ).hexdigest()
+    return project_native_binding(str(tmp_path))
 
 
 def test_native_delegate_running_result_remains_pending_for_terminal_callback(tmp_path):
@@ -379,15 +376,28 @@ def test_native_approval_after_new_owner_message_keeps_exact_receipt(tmp_path, r
     assert len(model.requests) == (2 if reject else 3)
 
 
-def test_native_approval_pending_survives_gateway_restart_and_reject_resume_pairs_same_call(tmp_path):
+@pytest.mark.parametrize("legacy_provider_switch", [False, True])
+def test_native_approval_pending_survives_gateway_restart_and_reject_resume_pairs_same_call(
+    tmp_path, monkeypatch, legacy_provider_switch,
+):
     invoked = []
     gateway, _model = _write_gateway(tmp_path, [
         call("phase-1", "vrcforge_runtime_action", {"action": "enter_execution"}),
         call("write-1", "fixture_write", {"value": "x"}),
     ], invoked)
+    if legacy_provider_switch:
+        # Recreate the storage key and approval freeze used by the previous release.
+        monkeypatch.setattr(gateway, "_scoped_history_binding",
+                            lambda session, project, context=None: gateway.runtime_planner.legacy_native_route(project)[0])
     initial = _run(gateway, tmp_path)
     approval_id = initial["approval_id"]
     restarted, model = _write_gateway(tmp_path, [{"role": "assistant", "content": "rejected after restart"}], invoked)
+    if legacy_provider_switch:
+        from contextlib import nullcontext
+        from runtime_planner_service import PlannerTurnMetadata
+
+        monkeypatch.setattr(restarted.runtime_planner._turn, "bind", lambda request: nullcontext(
+            PlannerTurnMetadata(native_binding="new-provider-model-effort", provider_route="a" * 64)))
     approval = restarted.approval_transactions.list_approvals()
     stored = next(item for item in approval if item["id"] == approval_id)
     assert stored["status"] == "pending"
