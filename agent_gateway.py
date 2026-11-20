@@ -8635,6 +8635,7 @@ class AgentGateway:
                 )
 
             step_tool = ""
+            core_wait_timed_out = False
             action_arguments: Any = {}
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
@@ -9004,14 +9005,24 @@ class AgentGateway:
                                                  snapshot_lookup=self._scan_results.lookup if project_root else None,
                                                  handoff_lookup=read_handoff_record) if step_tool == RESULT_READER_TOOL else nullcontext()
                     ), (bind_attachment_inspection_chat(attachment_owners) if step_tool == "vrcforge_inspect_chat_attachment" else nullcontext()):
-                        step_payload = self._runtime_skill_executor.execute(
-                            step_tool,
-                            step_params,
-                            agent_name,
-                            owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
-                            restored_absent_paths=restored_absent_paths,
-                            read_scope=read_scope,
-                        )
+                        def execute_scoped_skill():
+                            return self._runtime_skill_executor.execute(
+                                step_tool, step_params, agent_name,
+                                owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
+                                restored_absent_paths=restored_absent_paths, read_scope=read_scope,
+                            )
+
+                        if step_tool == "vrcforge_core_upgrade_status":
+                            from core_upgrade_readiness import await_core_upgrade_snapshot
+
+                            step_payload, core_wait_timed_out = await_core_upgrade_snapshot(
+                                execute_scoped_skill,
+                                lambda delay: self._wait_for_provider_retry(
+                                    delay, session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+                                ),
+                            )
+                        else:
+                            step_payload = execute_scoped_skill()
                 finally:
                     if material_capture_token is not None:
                         self._material_scan_capture_context.reset(material_capture_token)
@@ -9617,6 +9628,13 @@ class AgentGateway:
             if take_runtime_cancellation():
                 discard_runtime_compaction_for_cancel()
                 last_plan = cancelled_runtime_plan()
+                break
+
+            if core_wait_timed_out:
+                last_plan = {
+                    **plan, "nextStep": "paused", "reason": "tool_poll_timeout", "continueLoop": False,
+                    "reply": "等待 Unity Core 就绪超时，本轮已暂停。已保留最后一次状态，可继续检查同一项目。",
+                }
                 break
 
             if step_waits_for_approval:

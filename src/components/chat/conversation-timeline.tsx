@@ -211,7 +211,7 @@ export function buildAgentTimelineRows({
       providerLine,
       activeApprovalId: approval?.id,
       approvalRuns,
-      renderElapsed: true,
+      renderElapsed: !hideTurnMetadata,
       processSupplement,
       dropCancellationMarkers: cancelled,
       interleavedUserMessages,
@@ -296,7 +296,10 @@ export function buildAgentTimelineRows({
       t,
     });
     if (supplement) legacyRows.push(supplement);
-    if (!hideTurnMetadata && !sharedProcess && (Number.isFinite(elapsedSeconds) || providerLine)) legacyRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
+    if (!hideTurnMetadata && !sharedProcess) {
+      if (Number.isFinite(elapsedSeconds)) legacyRows.unshift(renderTurnElapsed(elapsedSeconds!));
+      if (providerLine) legacyRows.push(renderTurnProvider(providerLine));
+    }
     if (missingFinalAnswer) legacyRows.push(renderMissingFinalAnswerNotice(t));
     return finishRows(legacyRows);
   }
@@ -318,12 +321,13 @@ export function buildAgentTimelineRows({
     renderQuestionActions,
     t,
   });
-  if (cancelled && rows.length) {
+  const hasProcessHeader = cancelled && rows.length > 0;
+  if (hasProcessHeader) {
     const processRows = rows.splice(0);
     rows.push(
       sharedProcess ? sharedProcess.open && <div key="agent-turn-process" data-agent-process-content>{processRows}</div> :
       <div key="agent-turn-process" data-agent-turn-process-group>
-        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, t, live || Boolean(wait))} statusLabel="" statusTone="muted" processHeader>
+        <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(elapsedSeconds, t)} statusLabel="" statusTone="muted" processHeader>
           {processRows}
         </WorkSegmentRow>
       </div>,
@@ -364,8 +368,9 @@ export function buildAgentTimelineRows({
     t,
   });
   if (supplement) fallbackRows.push(supplement);
-  if (!hideTurnMetadata && !sharedProcess && Number.isFinite(elapsedSeconds) && !fallbackRows.some((row) => row && typeof row === "object" && "key" in row && (row as { key?: string }).key === "agent-turn-metadata")) {
-    fallbackRows.push(renderTurnMetadataRow(elapsedSeconds, providerLine));
+  if (!hideTurnMetadata && !sharedProcess) {
+    if (!hasProcessHeader && Number.isFinite(elapsedSeconds)) fallbackRows.unshift(renderTurnElapsed(elapsedSeconds!));
+    if (providerLine) fallbackRows.push(renderTurnProvider(providerLine));
   }
   return finishRows(fallbackRows);
 }
@@ -516,11 +521,15 @@ export function buildDurableTimelineRows(
     elapsedSeconds,
   );
   if (!presentation.entries.length && options.processSupplement == null) {
-    return (options.interleavedUserMessages || []).map((message) => options.renderInterleavedUserMessage?.(message) || (
+    const steeringRows = (options.interleavedUserMessages || []).map((message) => options.renderInterleavedUserMessage?.(message) || (
       <div key={`steer-${message.id}`} data-chat-steering-message={message.id} className="flex justify-end">
         <div className="max-w-[78%] rounded-2xl bg-primary/[0.14] px-4 py-2 text-chat-body text-foreground dark:bg-primary/20">{message.text}</div>
       </div>
     ));
+    if (!options.sharedProcess && Number.isFinite(options.processTitleElapsed)) {
+      steeringRows.unshift(renderTurnElapsed(options.processTitleElapsed!));
+    }
+    return steeringRows;
   }
   const resultQueues = buildRuntimeStepResultQueues(steps);
   const publicText = [options.captureText || "", ...events.filter(event => event.kind === "assistant").map(event => event.payload.summary || "")].join("\n");
@@ -582,8 +591,7 @@ export function buildDurableTimelineRows(
     );
   };
   const includeAssistant = options.includeAssistant !== false;
-  const turnElapsed = options.processTitleElapsed ?? presentation.elapsedSeconds
-    ?? (options.processSupplement == null ? undefined : elapsedSeconds);
+  const turnElapsed = options.processTitleElapsed ?? elapsedSeconds ?? presentation.elapsedSeconds;
   const finalAssistant = [...presentation.entries].reverse().find((entry) => (
     (entry.type === "assistant" && entry.status !== "completion_unverified"
       && !entry.phase && Boolean(terminalFailureCode))
@@ -684,7 +692,7 @@ export function buildDurableTimelineRows(
       <div key="agent-turn-process" data-agent-turn-process-group>
         <WorkSegmentRow
           kind="process"
-          title={turnProcessDisplayTitle(turnElapsed, i18n.t, options.live || options.waiting)}
+          title={turnProcessDisplayTitle(turnElapsed, i18n.t)}
           statusLabel={historicalFailureLabel(processInvocations)}
           showStatus={processInvocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()))}
           statusTone="muted"
@@ -700,6 +708,8 @@ export function buildDurableTimelineRows(
       </div>
     );
     rows.unshift(group);
+  } else if (!options.sharedProcess && options.renderElapsed && Number.isFinite(turnElapsed)) {
+    rows.unshift(renderTurnElapsed(turnElapsed!));
   }
   if (options.providerLine && finalAssistant) {
     rows.push(<div key="agent-turn-provider" className="mt-2 px-1 text-[10px] leading-relaxed text-muted-foreground/75">{options.providerLine}</div>);
@@ -914,31 +924,39 @@ function historicalFailureLabel(invocations: TimelineInvocation[]): string {
 function turnProcessDisplayTitle(
   elapsedSeconds: number | undefined,
   t: typeof i18n.t,
-  active = false,
 ): string {
-  if (active) return t("thinking.workingOnIt");
-  return t("agent.turnDuration", { duration: Number.isFinite(elapsedSeconds) ? formatDuration(elapsedSeconds || 0) : "—" });
+  if (!Number.isFinite(elapsedSeconds)) return t("agent.turnDuration", { duration: "—" });
+  const seconds = Math.max(0, Math.round(elapsedSeconds!));
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const duration = hours > 0 ? t("format.hoursMinutes", { h: hours, m: minutes % 60 })
+    : minutes > 0 ? t("format.minutesSeconds", { m: minutes, s: seconds % 60 }) : t("format.seconds", { n: seconds });
+  return t("agent.turnDuration", { duration });
+}
+
+function renderTurnElapsed(elapsedSeconds: number) {
+  return <div key="turn-elapsed" data-chat-turn-elapsed className="px-1 text-chat-detail text-muted-foreground tabular-nums">
+    {turnProcessDisplayTitle(elapsedSeconds, i18n.t)}
+  </div>;
 }
 
 export function SharedTurnProcessHeader({ process }: { process: SharedTurnProcess }) {
   return <div data-agent-turn-process-group>
-    <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(process.elapsedSeconds, i18n.t, process.live || process.waiting)}
+    <WorkSegmentRow kind="process" title={turnProcessDisplayTitle(process.elapsedSeconds, i18n.t)}
       statusLabel={i18n.t("agent.timeline.failureRecords", {count: process.failures})} showStatus={process.failures > 0}
       statusTone="muted" processHeader forceOpen={process.live}
       controlledOpen={process.open} onOpenChange={process.onOpenChange} />
   </div>;
 }
 
-function renderTurnMetadataRow(elapsedSeconds?: number, providerLine?: string): ReactNode {
-  if (!Number.isFinite(elapsedSeconds) && !providerLine) return null;
+function renderTurnProvider(providerLine: string): ReactNode {
   return (
     <div
       key="agent-turn-metadata"
       data-agent-turn-metadata
       className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 px-1 pt-2 text-[10px] leading-relaxed text-muted-foreground"
     >
-      {Number.isFinite(elapsedSeconds) ? <span>{i18n.t("agent.turnDuration", { duration: formatDuration(elapsedSeconds || 0) })}</span> : null}
-      {providerLine ? <span className="text-muted-foreground/75">{providerLine}</span> : null}
+      <span className="text-muted-foreground/75">{providerLine}</span>
     </div>
   );
 }

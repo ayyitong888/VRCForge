@@ -293,7 +293,7 @@ export function SubAgentConversation({ endpoint, turns, developerOptionsEnabled 
               initialUserContent={user ? <div data-subagent-user-message>
                 <ConversationCard item={user} userMessageAuthor={taskSourceLabel(turn, t)} onCopyItem={onCopyItem} />
               </div> : undefined} />
-            {item.type === "streaming" ? <StreamingPhaseStatus item={item} nowMs={Date.now()} showElapsed={false} /> : null}
+            {item.type === "streaming" ? <StreamingPhaseStatus item={item} nowMs={Date.now()} /> : null}
             {developerOptionsEnabled && (turn.result || turn.events?.length || turn.parentContinuationStatus || turn.error || turn.errorCode || turnReadError)
               ? <TurnTechnicalDetails turn={turn} readError={turnReadError} /> : null}
           </section>

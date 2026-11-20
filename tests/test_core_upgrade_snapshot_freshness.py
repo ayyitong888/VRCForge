@@ -71,3 +71,94 @@ def test_fresh_compilation_in_progress_still_waits(status):
 def test_health_query_without_install_boundary_preserves_existing_ready(status):
     _, call = status
     assert call("")["ready"] is True
+
+
+def test_stale_console_counts_are_only_historical(status):
+    diagnostics, call = status
+    diagnostics["coreInfo"]["compileSnapshot"].update(capturedAt="2026-08-01T00:00:00Z", errorCount=2)
+    receipt = call()
+    assert receipt["status"] == "waiting_for_post_install_compile"
+    assert receipt["console"]["errorCount"] == 2 and receipt["consoleErrorCount"] is None
+    assert receipt["nextAction"]["arguments"]["installedAt"] == receipt["installedAt"]
+
+
+def test_verified_compile_failure_enters_existing_failure_channel(status):
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    diagnostics, call = status
+    diagnostics["coreInfo"]["compileSnapshot"].update(errorCount=1, errors=[{"message": "CS1001"}])
+    receipt = call()
+    assert receipt["console"]["errors"] == [{"message": "CS1001"}]
+    assert receipt["consoleErrorCount"] == 1 and "nextAction" not in receipt
+    assert normalize_agent_tool_result(receipt, fallback_summary="status", write=False)["status"] == "failed"
+
+
+def test_unscoped_old_or_other_project_log_is_only_a_hint_after_install(status, monkeypatch, tmp_path):
+    _, call = status
+    project = tmp_path / "project"
+    (project / "Library/VRCForge/mcp-core.json").unlink()
+    source = project / "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs"
+    source.parent.mkdir(parents=True)
+    source.touch()
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    log = tmp_path / "Unity/Editor/Editor.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("-projectPath\nother-project\n[VRCForge MCP] Core failed to start: old failure\n", encoding="utf-8")
+    monkeypatch.setattr(ds, "_unity_editor_process_state", lambda _: "running")
+    receipt = call()
+    assert receipt["status"] == "waiting_for_domain_reload"
+    assert receipt["nextAction"]["tool"] == "unity_core_upgrade_status"
+    assert receipt["diagnostics"]["startupDiagnostic"]["message"] == "old failure"
+    assert "toolExecutionStatus" not in receipt
+    assert call("")["status"] == "core_start_failed"
+
+
+@pytest.mark.parametrize("ending", ["ready", "timeout", "cancel", "compile_failed"])
+def test_native_core_read_waits_without_replaying_installer(tmp_path, monkeypatch, ending):
+    import core_upgrade_readiness as cr
+    from tests.test_native_runtime_gateway import call, run, setup_gateway
+
+    name = "vrcforge_core_upgrade_status"
+    args = {"projectPath": str(tmp_path), "installedAt": "2026-11-20T12:50:55.993299+00:00"}
+    reads = []
+    clock = [0.0]
+    pending = {"schema": "vrcforge.core_upgrade_status.v1", "ok": True, "ready": False,
+               "status": "waiting_for_domain_reload",
+               "nextAction": {"tool": "unity_core_upgrade_status", "arguments": args}}
+
+    def read(params):
+        reads.append((params["projectPath"], params["installedAt"]))
+        if ending in {"timeout", "cancel"} or len(reads) == 1:
+            return pending
+        return {**pending, "status": ending, "nextAction": None, "ready": ending == "ready",
+                **({"toolExecutionStatus": "failed", "error": "compile error"} if ending == "compile_failed" else {})}
+
+    gateway, model, _ = setup_gateway(tmp_path, [
+        call("status", name, args), {"role": "assistant", "content": "Checked."},
+    ])
+    gateway.register_tool(name, "Check Core.", "read/debug", read)
+    gateway.register_tool("vrcforge_install_unity_core", "Install Core.", "write",
+                          lambda _: pytest.fail("installer replayed"), write=True)
+
+    def wait(delay, **_):
+        clock[0] += delay
+        if ending == "cancel":
+            gateway.request_runtime_cancel({"sessionId": "native-session", "clientTurnId": "native-turn"})
+            return False
+        return True
+
+    bounded_wait = cr.await_core_upgrade_snapshot
+    monkeypatch.setattr(cr, "await_core_upgrade_snapshot",
+                        lambda read, wait: bounded_wait(read, wait, timeout=8, clock=lambda: clock[0]))
+    monkeypatch.setattr(gateway, "_wait_for_provider_retry", wait)
+    result = run(gateway, tmp_path)
+    assert len(set(reads)) == 1 and reads[0][1] == args["installedAt"]
+    assert [step["tool"] for step in result["steps"]] == [name]
+    if ending in {"timeout", "cancel"}:
+        assert len(model.requests) == 1
+        assert len(reads) == (3 if ending == "timeout" else 1)
+        assert result["plan"]["nextStep"] == ("paused" if ending == "timeout" else "cancelled")
+    else:
+        assert len(model.requests) == 2 and len(reads) == 2
+        assert result["steps"][0]["result"]["status"] == ending
+        assert result["steps"][0]["outcome"]["status"] == ("ok" if ending == "ready" else "failed")

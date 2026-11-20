@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import postcss from "postcss";
+import tailwindcss from "tailwindcss";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -9,7 +10,7 @@ const root = process.cwd();
 const { chromium } = createRequire(import.meta.url)(process.env.VRCFORGE_PLAYWRIGHT_PATH || "playwright");
 const replayPath = process.env.VRCFORGE_TURN_REPLAY_PATH;
 const replay = replayPath ? JSON.parse(await readFile(resolve(replayPath), "utf8")) : undefined;
-const rawTimeline = replay?.response?.timeline;
+const rawTimeline = replay?.response?.timeline ?? replay?.timeline?.events ?? replay?.timeline;
 const sourceEvents = rawTimeline || [
   { id: "fixture-call", sequence: 10, timestamp: "2026-10-23T08:50:00.000+09:00", kind: "tool_call", payload: { status: "started" } },
   { id: "fixture-result", sequence: 11, timestamp: "2026-10-23T08:50:01.000+09:00", kind: "tool_result", payload: { status: "ok" } },
@@ -30,74 +31,96 @@ const timeline = [toolCall, toolResult].map((event, index) => ({
 const user = { id: `user-${clientTurnId}`, type: "user", text: "fixture user message", clientTurnId, createdAt };
 const streaming = { id: `stream-${clientTurnId}`, type: "streaming", clientTurnId, text: "", phase: "waiting_for_model", createdAt, providerLastActivityAt: createdAt, timeline };
 
-const mocks = {
-  "./composer": 'export const Composer=()=>React.createElement("textarea");',
-  "./background-goal-catch-up-card": "export const BackgroundGoalCatchUpCard=()=>null;",
-  "./conversation-card": `export const MessageDateSeparator=({timestamp})=>React.createElement("div",{"data-chat-date-separator":true},timestamp); export const ConversationCard=({item,initialUserContent})=>React.createElement("div",{"data-conversation-card":item.id,"data-user-message":item.type==="user"?true:undefined},initialUserContent,item.timeline?.filter(event=>event.kind==="tool_call").map(event=>React.createElement("div",{"data-fixture-tool-call":true,key:event.id},event.payload.tool))); export const StreamingPhaseStatus=({item})=>React.createElement("div",{"data-chat-current-activity":true,"data-turn":item.clientTurnId},"Waiting for model");`,
-  "./session-handoff-card": "export const SessionHandoffCard=()=>null;",
-  "./session-handoff-send": "export const SessionHandoffSend=()=>null;",
-  "../approvals/scoped-pending-approval-card": "export const ScopedPendingApprovalCard=()=>null;",
-  "../ui/button": 'export const Button=({children,...props})=>React.createElement("button",props,children);',
-  "../../lib/api": "export const updateAgentGoal=async()=>({});",
-  "../../lib/path-to-skill-context": "export const matchPathToSkillRuntimeOperation=()=>null;",
-  "../../lib/chat-thread": "export const mergeConversationTimelineItems=x=>x;",
-};
-
-async function bundleWorkspace(sourceOverride, conversationItems) {
-  const entry = `import React from 'react'; import {createRoot} from 'react-dom/client'; import {ChatWorkspace} from './src/components/chat/chat-workspace'; window.renderFixture=()=>createRoot(document.getElementById('root')).render(React.createElement(ChatWorkspace,{
-    projectPromptTitle:'',input:'',setInput:()=>{},sending:true,queueAllowed:false,onSubmit:()=>{},onSwitchMode:()=>{},commands:[],actions:[],onAction:()=>{},disabledReason:'',attachments:[],onAttachFiles:()=>{},onRemoveAttachment:()=>{},providerLabel:'',model:'',activeGoal:null,onGoalChanged:()=>{},goalEndpoint:'',projects:[],onBindProject:()=>{},conversation:${JSON.stringify(conversationItems)},queued:[],agentQuestions:[],backgroundGoalDeliveries:[],backgroundGoalProviderWarnings:[],onBackgroundGoalCatchUpRendered:()=>{},onBackgroundGoalProviderWarningsRendered:()=>{},onBackgroundGoalCatchUpDismiss:()=>{},onAnswerQuestion:()=>{},conversationEndRef:null,onConversationMouseUp:()=>{},onConversationScroll:()=>{},showScrollToBottom:false,onScrollToBottom:()=>{},pendingApprovalForResponse:()=>null,scopedPendingApprovals:[],approvalActions:{},latestRetryableItemId:'',latestEditableUserItemId:'',editingItemId:'',editingText:'',editingAttachments:[],onEditItemChangeText:()=>{},onEditItemRemoveAttachment:()=>{},onCopyItem:()=>{},onRetryItem:()=>{},onEditItem:()=>{},onEditItemSave:()=>{},onEditItemCancel:()=>{},onApprove:()=>{},onReject:()=>{},onModifyApproval:()=>{},onOpenDoctor:()=>{},runtimeRuns:[],onSaveOperationAsSkill:()=>{}
-  }));`;
-  const plugins = [{ name: "workspace-order-fixture", setup(plugin) {
-    plugin.onResolve({ filter: /^react-i18next$/ }, () => ({ path: "translation", namespace: "fixture" }));
-    plugin.onResolve({ filter: /^lucide-react$/ }, () => ({ path: "icons", namespace: "fixture" }));
-    plugin.onLoad({ filter: /.*/, namespace: "fixture" }, (args) => ({ contents: args.path === "icons"
-      ? 'export const AlertTriangle=()=>null,ArrowDown=()=>null,ArrowUp=()=>null,Loader2=()=>null,MoreHorizontal=()=>null,Pause=()=>null,Play=()=>null,X=()=>null,ChevronLeft=()=>null,ChevronRight=()=>null,HelpCircle=()=>null,Pencil=()=>null;'
-      : 'export const useTranslation=()=>({t:key=>key});' }));
-    plugin.onResolve({ filter: /.*/ }, (args) => args.importer.endsWith("chat-workspace.tsx") && mocks[args.path]
-      ? { path: args.path, namespace: "workspace-mock" } : undefined);
-    plugin.onLoad({ filter: /.*/, namespace: "workspace-mock" }, (args) => ({ contents: `import React from 'react';${mocks[args.path]}`, resolveDir: root }));
-    if (sourceOverride) plugin.onLoad({ filter: /chat-workspace\.tsx$/ }, () => ({ contents: sourceOverride, loader: "tsx" }));
-  } }];
-  const built = await build({ stdin: { contents: entry, resolveDir: root, loader: "tsx" }, bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", plugins });
-  return built.outputFiles[0].text;
-}
-
-async function orderFrom(sourceOverride, conversationItems) {
-  const bundle = await bundleWorkspace(sourceOverride, conversationItems);
-  const page = await browser.newPage();
-  await page.setContent('<div id="root"></div>');
-  await page.addScriptTag({ content: bundle });
-  await page.evaluate(() => window.renderFixture());
-  await page.locator("[data-chat-current-activity]").waitFor();
-  const order = await page.locator("[data-chat-history-scroll]").evaluate((history) => {
-    const date = history.querySelector("[data-chat-date-separator]");
-    const userNode = history.querySelector("[data-user-message]");
-    const tool = history.querySelector("[data-fixture-tool-call]");
-    const status = history.querySelector("[data-chat-current-activity]");
-    return [date, userNode, tool, status].map((node) => node ? [...history.querySelectorAll("*")].indexOf(node) : -1);
-  });
-  assert.ok(order.every((index) => index >= 0), "date, user message, tool call and waiting status must all be present");
-  await page.close();
-  return order;
-}
-
+const style = (await readFile("src/styles.css", "utf8")).replace('@import "./theme.css";', await readFile("src/theme.css", "utf8"));
+const css = (await postcss([tailwindcss("./tailwind.config.ts")]).process(style, { from: "src/styles.css" })).css;
+const bundle = await build({
+  stdin: { resolveDir: root, loader: "tsx", contents: `
+    import React, { useState } from "react";
+    import { createRoot } from "react-dom/client";
+    import { initializeI18n } from "./src/i18n";
+    import { ChatWorkspace } from "./src/components/chat/chat-workspace";
+    const noop = () => {};
+    function Fixture() {
+      const [conversation, setConversation] = useState([]);
+      window.setConversation = setConversation;
+      return <ChatWorkspace conversation={conversation} conversationEndRef={null}
+        projectPromptTitle="" input="" setInput={noop} sending={true} queueAllowed={false} onSubmit={noop}
+        onSwitchMode={noop} commands={[]} actions={[]} onAction={noop} disabledReason="" attachments={[]}
+        onAttachFiles={noop} onRemoveAttachment={noop} providerLabel="" model="" activeGoal={null}
+        projects={[]} queued={[]} agentQuestions={[]} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
+        onConversationScroll={noop} pendingApprovalForResponse={()=>null} scopedPendingApprovals={[]}
+        approvalActions={{}} editingAttachments={[]} runtimeRuns={[]} sessionHandoffTargetChats={[]} />;
+    }
+    void initializeI18n().then(() => createRoot(document.getElementById("root")).render(<Fixture/>));
+  ` },
+  bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic",
+});
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 try {
-  const baselineRef = process.env.VRCFORGE_BASELINE_REF;
-  const oldSource = baselineRef
-    ? execFileSync("git", ["show", `${baselineRef}:src/components/chat/chat-workspace.tsx`], { cwd: root, encoding: "utf8" })
-    : undefined;
-  const externalUser = { ...user, id: "external-user", clientTurnId: undefined };
-  for (const [layout, items] of [["projected-user", [user, streaming]], ["standalone-user", [externalUser, streaming]]]) {
-    if (oldSource) {
-      const before = await orderFrom(oldSource, items);
-      assert.ok(before.every((index) => index >= 0), `${layout}: 修前组件必须包含所有目标节点`);
-      assert.ok(before[3] < before[0], `${layout}: 修前回放应将等待状态错误地放在日期分隔之前`);
-    }
-    const after = await orderFrom(undefined, items);
-    assert.ok(after[0] < after[1] && after[1] < after[2] && after[2] < after[3], `${layout}: 日期、用户、工具调用、等待状态按预期顺序渲染`);
+  const page = await browser.newPage({ reducedMotion: "no-preference" });
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.clock.setFixedTime(new Date(Date.parse(createdAt) + 22_000));
+  await page.setContent('<div id="root"></div>');
+  await page.addStyleTag({ content: css });
+  await page.addScriptTag({ content: bundle.outputFiles[0].text });
+  await page.waitForFunction(() => typeof window.setConversation === "function");
+  const status = page.locator("[data-chat-current-activity]");
+  const label = status.locator(".chat-current-activity__label");
+  const clock = page.locator("[data-agent-turn-process-title], [data-chat-turn-elapsed]");
+  const render = (items) => page.evaluate(items => window.setConversation(items), items);
+  const before = async (first, second) => first.evaluate(
+    (element, next) => Boolean(element.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING),
+    await second.elementHandle(),
+  );
+  const answer = { id: "answer", type: "question_answer", questionId: "where", text: "check again", question: "What next?", updatedAt: createdAt };
+  const previous = { id: "previous", type: "agent", completedAt: new Date(Date.parse(createdAt) - 3_600_000).toISOString(),
+    response: { clientTurnId: "previous", plan: { reply: "Previous task completed.", nextStep: "done" } } };
+  const standalone = { ...user, id: "external-user", clientTurnId: undefined, text: "external user message" };
+  for (const input of [user, standalone, answer]) {
+    const currentTurn = input === answer ? { ...streaming, clientTurnId: clientTurnId + ":question:where" } : streaming;
+    await render([previous, input, { ...currentTurn, text: "progress after request" }]);
+    await page.getByText(input.text, { exact: true }).waitFor();
+    await label.waitFor();
+    assert.equal(await status.count(), 1);
+    const bubble = page.locator("[data-user-message-bubble]").last();
+    const tool = page.locator("[data-agent-tool-call-group]").first();
+    if (input !== answer) assert.ok(await before(page.locator("[data-chat-date-separator]"), bubble), "a new task after an hour starts with its date separator");
+    assert.equal(await status.locator("time").count(), 0, "the live tail contains only the latest status");
+    assert.equal(await clock.count(), 1, "the round has only one elapsed-time header");
+    assert.match(await clock.innerText(), /22\s*s/i);
+    assert.ok(await before(bubble, clock), "the user input precedes elapsed time");
+    assert.ok(await before(clock, tool), "elapsed time precedes tool output");
+    assert.ok(await before(page.getByText("progress after request", { exact: true }), status), "latest activity follows the assistant output");
+    assert.ok(await before(tool, status));
   }
-  console.log(oldSource ? "chat message order: baseline RED / current GREEN" : "chat message order: current GREEN");
+  const motion = () => label.evaluate(el => getComputedStyle(el).animationName);
+  assert.notEqual(await motion(), "none", "active work animates the text");
+  assert.equal(await status.locator(".rounded-full").count(), 0, "no activity dot");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  assert.equal(await motion(), "none", "honor reduced motion");
+  assert.equal(await label.evaluate(element => {
+    const reference = document.createElement("span");
+    reference.className = "text-muted-foreground";
+    document.body.append(reference);
+    const same = getComputedStyle(element).color === getComputedStyle(reference).color;
+    reference.remove();
+    return same;
+  }), true, "the static label uses the same gray as other secondary text");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await render([user, { ...streaming, phase: "waiting_for_approval" }]);
+  await page.locator('[data-vrcforge-streaming-phase="waiting_for_approval"]').waitFor();
+  assert.equal(await motion(), "none", "awaiting a human decision is static");
+  await render([user, { ...streaming, timeline: [] }]);
+  await page.locator("[data-chat-turn-elapsed]").waitFor();
+  assert.equal(await clock.count(), 1, "an empty live timeline still has one elapsed time");
+  await render([user, {
+    id: "done", type: "agent", completedAt: new Date(Date.parse(createdAt) + 22_000).toISOString(),
+    response: { clientTurnId, plan: { reply: "Done", nextStep: "done" }, timeline },
+  }]);
+  await status.waitFor({ state: "detached" });
+  assert.deepEqual(errors, []);
+  console.log("live turn: input, elapsed time, work, latest status, active motion and reduced motion passed");
 } finally {
   await browser.close();
 }

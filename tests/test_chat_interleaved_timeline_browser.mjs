@@ -24,7 +24,7 @@ const bundle = await build({
     contents: `
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { ConversationCard } from "./src/components/chat/conversation-card";
+import { ConversationCard, StreamingPhaseStatus } from "./src/components/chat/conversation-card";
 import { initializeI18n } from "./src/i18n";
 import { projectConversationSteeringMessages } from "./src/lib/chat-steering-projection";
 import { mergeConversationTimelineItems } from "./src/lib/chat-timeline-presentation";
@@ -162,8 +162,10 @@ void initializeI18n().then(() => createRoot(document.getElementById("root")).ren
     <section id="no-elapsed"><ConversationCard item={noElapsedItem}
       initialUserContent={<div data-turn-initial-user><ConversationCard item={userTrigger} /></div>} /></section>
     <section id="active-streaming"><ConversationCard item={activeStreamingItem}
-      initialUserContent={<div data-turn-initial-user><ConversationCard item={userTrigger} /></div>} /></section>
-    <section id="resumed-streaming"><ConversationCard item={resumedStreamingItem} /></section>
+      initialUserContent={<div data-turn-initial-user><ConversationCard item={userTrigger} /></div>} />
+      <StreamingPhaseStatus item={activeStreamingItem} nowMs={Date.now()} /></section>
+    <section id="resumed-streaming"><ConversationCard item={resumedStreamingItem} />
+      <StreamingPhaseStatus item={resumedStreamingItem} nowMs={Date.now()} /></section>
     <section id="failed"><ConversationCard item={failedItem} /></section>
     <section id="commentary-only"><ConversationCard item={commentaryOnlyItem} /></section>
     <section id="steering-expanded" data-top-level-user-count={steeringProjection.items.filter((entry) => entry.type === "user").length}>
@@ -332,6 +334,10 @@ try {
   for (const turn of [live, restored, streaming]) {
     await assertTurnLayout(turn);
     const toggle = turn.locator("[data-agent-turn-process-group] button").first();
+    if (turn === streaming) {
+      assert.equal(await toggle.isDisabled(), true, "active work stays expanded");
+      continue;
+    }
     await toggle.click();
     await assertTurnLayout(turn);
     await toggle.click();
@@ -423,7 +429,7 @@ try {
   assert.equal(await streaming.locator("[data-agent-tool-call-group] button").first().getAttribute("aria-expanded"), "false", "streaming does not force tool group open");
   const activeStatus = activeStreaming.locator("[data-chat-current-activity]");
   assert.equal(await activeStatus.count(), 1, "one current status is shown for the active turn");
-  assert.equal(await activeStreaming.locator("[data-conversation-streaming-turn] > :last-child > [data-chat-current-activity]").count(), 1, "the current status sits after timeline and model text");
+  assert.equal(await activeStreaming.locator("[data-conversation-streaming-turn] + [data-chat-current-activity]").count(), 1, "the current status sits after timeline and model text");
   assert.match(await activeStatus.innerText(), /vrcforge_list_directory/, "running tool status comes from the live tool event");
   assert.match(await activeStreaming.innerText(), /The model's original progress text stays visible\./, "the status does not replace model progress text");
   assert.equal(await resumedStreaming.locator("[data-chat-current-activity]").getAttribute("data-vrcforge-streaming-phase"), "waiting_for_model", "the current status follows the latest runtime phase");

@@ -873,7 +873,6 @@
       "reconnecting": "正在重连 {{attempt}}/{{max}}",
       "reconnectingDetail": "还在等回复。",
       "reconnectingRetry": "连接没有恢复。请检查网络，然后再发消息。",
-      "turnElapsed": "本轮 {{time}}",
       "waitingForModelProgress": "暂未收到模型的新响应",
       "waitingForModelDetail": "回复还没到。可以继续等待，或点击停止。",
       "waitingForModelTimeout": "等待时间较长，你仍可点击停止。",
@@ -1080,7 +1079,7 @@
     "workSegmentDuration": "已处理 {{duration}} · {{count}} 个事件",
     "workSegmentElapsed": "已处理 {{duration}}",
     "workSegmentItems": "{{count}} 个事件",
-    "turnDuration": "已处理 {{duration}}",
+    "turnDuration": "用时 {{duration}}",
     "timeline": {
       "preparedTool": "准备执行 {{tool}}",
       "failureRecords": "含 {{count}} 次失败记录",

@@ -875,7 +875,6 @@
       "reconnecting": "Reconnecting {{attempt}}/{{max}}",
       "reconnectingDetail": "Still waiting for a reply.",
       "reconnectingRetry": "The connection didn’t recover. Check your internet connection before sending another message.",
-      "turnElapsed": "{{time}} elapsed this turn",
       "waitingForModelProgress": "Still waiting for a model response",
       "waitingForModelDetail": "The reply hasn’t arrived yet. You can wait or click Stop.",
       "waitingForModelTimeout": "The reply is taking longer than usual. You can still click Stop.",
@@ -1082,7 +1081,7 @@
     "workSegmentDuration": "Handled in {{duration}} · {{count}} events",
     "workSegmentElapsed": "Handled in {{duration}}",
     "workSegmentItems": "{{count}} events",
-    "turnDuration": "Handled in {{duration}}",
+    "turnDuration": "Elapsed {{duration}}",
     "timeline": {
       "preparedTool": "Prepared {{tool}}",
       "failureRecords": "Includes {{count}} failure records",

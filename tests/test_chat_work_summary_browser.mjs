@@ -50,7 +50,7 @@ function RunningToTerminal(){const [terminal,setTerminal]=useState(false); const
   ? {id:'transition',type:'agent',response:{clientTurnId:'transition-turn',status:'completed',plan:{nextStep:'done',reply:'The live inspection finished.'},timeline:[...transitionTimeline,e('transition-final',2,'assistant',{summary:'The live inspection finished.',phase:'final_answer',status:'done'})]}}
   : {id:'transition',type:'streaming',clientTurnId:'transition-turn',text:'',timeline:transitionTimeline};
   return <><button id="transition-to-terminal" type="button" onClick={()=>setTerminal(true)}>Finish turn</button><ConversationCard item={current}/></>;}
-void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<><section id="transition"><RunningToTerminal/></section><section id="active-agent"><ConversationCard item={recoveredAgent} runtimeActive={true}/></section><section id="history"><ConversationCard item={item}/></section><section id="pending"><ConversationCard item={pending}/></section><section id="interrupted"><ConversationCard item={interrupted}/></section><section id="question-interrupted"><ConversationCard item={questionInterrupted}/></section><section id="planner-step"><ConversationCard item={withPlannerStep}/></section>{[skipped,typed,legacy,normal].map((answer,index)=><section key={index} id={'review-'+index}><ConversationCard item={answer}/></section>)}<section id="recovered"><ConversationCard item={recovered}/></section><section id="duration-59m59s"><ConversationCard item={durationItem('duration-59m59s',3599)}/></section><section id="duration-1h"><ConversationCard item={durationItem('duration-1h',3600)}/></section><section id="duration-1h10m45s"><ConversationCard item={durationItem('duration-1h10m45s',4245)}/></section>{[5,6].map(count=><section key={count} id={'tool-list-'+count}><ConversationCard item={toolListItem(count)}/></section>)}</>));
+void initializeI18n().then(()=>createRoot(document.getElementById('root')).render(<><section id="transition"><RunningToTerminal/></section><section id="active-agent"><ConversationCard item={recoveredAgent} runtimeActive={true}/></section><section id="history"><ConversationCard item={item} developerOptionsEnabled/></section><section id="pending"><ConversationCard item={pending}/></section><section id="interrupted"><ConversationCard item={interrupted}/></section><section id="question-interrupted"><ConversationCard item={questionInterrupted}/></section><section id="planner-step"><ConversationCard item={withPlannerStep}/></section>{[skipped,typed,legacy,normal].map((answer,index)=><section key={index} id={'review-'+index}><ConversationCard item={answer}/></section>)}<section id="recovered"><ConversationCard item={recovered}/></section><section id="duration-59m59s"><ConversationCard item={durationItem('duration-59m59s',3599)}/></section><section id="duration-1h"><ConversationCard item={durationItem('duration-1h',3600)}/></section><section id="duration-1h10m45s"><ConversationCard item={durationItem('duration-1h10m45s',4245)}/></section>{[5,6].map(count=><section key={count} id={'tool-list-'+count}><ConversationCard item={toolListItem(count)}/></section>)}</>));
 ` }, bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", plugins: baseline ? [{name:'frozen-timeline-baseline',setup(plugin){plugin.onLoad({filter:/conversation-timeline\.tsx$/},()=>({loader:'tsx',contents:execFileSync('git',['show',baseline+':src/components/chat/conversation-timeline.tsx'],{encoding:'utf8'})}));}}] : [] });
 const server = createServer((_, response) => { response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(`<style>${css}</style><div id="root" style="width:720px"></div><script>${result.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script>`); });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -58,6 +58,7 @@ let browser;
 try {
   browser = await chromium.launch({headless:true,channel:process.env.VRCFORGE_BROWSER_CHANNEL || "msedge"});
   const page = await browser.newPage(); const errors=[]; page.on('pageerror',e=>errors.push(e.message));
+  await page.clock.setFixedTime(new Date(2026, 0, 1, 0, 3, 10));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   const recovered=page.locator('#recovered');
   const skipped = page.locator('#review-0 [data-question-skipped]');
@@ -88,12 +89,12 @@ try {
   await page.keyboard.press('Escape');
   await page.locator('dialog[open]').waitFor({state:'detached'});
   await recovered.locator('[data-agent-turn-process-title]').waitFor();
-  assert.equal((await page.locator('#question-interrupted').innerText()).trim(), 'Your answer was saved, but the task could not continue.');
+  assert.equal((await page.locator('#question-interrupted').innerText()).trim(), 'Your answer was saved. Send a message to continue the task.');
   assert.equal((await page.locator('#planner-step').innerText()).trim(), 'Choose a project to continue.');
-  assert.match(await recovered.locator('[data-agent-turn-process-title]').innerText(), /3m 10s/, 'restored timeline keeps its known elapsed duration in the process heading');
-  assert.match(await page.locator('#duration-59m59s [data-agent-turn-process-title]').innerText(), /59m 59s/, 'sub-hour duration keeps minutes and seconds');
-  assert.match(await page.locator('#duration-1h [data-agent-turn-process-title]').innerText(), /1h0m/, 'one-hour duration switches to hours and minutes');
-  assert.match(await page.locator('#duration-1h10m45s [data-agent-turn-process-title]').innerText(), /1h10m/, 'hour-plus duration omits seconds');
+  assert.equal(await recovered.locator('[data-agent-turn-process-title]').innerText(), 'Elapsed 3 min 10s', 'restored timeline keeps its known elapsed duration in the process heading');
+  assert.equal(await page.locator('#duration-59m59s [data-agent-turn-process-title]').innerText(), 'Elapsed 59 min 59s', 'sub-hour duration keeps minutes and seconds');
+  assert.equal(await page.locator('#duration-1h [data-agent-turn-process-title]').innerText(), 'Elapsed 1h 0min', 'one-hour duration switches to hours and minutes');
+  assert.equal(await page.locator('#duration-1h10m45s [data-agent-turn-process-title]').innerText(), 'Elapsed 1h 10min', 'hour-plus duration omits seconds');
   assert.doesNotMatch(await recovered.locator('[data-agent-tool-group-title]').first().innerText(), /unity_|vrcforge_/, 'folded tool headings stay readable while exact tool names remain in detail');
   const interrupted=page.locator('#interrupted'); await interrupted.locator('[data-vrcforge-agent-client-turn]').waitFor();
   assert.ok((await interrupted.innerText()).includes('Accepted partial model text.'),'transport interruption retains accepted partial words outside a false final answer');
@@ -135,13 +136,14 @@ try {
   assert.equal(await group.locator('button.group\\/run').count(),2,'clicking the tool group reveals individual calls');
   await checkTextHover(group.locator('button.group\\/run').first());
   await group.locator('button.group\\/run').last().click();
+  await group.locator('[data-chat-tool-diagnostics] summary').click();
   assert.ok((await group.locator('[data-agent-invocation-output-card]').innerText()).includes('Historical read failure'),'exact error detail stays inspectable');
   await processFold.locator('button').first().click();
   assert.equal(await processFold.locator('button').first().getAttribute('aria-expanded'),'false','terminal turn work summary remains user-collapsible');
   await summaryButton.click();
   assert.equal(await toolGroupButton.getAttribute('aria-expanded'),'false','reopening the turn leaves tool details folded again');
   const pending=page.locator('#pending');
-  assert.match(await pending.locator('[data-agent-turn-process-title]').innerText(), /Handled in —/, 'missing duration stays explicitly unknown instead of changing the process heading');
+  assert.equal(await pending.locator('[data-agent-turn-process-title]').innerText(), 'Elapsed 3 min 10s', 'the first timeline event supplies the round start if the streaming item has no timestamp');
   const pendingProcess=pending.locator('[data-agent-turn-process-group]');
   assert.equal(await pendingProcess.locator('button').first().getAttribute('aria-expanded'),'true','running turn work summary starts expanded');
   assert.equal(await pendingProcess.locator('button').first().isDisabled(),true,'running turn summary exposes its non-collapsible state accessibly');

@@ -37,7 +37,7 @@ import { ChatMarkdown, ChatResourceImageContext } from "./chat-markdown";
 import type { TimelineQuestionMessage } from "../../lib/chat-steering-projection";
 import type { ChatResourceImageContext as ChatResourceImageContextValue } from "../../lib/api/chat-resource-image";
 import { AttachmentStrip } from "./composer";
-import { RunRow, SharedTurnProcessHeader, ToolDiagnosticsContext, buildAgentTimelineRows, buildDurableTimelineRows, formatDuration, formatPayload, formatRuntimeModelLine, type SharedTurnProcess } from "./conversation-timeline";
+import { RunRow, SharedTurnProcessHeader, ToolDiagnosticsContext, buildAgentTimelineRows, buildDurableTimelineRows, formatPayload, formatRuntimeModelLine, type SharedTurnProcess } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
@@ -180,7 +180,8 @@ export function ConversationCard({
     () => resolveAttachmentPayloadReferences(storedAttachments || [], attachmentPayloads),
     [storedAttachments, attachmentPayloads],
   );
-  const streamingCreatedAt = item.type === "streaming" ? item.createdAt : undefined;
+  const streamingCreatedAt = item.type === "streaming" && runtimeActive !== false && !sharedProcess
+    ? item.createdAt || item.timeline?.[0]?.timestamp : undefined;
   const [streamingNowMs, setStreamingNowMs] = useState(() => Date.now());
   const [interleavedUsersExpanded, setInterleavedUsersExpanded] = useState(item.type === "streaming");
   useLayoutEffect(() => {
@@ -411,8 +412,8 @@ export function ConversationCard({
     const liveImageContext = chatResourceImageContext && captureSessionId
       ? { ...chatResourceImageContext, sessionId: captureSessionId, clientTurnId: item.clientTurnId } : null;
 
-    if (item.id.startsWith("question-continuation:") && !item.text && !item.timeline?.length && !pendingQuestions.length) return null;
-    const streamingElapsed = elapsedSecondsSince(item.createdAt, streamingNowMs);
+    if (item.id.startsWith("question-continuation:") && runtimeActive !== true && !item.text && !item.timeline?.length && !pendingQuestions.length) return null;
+    const streamingElapsed = elapsedSecondsSince(streamingCreatedAt, streamingNowMs);
     // Keep public assistant updates at their durable timeline position. The
     // live buffer is omitted once the same text has become a durable event.
     const lastAssistantText = [...(item.timeline || [])].reverse()
@@ -420,7 +421,7 @@ export function ConversationCard({
     const showLiveText = Boolean(item.text && item.text.trim() !== lastAssistantText?.trim());
     const timelineRows = buildDurableTimelineRows(item.timeline, undefined, "", [], {
       live: runtimeActive ?? true,
-      renderElapsed: false,
+      renderElapsed: true,
       processTitleElapsed: streamingElapsed,
       sharedProcess,
       activeSubAgentEvents,
@@ -551,6 +552,7 @@ export function ConversationCard({
   const replySource = providerLine;
   const showReplyActions = !sharedProcess || sharedProcess.last;
   const awaitingApproval = shell?.status === "pending_approval";
+  const completedAtMs = Date.parse(item.completedAt || response.completedAt || "");
   const timelineRows = buildAgentTimelineRows({
     response,
     shell,
@@ -564,7 +566,8 @@ export function ConversationCard({
     planLabel: replySource,
     providerLine,
     awaitingApproval,
-    elapsedSeconds: item.elapsedSeconds,
+    elapsedSeconds: item.elapsedSeconds ?? (Number.isFinite(completedAtMs)
+      ? elapsedSecondsSince(response.startedAt || response.timeline?.[0]?.timestamp || item.createdAt, completedAtMs) : undefined),
     hideTurnMetadata: compactAgentReply,
     sharedProcess,
     activeSubAgentEvents,
@@ -738,13 +741,12 @@ export function UserImageAttachments({
   );
 }
 
-export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; showElapsed?: boolean; runtimeActive?: boolean }) {
+export function StreamingPhaseStatus({ item, nowMs, runtimeActive }: { item: Extract<ConversationItem, { type: "streaming" }>; nowMs: number; runtimeActive?: boolean }) {
   const { t } = useTranslation();
   if (item.stopRequested) {
     return <div className="mt-3 px-1 text-chat-detail text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase="stopping" role="status">{t("chat.stopping")}</div>;
   }
   if (runtimeActive === false) return null;
-  const elapsedSeconds = elapsedSecondsSince(item.createdAt, nowMs);
   const reconnectAttempt = item.providerRetry?.attempt;
   const reconnecting = reconnectAttempt !== undefined;
   const waitingWindow = !reconnecting && item.phase === "waiting_for_model"
@@ -769,12 +771,8 @@ export function StreamingPhaseStatus({ item, nowMs, showElapsed, runtimeActive }
         ? t("chat.runtimePhase.waitingForModelTimeout")
         : t("chat.runtimePhase.waitingForModelDetail")
       : t("chat.runtimePhase.reconnectingDetail");
-  const showActivity = !item.phase || item.phase === "waiting_for_model" || item.phase === "receiving_response";
-  const content = <>
-    {showActivity && <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full bg-primary", !waiting && "motion-safe:animate-pulse")} />}
-    <span className="chat-current-activity__label font-medium text-foreground" role="status" aria-live="polite">{label}</span>
-    {(showElapsed ?? showActivity) && elapsedSeconds !== undefined && <time className="text-xs tabular-nums text-muted-foreground" dateTime={`PT${elapsedSeconds}S`}>{t("chat.runtimePhase.turnElapsed", { time: formatDuration(elapsedSeconds) })}</time>}
-  </>;
+  const active = !waiting && !reconnecting && item.phase !== "waiting_for_approval";
+  const content = <span className="chat-current-activity__label" data-active={active || undefined} role="status">{label}</span>;
   return (
     <div className="chat-current-activity mt-3 px-1 text-chat-detail text-muted-foreground" data-chat-current-activity data-vrcforge-streaming-phase={item.phase || "unknown"}>
       {reconnecting || waiting ? (

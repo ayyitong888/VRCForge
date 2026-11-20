@@ -40,6 +40,7 @@ const bundled = await build({
           { ...currentRun, textDelta: runs[0].status === 'cancel_requested' ? 'late text must be dropped' : '' },
         );
         const stream = transcript.items.find(item => item.id === externalStream.id);
+        const visibleStream = modelActivity ? { ...stream, phase: 'waiting_for_model', createdAt: '2026-11-19T14:42:34Z', ...modelActivity } : stream;
         window.setRunStatus = status => setRuns([{ ...currentRun, status }]);
         window.setLegacyPlaceholder = () => setChat({ ...activeChat, items: [...activeChat.items, {
           id: 'legacy-placeholder', type: 'agent', response: { sessionId: activeChat.sessionId, clientTurnId: 'external-cid',
@@ -55,8 +56,8 @@ const bundled = await build({
           <div data-testid='user-transcript'>{chat.items.filter(item => item.type === 'user').map(item => item.text).join('\\n')}</div>
           <div data-testid='agent-replies'>{chat.items.filter(item => item.type === 'agent').length}</div>
           <div data-testid='sidebar-activity'>{chatSidebarActivity(transcript, '', runs) || 'none'}</div>
-          <ConversationCard item={stream} runtimeActive={runtimeActive} initialUserContent={<div>Keep this accepted user message</div>} />
-          <StreamingPhaseStatus item={modelActivity ? { ...stream, phase: 'waiting_for_model', createdAt: '2026-11-19T14:42:34Z', ...modelActivity } : stream}
+          <ConversationCard item={visibleStream} runtimeActive={runtimeActive} initialUserContent={<div>Keep this accepted user message</div>} />
+          <StreamingPhaseStatus item={visibleStream}
             nowMs={Date.parse('2026-11-19T14:42:50Z')} runtimeActive={runtimeActive} />
           <Composer
             input='' setInput={() => {}} sending={Boolean(cancelTarget)} queueAllowed={false} stopDisabled={stream.stopRequested}
@@ -98,6 +99,7 @@ const bundled = await build({
 const browser = await chromium.launch({ channel: "msedge", headless: true });
 try {
   const page = await browser.newPage();
+  await page.clock.setFixedTime(new Date("2026-11-19T14:42:50Z"));
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.setContent('<div id="root"></div>');
@@ -111,9 +113,9 @@ try {
   assert.equal(await page.locator("[data-testid=sidebar-activity]").textContent(), "running", "an active external turn keeps the sidebar running marker");
   const status = page.locator("[data-chat-current-activity]");
   await page.evaluate(() => window.setModelActivity({ providerLastActivityAt: '2026-11-19T14:42:34Z' }));
-  await status.locator("time").waitFor({ timeout: 2500 });
-  assert.match(await status.locator("time").innerText(), /16s/);
-  assert.equal(await status.locator('[role=status] time').count(), 0, "the clock does not make screen readers repeat the phase");
+  const elapsed = page.locator("[data-agent-turn-process-title], [data-chat-turn-elapsed]");
+  await elapsed.getByText(/16s/).waitFor({ timeout: 2500 });
+  assert.equal(await status.locator("time").count(), 0, "the status contains only the phase");
   assert.match(await status.getByRole("status").innerText(), /Waiting for model/i);
   await page.evaluate(() => window.setModelActivity({ providerResponding: true, providerLastActivityAt: '2026-11-19T14:42:49Z' }));
   await status.getByText("Thinking", { exact: true }).waitFor();
@@ -126,7 +128,7 @@ try {
   await status.getByText("Reconnecting 2/5", { exact: true }).waitFor();
   await page.evaluate(() => window.setModelActivity({ phase: undefined }));
   await status.getByText("Working on it", { exact: true }).waitFor({ timeout: 2500 });
-  assert.match(await status.locator("time").innerText(), /16s/, "a known active run with no provider phase still shows elapsed time");
+  assert.match(await elapsed.innerText(), /16s/, "a known active run with no provider phase still shows elapsed time");
   await page.evaluate(() => window.setModelActivity(null));
   await primary.click();
   assert.deepEqual(await page.evaluate(() => window.cancelRequests), [{ endpoint: "http://fixture", payload: {

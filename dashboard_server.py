@@ -11844,9 +11844,13 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
             Path(project_path) / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs"
         ).is_file()
         startup_diagnostic = _latest_vrcforge_core_startup_diagnostic() if source_present else None
+        # Editor.log is shared between projects; its mtime does not date the matching line.
+        # Keep that line available to a health query, but it cannot settle this installation.
+        install_boundary = str((params or {}).get("installedAt") or "").strip()
+        unscoped_startup_failure = startup_diagnostic is not None and not install_boundary
         status = (
             "core_start_failed"
-            if startup_diagnostic is not None
+            if unscoped_startup_failure
             else "waiting_for_domain_reload"
             if source_present
             else "core_not_installed"
@@ -11858,7 +11862,7 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
             "status": status,
             "ready": False,
             **(
-                _unity_core_startup_route(project_path, expected, params, startup_failed=startup_diagnostic is not None)
+                _unity_core_startup_route(project_path, expected, params, startup_failed=unscoped_startup_failure)
                 if source_present
                 else {"recommendedAction": "install_missing_core"}
             ),
@@ -11874,7 +11878,7 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
             },
             "consoleErrorCount": None,
             "consoleCaptureComplete": False,
-            "installedAt": str((params or {}).get("installedAt") or "").strip(),
+            "installedAt": install_boundary,
             "diagnostics": {
                 "schema": "vrcforge.core_diagnostics.v1",
                 "descriptorPresent": False,
@@ -11911,15 +11915,16 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     from core_upgrade_readiness import compile_snapshot_is_fresh
     snapshot_fresh = compile_snapshot_is_fresh(compile_snapshot, installed_at_value)
     captured_at_value = str((compile_snapshot or {}).get("capturedAt") or "").strip()
-    errors_are_post_install = bool(error_count)
-    if error_count and installed_at_value and captured_at_value:
+    capture_matches_install = not installed_at_value
+    if installed_at_value and captured_at_value:
         try:
             installed_at = datetime.fromisoformat(installed_at_value.replace("Z", "+00:00"))
             captured_at = datetime.fromisoformat(captured_at_value.replace("Z", "+00:00"))
-            errors_are_post_install = captured_at >= installed_at
+            capture_matches_install = (captured_at.utcoffset() is not None and installed_at.utcoffset() is not None
+                                       and captured_at >= installed_at)
         except (ValueError, TypeError):
-            errors_are_post_install = True
-    if errors_are_post_install:
+            capture_matches_install = False
+    if error_count and capture_matches_install:
         status = "compile_failed_old_assembly_retained" if not identity_matches else "compile_failed"
     elif is_compiling:
         status = "compiling"
@@ -11936,7 +11941,7 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     connection_refused = any(text in transport_error for text in ("winerror 10061", "connection refused", "actively refused"))
     if status == "waiting_for_domain_reload" or (status == "core_unreachable" and connection_refused):
         startup_route = _unity_core_startup_route(project_path, expected, params)
-    elif status == "compiling":
+    elif status in {"compiling", "waiting_for_console_snapshot", "waiting_for_post_install_compile"}:
         startup_route = {
             "recommendedAction": "recheck_core_after_compilation",
             **_unity_core_status_retry(project_path, params),
@@ -11947,12 +11952,15 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         "projectPath": project_path,
         "status": status,
         "ready": status == "ready",
+        **({"toolExecutionStatus": "failed", "errorCode": status,
+            "error": f"Unity compilation reported {error_count} error(s). See console.errors for diagnostics."}
+           if status.startswith("compile_failed") else {}),
         **startup_route,
         "expectedCompiledIdentity": expected,
         "runtimeCoreInfo": core_info,
         "runtimeIdentityMatchesTarget": identity_matches,
         "console": compile_snapshot,
-        "consoleErrorCount": error_count,
+        "consoleErrorCount": error_count if capture_matches_install and compile_snapshot else None,
         "consoleCaptureComplete": capture_complete,
         "compileSnapshotFresh": snapshot_fresh,
         "installedAt": installed_at_value,
@@ -29200,7 +29208,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_core_upgrade_status",
-        "When to use: after installing or upgrading VRCForge Unity Core, read one pre-handshake snapshot containing the running compiled Core identity and current Unity Console compilation result. Follow the suggested action to open the exact closed project or recheck it once when startup or compilation advances. Use the same project and freshness arguments. Never launch a Shell sleep or repeat an unchanged status continuously. Connection refusal alone does not diagnose missing or incompatible Core files. When NOT to use: do not wait internally, retry automatically, modify the project, or treat an old reported Core version as success. Negative example: do not call it for ordinary avatar edits after Core is already ready.",
+        "When to use: check the compiled Unity Core identity and compilation evidence after installation. Use the projectPath and installedAt from the installation receipt. The built-in runtime waits for a running Editor to finish reloading or compiling. Only ready=true confirms readiness. Previous Console snapshots do not establish the outcome of this installation. When NOT to use: do not reinstall or restart the Editor solely because a reload is pending. Do not call this for ordinary edits after Core is ready.",
         "read/debug",
         core_upgrade_status_sync,
     )

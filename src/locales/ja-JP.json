@@ -873,7 +873,6 @@
       "reconnecting": "再接続中 {{attempt}}/{{max}}",
       "reconnectingDetail": "まだ返信を待っています。",
       "reconnectingRetry": "接続が戻りませんでした。ネットワークを確認してからメッセージを送ってください。",
-      "turnElapsed": "経過 {{time}}",
       "waitingForModelProgress": "モデルからの新しい応答を待っています",
       "waitingForModelDetail": "まだ返信が届いていません。そのまま待つか、停止を選べます。",
       "waitingForModelTimeout": "返信に時間がかかっています。引き続き停止できます。",
