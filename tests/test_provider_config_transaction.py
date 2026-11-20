@@ -253,7 +253,7 @@ def test_saved_key_fallback_is_not_published_when_api_route_commit_fails(
     )
     request = _ApiRequest(
         api_key="",
-        base_url="https://new.example/v1",
+        base_url=old_api.base_url,
         model="new-model",
     )
 

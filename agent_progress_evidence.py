@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from hashlib import sha256
+import re
 from typing import Any
 
 
@@ -33,6 +34,24 @@ def _contains(actual: Any, expected: Any) -> bool:
     return type(actual) is type(expected) and actual == expected
 
 
+_TEXT_READERS = {"read_text_file", "vrcforge_read_text_file"}
+
+
+def _text_page(tool: str, arguments: Mapping[str, Any], result: Mapping[str, Any]) -> bool:
+    if tool not in _TEXT_READERS or not re.fullmatch(r"[a-f0-9]{64}", str(result.get("snapshotDigest") or "")):
+        return False
+    text, start, total = (result.get(k) for k in ("text", "textOffset", "totalChars"))
+    if (not isinstance(text, str) or type(start) is not int or type(total) is not int
+            or not result.get("path") or type(result.get("bytes")) is not int or not 0 <= start <= total
+            or arguments.get("textOffset", 0) != start
+            or arguments.get("snapshotDigest", result["snapshotDigest"]) != result["snapshotDigest"]):
+        return False
+    end = start + len(text)
+    return (end <= total and (bool(text) or total == 0)
+            and result.get("hasMore") is (end < total) and result.get("truncated") is (end < total)
+            and result.get("nextTextOffset") == (end if end < total else None))
+
+
 def accepted_receipt(
     tool: str, kind: str, receipt_id: str, arguments: Mapping[str, Any], result: Any,
     outcome: Mapping[str, Any], *, status: str,
@@ -45,12 +64,16 @@ def accepted_receipt(
     verification_state = verification.get("state") if isinstance(verification, Mapping) else None
     if verification_state not in (None, "", "passed", "not_required"):
         return None
+    page = kind in {"read", "skill"} and _text_page(tool, arguments, result)
     if any(facts.get(key) is True for facts in (arguments, result, outcome)
-           for key in ("preview", "mock", "mock_execute", "mockExecute", "partial", "truncated", "hasMore")):
+           for key in ("preview", "mock", "mock_execute", "mockExecute", "partial")):
         return None
-    if (result.get("sourceComplete") is False or result.get("rangeComplete") is False
+    if any(facts.get(key) is True for facts in (arguments, outcome) for key in ("truncated", "hasMore")):
+        return None
+    if (not page and (result.get("truncated") is True or result.get("hasMore") is True or result.get("nextTextOffset") not in (None, ""))
+            or result.get("sourceComplete") is False or result.get("rangeComplete") is False
             or any(result.get(key) not in (None, "") for key in (
-                "nextOffset", "nextTextOffset", "nextPage", "nextPageTextOffset",
+                "nextOffset", "nextPage", "nextPageTextOffset",
             ))):
         return None
     if any(facts.get("ok") is False or facts.get("success") is False
@@ -77,7 +100,7 @@ def accepted_receipt(
 
 
 def matched_checks(checks: list[dict[str, Any]], evidence: dict[str, str],
-                   receipts: list[dict[str, Any]]) -> dict[str, str]:
+                   receipts: list[dict[str, Any]], *, page_coverage: dict | None = None) -> dict[str, str]:
     matched = dict(evidence)
     for index, check in enumerate(checks):
         key = str(index)
@@ -86,14 +109,22 @@ def matched_checks(checks: list[dict[str, Any]], evidence: dict[str, str],
         for receipt in receipts:
             if receipt["tool"] != check["tool"] or not _contains(receipt["arguments"], check["arguments"]):
                 continue
-            if receipt["tool"] in {"read_text_file", "vrcforge_read_text_file"}:
+            if receipt["tool"] in _TEXT_READERS:
                 result = receipt["result"]
-                if result.get("textOffset", 0) != 0 or result.get("startPage", 1) != 1:
-                    continue
                 if any(name in receipt["arguments"] and name not in check["arguments"]
                        for name in ("startLine", "endLine", "startPage", "maxPages", "pageTextOffset")):
                     continue
                 if "endLine" in check["arguments"] and result.get("endLine") != check["arguments"]["endLine"]:
+                    continue
+                if "snapshotDigest" in result and "totalChars" in result:
+                    if not _text_page(receipt["tool"], receipt["arguments"], result):
+                        continue
+                    if page_coverage is not None:
+                        if _cover_text_check(check, receipt, page_coverage, key):
+                            matched[key] = receipt["id"]
+                            break
+                        continue
+                if result.get("textOffset", 0) != 0 or result.get("hasMore") or result.get("truncated") or result.get("startPage", 1) != 1:
                     continue
                 if result.get("documentType") == "pdf":
                     pages = result.get("pages")
@@ -109,6 +140,35 @@ def matched_checks(checks: list[dict[str, Any]], evidence: dict[str, str],
                 matched[key] = receipt["id"]
                 break
     return matched
+
+
+def _cover_text_check(check: dict, receipt: dict, coverage: dict, key: str) -> bool:
+    """Combine ranges only within the reader's path-, projection- and content-bound snapshot."""
+    result = receipt["result"]
+    start, total, text = result["textOffset"], result["totalChars"], result["text"]
+    end = start + len(text)
+    expected = dict(check["result"])
+    for field in ("text", "summary"):
+        if field in expected:
+            content = expected.pop(field)
+            if field not in result or not isinstance(content, str) or len(content) != total or content[start:end] != text:
+                return False
+    whole = {**result, "textOffset": 0, "truncated": False, "hasMore": False, "nextTextOffset": None}
+    whole.pop("nextRequest", None)
+    if not _contains(whole, expected):
+        return False
+    identity = [result["path"], result["snapshotDigest"], total]
+    previous = coverage.get(key, {})
+    ranges = list(previous.get("ranges", [])) if previous.get("source") == identity else []
+    ranges.append([start, end])
+    merged = []
+    for left, right in sorted(ranges):
+        if merged and left <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], right)
+        else:
+            merged.append([left, right])
+    coverage[key] = {"source": identity, "ranges": merged}
+    return merged == [[0, total]]
 
 
 def goal_acceptance_checks(value: Any) -> list[dict[str, Any]]:
@@ -140,8 +200,8 @@ def goal_acceptance_checks(value: Any) -> list[dict[str, Any]]:
     return checks
 
 
-def goal_acceptance_receipt(check: Mapping[str, Any], receipt: Mapping[str, Any]) -> bool:
-    if not matched_checks([dict(check)], {}, [dict(receipt)]):
+def goal_acceptance_receipt(check: Mapping[str, Any], receipt: Mapping[str, Any], *, page_coverage: dict | None = None) -> bool:
+    if not matched_checks([dict(check)], {}, [dict(receipt)], page_coverage=page_coverage):
         return False
     outcome = receipt.get("outcome", {})
     result = receipt["result"]

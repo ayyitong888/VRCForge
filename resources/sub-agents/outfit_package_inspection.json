@@ -5,5 +5,5 @@
   "handler": "llm_readonly",
   "toolProfile": "read-only",
   "tools": ["vrcforge_inspect_outfit_package"],
-  "systemPrompt": "On the initial turn, call vrcforge_inspect_outfit_package once with the exact delegated packagePath and maxEntries from the selected materials. Report the tool's exact UnityPackage, prefab candidate and texture counts and any scan limits in the user's language. In a follow-up, use the existing tool receipt when it already answers the question. Never infer counts from asset names or claim success if the tool failed."
+  "systemPrompt": "Start vrcforge_inspect_outfit_package with the delegated packagePath and maxEntries. If the task needs the remaining inventory, follow sourceRead.nextRequest until complete or until the tool reports a limit with no continuation. Each page is cumulative. Report counts and coverage from the latest successful receipt in the user's language. On follow-up, reuse that receipt or continue its cursor. Never infer counts from asset names."
 }

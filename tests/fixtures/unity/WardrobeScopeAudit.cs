@@ -79,8 +79,6 @@ internal static class WardrobeScopeAudit
             ["partParameterName"] = partParameter, ["value"] = 1, ["objectPaths"] = new JArray("Hat", "AlreadyOff"),
             ["writeDefaults"] = false, ["addMenuToggle"] = false, ["setObjectsDefaultOff"] = sceneWrites
         };
-        if (scenario == "dirty-scene")
-            EditorSceneManager.MarkSceneDirty(scene);
         var sceneSaves = 0;
         void OnSceneSaved(Scene saved)
         {
@@ -91,7 +89,23 @@ internal static class WardrobeScopeAudit
         }
         VRCForgeToolResult result;
         EditorSceneManager.sceneSaved += OnSceneSaved;
-        try { result = (VRCForgeToolResult)WardrobeOutfitPartWriter.HandleCommand(args); }
+        try
+        {
+            var previewArgs = (JObject)args.DeepClone();
+            previewArgs["preview"] = true;
+            var preview = (VRCForgeToolResult)WardrobeOutfitPartWriter.HandleCommand(previewArgs);
+            Require(preview.IsSuccessful && sceneSaves == 0, "Expected a successful read-only preview.");
+            if (scenario == "dirty-scene" || scenario == "inactive")
+            {
+                EditorSceneManager.MarkSceneDirty(scene);
+                preview = (VRCForgeToolResult)WardrobeOutfitPartWriter.HandleCommand(previewArgs);
+                Require(preview.IsSuccessful == (scenario == "inactive") && sceneSaves == 0 && scene.isDirty,
+                    "Preview did not respect the pending scene changes.");
+            }
+            result = (VRCForgeToolResult)WardrobeOutfitPartWriter.HandleCommand(args);
+            if (scenario == "dirty-scene")
+                Require(result.Message == preview.Message, "Preview and execution reported different scene conditions.");
+        }
         finally { EditorSceneManager.sceneSaved -= OnSceneSaved; }
         if (scenario == "dirty-scene")
         {

@@ -359,7 +359,7 @@ def test_loose_outfit_inspection_exposes_editor_asmdef_as_copyable_dependency(tm
     assert result["assemblyDefinitions"][0]["path"] == "Editor.asmdef"
 
 def test_nested_archive_source_cursor_reopens_private_index_and_does_not_reread_archive(tmp_path, monkeypatch):
-    from outfit_package_inspector import ArchiveInspectionIndex
+    from outfit_package_inspector import ArchiveInspectionIndex, ArchiveInspectionStreams
 
     package = tmp_path / "outfit.unitypackage"
     make_unitypackage(package)
@@ -367,13 +367,14 @@ def test_nested_archive_source_cursor_reopens_private_index_and_does_not_reread_
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.write(package, package.name)
     database = tmp_path / "profile" / "archive-index.sqlite"
-    owner = ArchiveInspectionIndex(database, "first-session")
+    streams = ArchiveInspectionStreams()
+    owner = ArchiveInspectionIndex(database, "first-session", streams=streams)
     receipt = inspect_outfit_package(source, max_entries=1, archive_index=owner)
     coverage = receipt["sourceRead"]
     assert coverage["status"] == "partial"
     assert coverage["processedCount"] == 2
-    assert coverage["remainingCount"] == 1
-    assert coverage["totalCount"] == 3
+    assert coverage["remainingAtLeast"] == 1
+    assert coverage["remainingCount"] is None and coverage["totalCount"] is None
     assert receipt["unityPackages"][0]["pathnamesEvidenceCount"] == 1
 
     cursor = coverage["nextRequest"]["arguments"]["archiveCursor"]
@@ -384,7 +385,7 @@ def test_nested_archive_source_cursor_reopens_private_index_and_does_not_reread_
     monkeypatch.setattr(zipfile, "ZipFile", refuse_archive_open)
     other = ArchiveInspectionIndex(database, "different-session")
     assert inspect_outfit_package(None, archive_index=other, archive_cursor=cursor)["ok"] is False
-    reopened = ArchiveInspectionIndex(database, "first-session")
+    reopened = ArchiveInspectionIndex(database, "first-session", streams=streams)
     resumed = inspect_outfit_package(None, archive_index=reopened, archive_cursor=cursor)
     assert resumed["sourceRead"] == {
         "countUnit": "archive_entries_and_pathnames", "status": "complete",
@@ -393,3 +394,62 @@ def test_nested_archive_source_cursor_reopens_private_index_and_does_not_reread_
     assert resumed["unityPackages"][0]["pathnamesEvidenceCount"] == 2
     assert inspect_outfit_package(None, archive_index=reopened, archive_cursor=cursor) == resumed
     assert "SECRET_" not in json.dumps(resumed)
+
+
+def test_archive_scan_steps_on_demand_and_planner_consumes_completed_child_receipt(tmp_path, monkeypatch):
+    import outfit_import_planner
+    import outfit_package_inspector as inspector
+
+    package = tmp_path / "outfit.unitypackage"
+    make_unitypackage(package)
+    database = tmp_path / "profile" / "archive.sqlite"
+    child = inspector.ArchiveInspectionIndex(database, "child", planner_owner="parent")
+    parent = inspector.ArchiveInspectionIndex(database, "parent")
+    foreign = inspector.ArchiveInspectionIndex(database, "unrelated")
+    requests = []
+    original_reader = inspector._page_unitypackage
+
+    def counted(*args, **kwargs):
+        with inspector.closing(original_reader(*args, **kwargs)) as stream:
+            for page in stream:
+                requests.append(page[1]["status"])
+                yield page
+
+    monkeypatch.setattr(inspector, "_page_unitypackage", counted)
+    first = inspector.inspect_outfit_package(package, max_entries=1, archive_index=child)
+    assert requests == ["partial"]
+    assert parent.completed(package) is None
+    cursor = first["sourceRead"]["nextRequest"]["arguments"]["archiveCursor"]
+    assert not parent.resume(cursor, package)["ok"]
+    assert not child.resume(cursor, tmp_path / "different.unitypackage")["ok"]
+    assert not child.resume(cursor[:-1] + "0", package)["ok"]
+    complete = child.resume(cursor, package)
+    assert requests == ["partial", "complete"]
+    assert parent.completed(package) == complete
+    assert foreign.completed(package) is None
+    assert outfit_import_planner.build_outfit_import_plan(
+        package, max_entries=1, archive_index=parent
+    )["inspection"] == complete
+    assert requests == ["partial", "complete"]
+    with package.open("ab") as target:
+        target.write(b"changed")
+    assert parent.completed(package) is None
+    assert not child.resume(cursor, package)["ok"]
+
+
+def test_unconsumed_archive_cursor_survives_reader_expiry(tmp_path):
+    from outfit_package_inspector import ArchiveInspectionIndex, ArchiveInspectionStreams
+
+    package = tmp_path / "outfit.unitypackage"
+    make_unitypackage(package)
+    database = tmp_path / "index.sqlite"
+    streams = ArchiveInspectionStreams()
+    index = ArchiveInspectionIndex(database, "session", streams=streams)
+    receipt = index.inspect(package, max_entries=1)
+    cursor = receipt["sourceRead"]["nextRequest"]["arguments"]["archiveCursor"]
+    token = cursor.split("_")[1]
+    streams.take((database, "session", token, 1)).close()
+    restarted = ArchiveInspectionIndex(database, "session")
+    completed = restarted.resume(cursor, package)
+    assert completed["sourceRead"]["status"] == "complete"
+    assert restarted.resume(cursor, package) == completed

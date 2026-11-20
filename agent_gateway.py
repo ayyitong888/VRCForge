@@ -8938,10 +8938,19 @@ class AgentGateway:
                     # Goal ownership comes from the active App turn, never from
                     # model-supplied scope fields. The turn id also prevents one
                     # runtime turn from counting the same blocked report twice.
+                    for alias in ("chat_id", "session_id", "project_root", "projectPath", "turn_id"):
+                        step_params.pop(alias, None)
                     step_params["sessionId"] = session_id
                     step_params["chatId"] = chat_id
                     step_params["projectRoot"] = project_root
                     step_params["turnId"] = turn_id
+                    if step_tool == "vrcforge_create_goal":
+                        step_params.pop("sourceMessageId", None)
+                        if input_source.is_human and chat_id and session_id:
+                            step_params["sourceMessageId"] = (
+                                "question-answer:" + native_question_answer["id"]
+                                if native_question_answer else client_turn_id
+                            )
                 if step_tool.startswith("vrcforge_progress_"):
                     step_params.pop("project_root", None)
                     step_params.pop("projectPath", None)
@@ -9162,6 +9171,12 @@ class AgentGateway:
                     if loop_state:
                         loop_state[-1]["resultRead"] = retained_result
             step_timeline_outcome = ensure_dict(step_payload.get("outcome"))
+            if (step_timeline_outcome.get("status") == "ok"
+                    and (step_tool == "vrcforge_create_goal" or step_tool == "vrcforge_update_goal"
+                         and step_params.get("status") == "register_acceptance")):
+                bound_goal = ensure_dict(ensure_dict(step_payload.get("result")).get("goal"))
+                if bound_goal.get("acceptanceChecks") and bound_goal.get("status") == "active":
+                    acceptance_goal_id = str(bound_goal["goalId"])
             if step_timeline_outcome:
                 steps[-1]["outcome"] = step_timeline_outcome
             if step_payload.get("error"):
@@ -11022,7 +11037,7 @@ class AgentGateway:
         checks = previous.get("completionChecks")
         if checks and entry["title"] != previous["title"] and "completionChecks" not in values:
             # A reused item ID can describe different work after a replan.
-            entry.update(completionChecks=[], completionEvidence={})
+            entry.update(completionChecks=[], completionEvidence={}, completionPages={})
             if entry["status"] == "completed":
                 entry["status"] = "in_progress"
             return
@@ -11037,6 +11052,8 @@ class AgentGateway:
             return
         evidence = dict(previous.get("completionEvidence") or {}) if checks == previous.get("completionChecks") else {}
         entry.update(completionChecks=checks, completionEvidence=evidence)
+        if previous.get("completionPages"):
+            entry["completionPages"] = previous["completionPages"] if checks == previous.get("completionChecks") else {}
         if entry["status"] == "deleted":
             return
         if all(evidence.get(str(index)) for index in range(len(checks))):
@@ -11075,8 +11092,10 @@ class AgentGateway:
                 if not checks or item.get("status") not in {"pending", "in_progress", "running", "blocked"}:
                     continue
                 previous = ensure_dict(item.get("completionEvidence"))
-                evidence = matched_checks(checks, previous, receipts)
-                if evidence == previous:
+                previous_pages = ensure_dict(item.get("completionPages"))
+                pages = dict(previous_pages)
+                evidence = matched_checks(checks, previous, receipts, page_coverage=pages)
+                if evidence == previous and pages == previous_pages:
                     continue
                 self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", {
                     "event": "progress_updated",
@@ -11085,6 +11104,7 @@ class AgentGateway:
                     "projectRoot": item["projectRoot"],
                     "status": "completed" if len(evidence) == len(checks) else item["status"],
                     "completionEvidence": evidence,
+                    "completionPages": pages,
                 })
                 publish = True
         if publish:

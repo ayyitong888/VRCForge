@@ -4063,8 +4063,9 @@ async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, An
         params["wakeAt"] = request.wake_at
     if "wake_every_minutes" in request.model_fields_set:
         params["wakeEveryMinutes"] = request.wake_every_minutes
-    if request.source_message_id or request.acceptance_checks is not None:
+    if request.source_message_id:
         params["sourceMessageId"] = request.source_message_id
+    if request.acceptance_checks is not None:
         params["acceptanceChecks"] = request.acceptance_checks
     try:
         payload = AGENT_GATEWAY.goal.create_agent_goal(params)
@@ -28692,7 +28693,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_update_goal",
-        "when-to-use: mark the current active Goal complete after the runtime records all its registered acceptance receipts, or report a blocking condition; blocked is applied after three distinct consecutive turns with the same reason. when-NOT-to-use: do not pause, resume, clear, cancel, or budget a Goal because those controls belong to the user. Negative example: a prose summary or a captured screenshot cannot complete a Goal.",
+        "when-to-use: for an active Goal without checks, use status=register_acceptance with its goalId and acceptanceChecks before verifying. Use status=complete after the runtime records all matching receipts, or blocked after three distinct consecutive turns with the same reason. when-NOT-to-use: do not pause, resume, clear, cancel, or budget a Goal because those controls belong to the user. Negative example: a prose summary or a captured screenshot cannot complete a Goal.",
         "plan/preview",
         lambda params: AGENT_GATEWAY.goal.update_agent_goal_from_agent(params or {}),
     )
@@ -30633,13 +30634,19 @@ CLOTHING_FX_APPROVED_WRITE = ClothingFxApprovedWriteService(
         handled_errors=(RuntimeError, UnityMcpError),
     )
 )
+_OUTFIT_ARCHIVE_STREAMS = outfit_package_inspector_domain.ArchiveInspectionStreams()
+
+
 def _outfit_archive_index() -> outfit_package_inspector_domain.ArchiveInspectionIndex:
+    from sub_agent_delegate import outfit_inventory_parent
+
     try:
         owner = AGENT_GATEWAY.execution_target_session_context()
     except AgentGatewayError:
         owner = "authenticated-dashboard"
     return outfit_package_inspector_domain.ArchiveInspectionIndex(
-        runtime_paths.USER_DATA_DIR / "archive-inspections.sqlite3", owner,
+        runtime_paths.USER_DATA_DIR / "archive-inspections.sqlite3", owner, streams=_OUTFIT_ARCHIVE_STREAMS,
+        planner_owner=outfit_inventory_parent(owner),
     )
 
 

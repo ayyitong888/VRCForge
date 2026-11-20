@@ -243,10 +243,12 @@ def build_outfit_import_plan(
     dependency_mode = str(dependency_mode or "auto").strip().casefold()
     if dependency_mode not in {"auto", "selected_only"}:
         raise ValueError("dependency_mode must be 'auto' or 'selected_only'.")
-    inspection = (
-        inspect_outfit_package(package_path, max_entries=max_entries, archive_index=archive_index)
-        if archive_index else inspect_outfit_package(package_path, max_entries=max_entries)
-    )
+    inspection = archive_index.completed(Path(package_path).expanduser().resolve()) if archive_index else None
+    if inspection is None:
+        inspection = (
+            inspect_outfit_package(package_path, max_entries=max_entries, archive_index=archive_index)
+            if archive_index else inspect_outfit_package(package_path, max_entries=max_entries)
+        )
     if not inspection.get("ok"):
         return {
             "ok": False,

@@ -250,6 +250,71 @@ def test_todo_only_counts_committed_verified_writes_and_explicit_visual_pass(tmp
     assert gateway.list_agent_progress(session_id="other")["items"][0]["status"] == "pending"
 
 
+def test_native_read_todo_finishes_after_all_file_pages(tmp_path):
+    from general_agent_tools import read_text_file
+    from tests.test_native_runtime_gateway import call, run, setup_gateway
+
+    tool = "vrcforge_read_text_file"
+    path = tmp_path / "VERSION"
+    path.write_bytes(b"1.11.0\n")
+    arguments = {"path": str(path), "pageChars": 3}
+    page = {}
+
+    def next_page(call_id):
+        def action(_request):
+            assert gateway.list_agent_progress(session_id="native-session")["items"][0]["status"] != "completed"
+            return call(call_id, tool, {**arguments, "textOffset": page["nextTextOffset"], "snapshotDigest": page["snapshotDigest"]})
+        return action
+
+    gateway, _, _ = setup_gateway(tmp_path, [
+        call("plan", "vrcforge_progress_replace", {"items": [{"id": "read", "title": "Read VERSION", "completionChecks": [
+            {"tool": tool, "arguments": {"path": str(path)}, "result": {"truncated": False}}]}]}),
+        call("head", tool, {**arguments, "textOffset": 0}),
+        next_page("middle"), next_page("tail"), {"role": "assistant", "content": "Read the complete version."},
+    ])
+    def read(params):
+        page.update(read_text_file(params["path"], allowed_roots=[tmp_path], enable_source_paging=True,
+                                   text_offset=params["textOffset"], page_chars=params["pageChars"],
+                                   snapshot_digest=params.get("snapshotDigest")))
+        return dict(page)
+
+    gateway.register_tool(tool, "When to use: read. When NOT to use: write.", "read/debug", read)
+    gateway.register_tool("vrcforge_progress_replace", "When to use: plan. When NOT to use: write assets.", "plan/preview",
+                          gateway.replace_agent_progress)
+    run(gateway, tmp_path)
+    assert gateway.list_agent_progress(session_id="native-session")["items"][0]["status"] == "completed"
+
+
+def test_read_todo_collects_only_complete_same_snapshot_pages_across_restart(tmp_path):
+    from agent_progress_evidence import accepted_receipt
+    from general_agent_tools import read_text_file
+
+    tool = "vrcforge_read_text_file"
+    scope = {"sessionId": "owner", "projectRoot": str(tmp_path)}
+    path = tmp_path / "read.txt"
+    text = "一二三四五六七"
+    path.write_text(text, encoding="utf-8")
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    gateway.replace_agent_progress({**scope, "items": [{"id": "read", "title": "Read the source", "completionChecks": [
+        {"tool": tool, "arguments": {"path": str(path)}, "result": {"truncated": False}}
+    ]}]})
+
+    def read(offset, owner="owner"):
+        page = read_text_file(path, allowed_roots=[tmp_path], enable_source_paging=True, text_offset=offset, page_chars=3)
+        receipt = accepted_receipt(tool, "read", page["snapshotDigest"] + str(offset),
+                                   {"path": str(path), "textOffset": offset}, page, {"status": "ok"}, status="executed")
+        gateway._advance_runtime_todos(owner, str(tmp_path), [receipt])
+        return gateway.list_agent_progress(session_id="owner")["items"][0]["status"]
+
+    assert read(0) == "pending"
+    path.write_text("甲" + text[1:], encoding="utf-8")
+    assert read(6) == "pending"
+    assert read(3) == "pending"
+    assert read(0, "other") == "pending"
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    assert read(0) == "completed"
+
+
 def test_progress_completion_is_owned_by_matching_receipts_across_replacement(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     scope = {"sessionId": "progress-owner", "projectRoot": str(tmp_path)}

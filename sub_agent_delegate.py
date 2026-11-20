@@ -385,14 +385,21 @@ _OUTFIT_COVERAGE = ("assetCountScope", "truncated", "nestedPathnamesTruncated", 
 _OUTFIT_INSPECTION = ContextVar("child_outfit_inspection", default=None)
 
 
+def outfit_inventory_parent(owner: str) -> str | None:
+    bound = _OUTFIT_INSPECTION.get()
+    scope = bound[0] if bound else None
+    if scope and scope.get("childOwner") == owner:
+        return scope.get("parentOwner")
+    return None
+
+
 def child_outfit_read_scope(
     project_path: str,
     read_roots: tuple[str, ...],
 ) -> ReadScope:
     bind_read = _delegated_read_scope(project_path, read_roots)
-    inspection = _OUTFIT_INSPECTION.get()
-
     def bind(tool: RuntimeSkillTool, arguments: dict[str, Any]) -> dict[str, Any]:
+        inspection = _OUTFIT_INSPECTION.get()
         if tool.name == RESULT_READER_TOOL:
             return bind_read(tool, arguments)
         if inspection is not None and inspection[0] is None:
@@ -400,6 +407,12 @@ def child_outfit_read_scope(
         params = bind_read(tool, arguments)
         if inspection is not None:
             expected, dispatched = inspection
+            if tool.name == _OUTFIT_INSPECTION_TOOL and params.get("archiveCursor"):
+                if "packagePath" in params and params["packagePath"] != expected["packagePath"]:
+                    raise PermissionError("Continue the archive in the delegated package scope.")
+                # The cursor is checked against both the session owner and the exact source.
+                params["packagePath"] = expected["packagePath"]
+                return params
             if params.get("packagePath") != expected["packagePath"] or (
                 params.get("maxEntries", 5000) != expected["maxEntries"]
             ):
@@ -429,6 +442,8 @@ def run_outfit_package_inspection(
             "packagePath": str(_authorized_path(package_path, payload.get("_generalReadRoots", ()))),
             "maxEntries": int(payload.get("maxEntries") or 5000),
         }
+        if payload.get("_taskSeed") and payload.get("childSessionId") and payload.get("parentSessionId"):
+            scope.update(childOwner=f"runtime:{payload['childSessionId']}", parentOwner=f"runtime:{payload['parentSessionId']}")
     except OSError:
         if not can_reuse:
             raise
@@ -436,14 +451,15 @@ def run_outfit_package_inspection(
     try:
         result = run_readonly_llm_agent(
             gateway, payload if scope is not None else {**payload, "tools": []}, cancel_event,
-            scope_material={"label": "Delegated inspection tool arguments", **scope} if scope is not None else None,
+            scope_material={"label": "Delegated inspection tool arguments", "packagePath": scope["packagePath"],
+                            "maxEntries": scope["maxEntries"]} if scope is not None else None,
         )
     finally:
         _OUTFIT_INSPECTION.reset(token)
 
     steps = result["rawResult"].get("steps") or []
     receipts = [step for step in steps if step.get("tool") == _OUTFIT_INSPECTION_TOOL]
-    for receipt in receipts:
+    for receipt in reversed(receipts):
         inspection = receipt.get("result")
         if isinstance(inspection, dict) and inspection.get("ok") is True:
             summary = inspection["summary"]
@@ -451,11 +467,17 @@ def run_outfit_package_inspection(
                 key: summary[key] for key in (*_OUTFIT_COUNTS, *_OUTFIT_COVERAGE) if key in summary
             })
             result["plannerEvidence"]["warningCount"] = len(inspection.get("warnings") or [])
+            if isinstance(inspection.get("sourceRead"), dict):
+                # Page tokens remain private to this child. The parent can consume a
+                # finished inventory or ask the same child to continue a partial scan.
+                result["plannerEvidence"]["sourceRead"] = {
+                    key: value for key, value in inspection["sourceRead"].items() if key != "nextRequest"
+                }
             break
     else:
         if can_reuse and not receipts:
             result["plannerEvidence"].update({
-                key: prior[key] for key in (*_OUTFIT_COUNTS, *_OUTFIT_COVERAGE) if key in prior
+                key: prior[key] for key in (*_OUTFIT_COUNTS, *_OUTFIT_COVERAGE, "sourceRead") if key in prior
             })
         elif result.get("status") != "paused":
             failure = next(

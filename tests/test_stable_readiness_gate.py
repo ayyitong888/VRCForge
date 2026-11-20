@@ -1180,6 +1180,23 @@ def test_release_manifest_rejects_local_build_even_after_commit_matches(tmp_path
     assert strict_step["ok"] is True
     assert strict_step["details"]["uvRuntimeProvenanceOk"] is True
 
+    # Newer releases distribute an independently versioned skill and a web setup payload.
+    modern_version = "1.11.0"
+    skill_manifest = Path(gate.__file__).resolve().parents[1] / "artifacts/skills/vrcforge-avatar-slime/manifest.json"
+    skill_version = json.loads(skill_manifest.read_text(encoding="utf-8-sig"))["version"]
+    modern_names = [*gate.RELEASE_ARTIFACTS, f"VRCForge_Windows_x64_{modern_version}.zip",
+                    f"VRCForge_Windows_x64_{modern_version}.tar.zst", f"VRCForge_Avatar_Slime_{skill_version}.vsk"]
+    modern_artifacts = []
+    for name in modern_names:
+        artifact_path = release_root / name
+        artifact_path.write_bytes(f"payload:{name}".encode())
+        modern_artifacts.append({"name": name, "sha256": gate.sha256_file(artifact_path)})
+    modern_manifest = dict(payload, version=modern_version, artifacts=modern_artifacts)
+    write_json(manifest_path, modern_manifest)
+    assert gate.check_release_manifest(manifest_path, modern_version)["ok"]
+    (release_root / modern_names[-1]).write_bytes(b"damaged")
+    assert gate.check_release_manifest(manifest_path, modern_version)["details"]["checksumMismatches"] == [modern_names[-1]]
+
     tampered_uv_runtime = json.loads(json.dumps(payload))
     tampered_uv_runtime["uvRuntime"]["files"][0]["sha256"] = "not-a-sha256"
     write_json(manifest_path, tampered_uv_runtime)

@@ -12,19 +12,17 @@ const FINAL_STEPS = new Set(["done", "completed", "final"]);
 type CompletedPredictionTurn = {
   owner: string;
   turnId: string;
-  context: InputPredictionContext;
+  context: Pick<InputPredictionContext, "recent_user_messages" | "assistant_tail">;
 };
 
 type ResumePredictionOptions = {
   chatId: string;
-  provider: string;
-  model: string;
   refreshRuntime: () => Promise<unknown>;
   getChatById: (chatId: string) => ChatThread | undefined;
 };
 
-export function chatInputPredictionOwner(endpoint: string, chatId: string, sessionId: string, provider: string, model: string) {
-  return JSON.stringify([endpoint, chatId, sessionId, provider, model]);
+export function chatInputPredictionOwner(endpoint: string, chatId: string, sessionId: string) {
+  return JSON.stringify([endpoint, chatId, sessionId]);
 }
 
 export function recentPredictionInputs(items: ConversationItem[], currentInputId?: string, currentText?: string) {
@@ -42,7 +40,17 @@ export function recentPredictionInputs(items: ConversationItem[], currentInputId
   }).slice(-20);
 }
 
-export function useChatInputPrediction(endpoint: string, owner: string, eligible: boolean, hasDraft: boolean) {
+type PredictionOptions = {
+  endpoint: string;
+  owner: string;
+  provider: string;
+  model: string;
+  eligible: boolean;
+  busy: boolean;
+  hasDraft: boolean;
+};
+
+export function useChatInputPrediction({ endpoint, owner, provider, model, eligible, busy, hasDraft }: PredictionOptions) {
   const [candidate, setCandidate] = useState<CompletedPredictionTurn | null>(null);
   const [display, setDisplay] = useState<{ owner: string; text: string } | null>(null);
   const attempted = useRef<CompletedPredictionTurn | null>(null);
@@ -60,28 +68,32 @@ export function useChatInputPrediction(endpoint: string, owner: string, eligible
     generation.current += 1;
     lastComposerActivity.current = Date.now();
     pending.current?.abort();
+    setCandidate(null);
     return generation.current;
   };
 
   const dismiss = () => {
     const revision = onInputActivity();
-    setCandidate(null);
     setDisplay(null);
     return revision;
   };
 
   useLayoutEffect(() => {
     setDisplay(null);
-  }, [owner, eligible]);
+  }, [owner, provider, model, eligible, busy]);
 
   useLayoutEffect(() => {
     if (!candidate || attempted.current === candidate) return;
+    if (!eligible || hasDraft || candidate.owner !== owner) {
+      setCandidate(null);
+      return;
+    }
+    if (busy) return;
     attempted.current = candidate;
-    if (!eligible || hasDraft || candidate.owner !== owner) return;
     setDisplay(null);
     const controller = new AbortController();
     pending.current = controller;
-    void requestInputPrediction(endpoint, candidate.context, controller.signal).then((result) => {
+    void requestInputPrediction(endpoint, { ...candidate.context, provider, model }, controller.signal).then((result) => {
       if (result?.suggestion && !controller.signal.aborted) {
         setDisplay({ owner, text: result.suggestion });
       }
@@ -89,7 +101,7 @@ export function useChatInputPrediction(endpoint: string, owner: string, eligible
       if (pending.current === controller) pending.current = null;
     });
     return () => controller.abort();
-  }, [candidate, endpoint, eligible, hasDraft, owner]);
+  }, [candidate, endpoint, eligible, busy, hasDraft, owner, provider, model]);
 
   function offer(turn: CompletedPredictionTurn, submittedGeneration: number) {
     const identity = JSON.stringify([turn.owner, turn.turnId]);
@@ -98,11 +110,11 @@ export function useChatInputPrediction(endpoint: string, owner: string, eligible
     setCandidate(turn);
   }
 
-  async function offerAfterResume(event: RuntimeTurnEvent, { chatId, provider, model, refreshRuntime, getChatById }: ResumePredictionOptions) {
+  async function offerAfterResume(event: RuntimeTurnEvent, { chatId, refreshRuntime, getChatById }: ResumePredictionOptions) {
     if (!event.sessionId || !event.turnId || !event.startedAt || !event.completedAt || event.dispatchStopped
       || event.ok === false || !RESUME_SOURCES.has(event.continuationSource || "")
       || !FINAL_STEPS.has(event.plan?.nextStep || "") || event.plan?.plannerFailure) return;
-    const turnOwner = chatInputPredictionOwner(endpoint, chatId, event.sessionId, provider, model);
+    const turnOwner = chatInputPredictionOwner(endpoint, chatId, event.sessionId);
     // A restored receipt began before this chat became the observed composer.
     // A live receipt cannot replace any text interaction during its run.
     const started = Date.parse(event.startedAt);
@@ -124,8 +136,6 @@ export function useChatInputPrediction(endpoint: string, owner: string, eligible
       context: {
         recent_user_messages: recentPredictionInputs(chat.items),
         assistant_tail: Array.from(publicReply).slice(-2000).join(""),
-        provider,
-        model,
       },
     }, submittedGeneration);
   }

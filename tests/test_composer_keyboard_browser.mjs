@@ -30,7 +30,7 @@ const bundle = await build({
           onSubmit={e => { e?.preventDefault(); window.calls.push("send"); }}
           onQueue={() => window.calls.push("queue")} onSteerNow={() => window.calls.push("steer")}
           onSwitchMode={() => {}} />
-        <SettingsWorkspace activeSection="general" currentLanguage="en-US" visionProvider=""
+        <SettingsWorkspace activeSection="chat" currentLanguage="en-US" visionProvider=""
           themeCustomization={DEFAULT_THEME_CUSTOMIZATION} runningEnterAction={runningEnterAction}
           onRunningEnterActionChange={value => {
             setRunningEnterAction(value);

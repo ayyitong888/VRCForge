@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import time
+import threading
 import tarfile
 import zipfile
 from collections import Counter
@@ -97,107 +98,229 @@ def _source_identity(path: Path):
     return path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
-class ArchiveInspectionIndex:
-    """Retain bounded metadata in the private app profile, scoped to its host-supplied owner."""
+class ArchiveInspectionStreams:
+    """Short-lived sequential readers; SQLite owns the durable cursors and finished pages."""
 
-    def __init__(self, database: Path, owner: str):
+    def __init__(self, capacity=8, idle_seconds=60):
+        self._entries = {}
+        self._lock = threading.Lock()
+        self._capacity = capacity
+        self._idle_seconds = idle_seconds
+
+    def take(self, key):
+        with self._lock:
+            entry = self._entries.pop(key, None)
+        if entry:
+            stream, timer = entry
+            timer.cancel()
+            return stream
+
+    def park(self, key, stream):
+        # Each issued offset is unique. Evicted/expired readers release the source
+        # handle; the version-checked cursor can be reconstructed after a restart.
+        def expire():
+            with self._lock:
+                if self._entries.get(key) != (stream, timer):
+                    return
+                del self._entries[key]
+            stream.close()
+
+        timer = threading.Timer(self._idle_seconds, expire)
+        timer.daemon = True
+        with self._lock:
+            old = self._entries.pop(key, None)
+            if not old and len(self._entries) >= self._capacity:
+                old = self._entries.pop(next(iter(self._entries)))
+            self._entries[key] = stream, timer
+        if old:
+            old[1].cancel()
+            old[0].close()
+        timer.start()
+
+
+class ArchiveInspectionIndex:
+    """Cache pages only as requested in the private profile, scoped to the host-supplied owner."""
+
+    def __init__(self, database: Path, owner: str, *, streams=None, planner_owner=None):
         self._database = database
         self._owner = owner
+        self._streams = streams if streams is not None else ArchiveInspectionStreams()
+        self._planner_owner = planner_owner
 
     def _open(self):
         self._database.parent.mkdir(parents=True, exist_ok=True)
         return closing(sqlite3.connect(self._database, timeout=5))
 
-    def inspect(self, path: Path, max_entries: int):
+    def _key(self, token, offset):
+        return self._database, self._owner, token, offset
+
+    @staticmethod
+    def _reader(path, max_entries):
         generator = _page_zip if path.suffix.lower() == ".zip" else _page_unitypackage
-        identity = list(_source_identity(path)[1:])
+        return generator(path, max_entries, page_size=_ARCHIVE_INDEX_PAGE_SIZE)
+
+    @staticmethod
+    def _continuation(token, offset):
+        return {"tool": "vrcforge_inspect_outfit_package", "arguments": {"archiveCursor": f"archive_{token}_{offset}"}}
+
+    def inspect(self, path: Path, max_entries: int):
+        identity = json.dumps(_source_identity(path)[1:])
         token = uuid4().hex
-        saved = []
-        saved_size = 0
-        inspected_at = utc_now()
-
-        def continuation(offset):
-            return {
-                "tool": "vrcforge_inspect_outfit_package",
-                "arguments": {"archiveCursor": f"archive_{token}_{offset}"},
-            }
-
-        with closing(generator(path, max_entries, page_size=_ARCHIVE_INDEX_PAGE_SIZE)) as pages:
+        pages = self._reader(path, max_entries)
+        try:
             result, coverage = next(pages)
             result["sourceRead"] = coverage
-            if coverage.get("reason") not in _RESUMABLE_ARCHIVE_REASONS:
+            resumable = coverage.get("reason") in _RESUMABLE_ARCHIVE_REASONS
+            if not resumable and coverage["status"] != "complete":
                 return result
-            for offset, (page, facts) in enumerate(pages, 1):
-                if facts.get("reason") in _RESUMABLE_ARCHIVE_REASONS:
-                    facts["nextRequest"] = continuation(offset + 1)
-                page.update(sourceRead=facts, inspectedAt=inspected_at, privacy=privacy_policy())
-                payload = gzip.compress(json.dumps(page, ensure_ascii=False).encode("utf8"), compresslevel=1)
-                saved_size += len(payload)
-                if saved_size > _ARCHIVE_INDEX_MAX_BYTES:
-                    coverage["reason"] = "archive_index_capacity"
-                    return result
-                saved.append((token, offset, payload))
-            if identity != list(_source_identity(path)[1:]):
-                coverage["reason"] = "archive_changed_during_indexing"
+            if identity != json.dumps(_source_identity(path)[1:]):
+                result["ok"] = False
+                result["error"] = "Archive changed while it was being inspected. Inspect its current version."
+                result["sourceRead"] = _source_read(None, None, "archive_changed_during_indexing")
                 return result
+            try:
+                with self._open() as database, database:
+                    database.execute("PRAGMA foreign_keys=ON")
+                    database.execute(
+                        "CREATE TABLE IF NOT EXISTS inspections (id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
+                        "path TEXT NOT NULL, identity TEXT NOT NULL, created REAL NOT NULL, size INTEGER NOT NULL, total INTEGER)"
+                    )
+                    database.execute(
+                        "CREATE TABLE IF NOT EXISTS pages (id TEXT REFERENCES inspections(id) ON DELETE CASCADE, "
+                        "offset INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY (id, offset))"
+                    )
+                    database.execute("CREATE TABLE IF NOT EXISTS planning_readers ("
+                                     "id TEXT PRIMARY KEY REFERENCES inspections(id) ON DELETE CASCADE, owner TEXT NOT NULL)")
+                    database.execute("DELETE FROM inspections WHERE created < ?", (time.time() - 7 * 24 * 3600,))
+                    # Page zero stores just the restart parameters. Charge a minimum per
+                    # cursor so abandoned first pages cannot grow the database unbounded.
+                    payload = str(max_entries)
+                    if not resumable:
+                        result.update(inspectedAt=utc_now(), privacy=privacy_policy())
+                        payload = gzip.compress(json.dumps(result, ensure_ascii=False).encode("utf8"), compresslevel=1)
+                        if len(payload) + 1024 > _ARCHIVE_INDEX_MAX_BYTES:
+                            return result
+                    database.execute("INSERT INTO inspections VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                     (token, self._owner, str(path), identity, time.time(), len(payload) + 1024,
+                                      None if resumable else coverage["totalCount"]))
+                    database.execute("INSERT INTO pages VALUES (?, ?, ?)", (token, 0 if resumable else 1, payload))
+                    if self._planner_owner:
+                        database.execute("INSERT INTO planning_readers VALUES (?,?)", (token, self._planner_owner))
+                    self._evict(database)
+                if resumable:
+                    self._streams.park(self._key(token, 1), pages)
+                    pages = None
+                    coverage["nextRequest"] = self._continuation(token, 1)
+            except (OSError, sqlite3.Error):
+                if resumable:
+                    coverage["reason"] = "archive_index_unavailable"
+            return result
+        finally:
+            if pages is not None:
+                pages.close()
 
-        final_count = facts["totalCount"] if facts["status"] == "complete" else None
-        if final_count is not None:
-            coverage["totalCount"] = final_count
-            coverage["remainingCount"] = final_count - coverage["processedCount"]
-            coverage.pop("remainingAtLeast", None)
-        coverage["nextRequest"] = continuation(1)
+    @staticmethod
+    def _evict(database):
+        database.execute(
+            "DELETE FROM inspections WHERE id IN ("
+            "SELECT id FROM (SELECT id, sum(size) OVER (ORDER BY created DESC, id DESC) AS used "
+            "FROM inspections) WHERE used > ?)", (_ARCHIVE_INDEX_MAX_BYTES,),
+        )
+
+    def completed(self, path):
+        if not self._database.is_file() or not path.is_file():
+            return None
         try:
-            with self._open() as database, database:
-                database.execute("PRAGMA foreign_keys=ON")
-                database.execute(
-                    "CREATE TABLE IF NOT EXISTS inspections (id TEXT PRIMARY KEY, owner TEXT NOT NULL, "
-                    "path TEXT NOT NULL, identity TEXT NOT NULL, created REAL NOT NULL, size INTEGER NOT NULL, total INTEGER)"
-                )
-                database.execute(
-                    "CREATE TABLE IF NOT EXISTS pages (id TEXT REFERENCES inspections(id) ON DELETE CASCADE, "
-                    "offset INTEGER NOT NULL, payload BLOB NOT NULL, PRIMARY KEY (id, offset))"
-                )
-                database.execute("DELETE FROM inspections WHERE created < ?", (time.time() - 7 * 24 * 3600,))
-                database.execute(
-                    "INSERT INTO inspections VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (token, self._owner, str(path), json.dumps(identity), time.time(), saved_size, final_count),
-                )
-                database.executemany("INSERT INTO pages VALUES (?, ?, ?)", saved)
-                database.execute(
-                    "DELETE FROM inspections WHERE id IN ("
-                    "SELECT id FROM (SELECT id, sum(size) OVER (ORDER BY created DESC, id DESC) AS used "
-                    "FROM inspections) WHERE used > ?)",
-                    (_ARCHIVE_INDEX_MAX_BYTES,),
-                )
-        except (OSError, sqlite3.Error):
-            coverage.pop("nextRequest", None)
-            coverage["reason"] = "archive_index_unavailable"
-        return result
+            with self._open() as database:
+                # Older indices already contain complete owner-private pages.
+                has_sharing = database.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='planning_readers'"
+                ).fetchone()
+                scope = "inspections.owner=:owner"
+                if has_sharing:
+                    scope += " OR id IN (SELECT id FROM planning_readers WHERE owner=:owner)"
+                row = database.execute(
+                    f"SELECT payload FROM inspections JOIN pages USING(id) WHERE ({scope}) AND path=:path "
+                    "AND identity=:identity AND total IS NOT NULL AND created>=:cutoff "
+                    "ORDER BY created DESC, offset DESC LIMIT 1",
+                    {"owner": self._owner, "path": str(path), "identity": json.dumps(_source_identity(path)[1:]),
+                     "cutoff": time.time() - 7 * 24 * 3600},
+                ).fetchone()
+            if row:
+                page = json.loads(gzip.decompress(row[0]))
+                if page["sourceRead"]["status"] == "complete":
+                    return page
+        except (OSError, EOFError, ValueError, sqlite3.Error):
+            pass
+        return None
 
     def resume(self, cursor: str, path: Path | None):
         if not re.fullmatch(ARCHIVE_CURSOR_PATTERN, cursor) or not self._database.is_file():
             return _archive_cursor_error()
-        _, token, offset = cursor.split("_")
+        _, token, ordinal = cursor.split("_")
+        pages = None
         try:
-            with self._open() as database:
-                record = database.execute(
-                    "SELECT path, identity, payload, total FROM pages JOIN inspections USING(id) "
-                    "WHERE id = ? AND offset = ? AND owner = ?", (token, int(offset), self._owner),
+            offset = int(ordinal)
+            with self._open() as database, database:
+                database.execute("PRAGMA foreign_keys=ON")
+                row = database.execute(
+                    "SELECT path, identity, size FROM inspections WHERE id=? AND owner=? AND created>=?",
+                    (token, self._owner, time.time() - 7 * 24 * 3600),
                 ).fetchone()
-            if record:
-                source_path = Path(record[0])
-                if (path is None or path == source_path) and list(_source_identity(source_path)[1:]) == json.loads(record[1]):
-                    result = json.loads(gzip.decompress(record[2]))
-                    facts = result["sourceRead"]
-                    if record[3] is not None:
-                        facts["totalCount"] = record[3]
-                        facts["remainingCount"] = record[3] - facts["processedCount"]
-                        facts.pop("remainingAtLeast", None)
+                if row is None:
+                    return _archive_cursor_error()
+                source = Path(row[0])
+                if (path is not None and source != path) or json.dumps(_source_identity(source)[1:]) != row[1]:
+                    return _archive_cursor_error()
+                cached = database.execute("SELECT payload FROM pages WHERE id=? AND offset=?", (token, offset)).fetchone()
+                if cached:
+                    return json.loads(gzip.decompress(cached[0]))
+                latest = database.execute("SELECT offset, payload FROM pages WHERE id=? ORDER BY offset DESC LIMIT 1",
+                                          (token,)).fetchone()
+                if not latest or latest[0] + 1 != offset:
+                    return _archive_cursor_error()
+                if latest[0] and not json.loads(gzip.decompress(latest[1]))["sourceRead"].get("nextRequest"):
+                    return _archive_cursor_error()
+                pages = self._streams.take(self._key(token, offset))
+                if pages is None:
+                    initial = database.execute("SELECT payload FROM pages WHERE id=? AND offset=0", (token,)).fetchone()
+                    if not initial:
+                        return _archive_cursor_error()
+                    pages = self._reader(source, int(initial[0]))
+                    for _ in range(offset):
+                        next(pages)
+                result, coverage = next(pages)
+                result.update(sourceRead=coverage, inspectedAt=utc_now(), privacy=privacy_policy())
+                resumable = coverage.get("reason") in _RESUMABLE_ARCHIVE_REASONS
+                if resumable:
+                    coverage["nextRequest"] = self._continuation(token, offset + 1)
+                if json.dumps(_source_identity(source)[1:]) != row[1]:
+                    return _archive_cursor_error()
+                payload = gzip.compress(json.dumps(result, ensure_ascii=False).encode("utf8"), compresslevel=1)
+                if row[2] + len(payload) > _ARCHIVE_INDEX_MAX_BYTES:
+                    coverage.pop("nextRequest", None)
+                    if resumable:
+                        coverage["reason"] = "archive_index_capacity"
                     return result
-        except (OSError, EOFError, ValueError, OverflowError, sqlite3.Error):
-            pass
-        return _archive_cursor_error()
+                # Concurrent retries may reconstruct the same page. Only the winner
+                # publishes it; all consumers get identical evidence.
+                inserted = database.execute("INSERT OR IGNORE INTO pages VALUES (?, ?, ?)", (token, offset, payload))
+                if not inserted.rowcount:
+                    saved = database.execute("SELECT payload FROM pages WHERE id=? AND offset=?", (token, offset)).fetchone()
+                    return json.loads(gzip.decompress(saved[0]))
+                database.execute("UPDATE inspections SET size=size+?, total=?, created=? WHERE id=?",
+                                 (len(payload), coverage["totalCount"] if coverage["status"] == "complete" else None,
+                                  time.time(), token))
+                self._evict(database)
+            if resumable:
+                self._streams.park(self._key(token, offset + 1), pages)
+                pages = None
+            return result
+        except (OSError, EOFError, ValueError, OverflowError, StopIteration, sqlite3.Error, tarfile.TarError, zipfile.BadZipFile):
+            return _archive_cursor_error()
+        finally:
+            if pages is not None:
+                pages.close()
 
 
 def _archive_cursor_error():

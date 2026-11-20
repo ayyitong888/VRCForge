@@ -137,7 +137,8 @@ RUNTIME_CONTEXT_INSTRUCTION = (
     "Continue a partial sourceRead from its nextRequest when supplied. Use the original recovery coordinates for interrupted work. "
     "For explicit remember or forget requests, use remember_memory or delete_memory in execution; list_memory is read-only. "
     "Save exact user wording in the active project or user scope, and report the returned memoryId. "
-    "Use create_goal only for an explicit durable goal. "
+    "Use create_goal only for an explicit durable goal. Plan its acceptanceChecks from the original objective. "
+    "For an existing active Goal without checks, use update_goal(status=register_acceptance, goalId, acceptanceChecks) before verification. "
     "Treat attachment metadata and delegated image analysis as such. "
 )
 RUNTIME_TOOL_USAGE_INSTRUCTION = (
@@ -436,8 +437,8 @@ _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_browser": ("operation:string", "url?:string", "browser?:string", "offset?:integer", "target?:string"),
     "vrcforge_web_search": ("query:string", "timeout?:number", "maxResults?:integer", "offset?:integer", "snapshotDigest?:string"),
     "vrcforge_get_goal": (),
-    "vrcforge_create_goal": ("objective:string", "summary?:string"),
-    "vrcforge_update_goal": ("status:string", "reason:string"),
+    "vrcforge_create_goal": ("objective:string", "summary?:string", "acceptanceChecks?:array"),
+    "vrcforge_update_goal": ("status:string", "reason?:string", "goalId?:string", "acceptanceChecks?:array"),
     "vrcforge_execute_shell": ("command:string", "cwd?:string", "timeout?:number"),
     "vrcforge_get_compile_errors": ("projectPath?:string", "maxErrors?:integer"),
     "vrcforge_list_avatars": ("projectPath?:string",),
@@ -552,6 +553,24 @@ def bounded_planner_tool_schema(value: object) -> dict[str, object]:
 
 
 def planner_tool_input_schema(name: str, *, tool_block_ids: list[str] | None = None) -> dict[str, object]:
+    if name in {"vrcforge_create_goal", "vrcforge_update_goal"}:
+        schema = _contract_shallow_schema(_HIGH_CONFUSION_TOOL_INPUT_CONTRACTS[name])
+        schema["properties"]["acceptanceChecks"] = {
+            "type": "array", "minItems": 1, "maxItems": 16,
+            "description": ("Register verifiable effects of the user's objective before collecting receipts. "
+                            "For readback, name the exact tool, target arguments and expected result fields."),
+            "items": {
+                "type": "object", "required": ["kind", "tool", "result"],
+                "properties": {
+                    "kind": {"type": "string", "enum": ["readback", "gesture_manager", "visual_audit", "subjective"]},
+                    "tool": {"type": "string"}, "arguments": {"type": "object"}, "result": {"type": "object"},
+                    "avatarPath": {"type": "string"},
+                },
+            },
+        }
+        if name == "vrcforge_update_goal":
+            schema["properties"]["status"]["enum"] = ["register_acceptance", "complete", "blocked"]
+        return schema
     if name == "vrcforge_resume_subagent":
         from dashboard_api_models import SubAgentResumeRequest
         schema = SubAgentResumeRequest.model_json_schema(by_alias=True)

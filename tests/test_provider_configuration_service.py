@@ -633,6 +633,27 @@ def test_real_policy_cross_provider_session_uses_destination_saved_endpoint_and_
     assert owner.config_path.read_bytes() == before
 
 
+@pytest.mark.parametrize("lane", ["api", "vision"])
+def test_legacy_saved_key_switches_at_its_provider_default_during_another_turn(tmp_path: Path, lane: str) -> None:
+    policy = _real_provider_policy()
+    path = tmp_path / "providers.json"
+    _write_old_document(path)
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy["provider_keys"] = {lane: {"deepseek": "fixture-deepseek-key"}}
+    assert "provider_base_urls" not in legacy
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    owner = _owner(path, policy=policy)
+    with owner.bind_runtime_config() as original:
+        selected = owner.resolve_api_request(ApiRequest(provider="deepseek", model="deepseek-chat"))
+        assert selected.base_url == policy.get_provider_defaults("deepseek")["base_url"]
+        assert selected.api_key == "fixture-deepseek-key"
+        with pytest.raises(ValueError, match="new endpoint"):
+            owner.resolve_api_request(ApiRequest(provider="deepseek", model="deepseek-chat", base_url="https://other.invalid"))
+        with owner.configuration_change(api_config=selected):
+            owner.save_api_config(selected)
+        assert owner.current_api_config() == selected and original.provider != selected.provider
+
+
 def test_saved_custom_provider_switch_uses_its_own_endpoint_during_another_turn(tmp_path: Path) -> None:
     from provider_endpoint_policy import ProviderEndpointError
 

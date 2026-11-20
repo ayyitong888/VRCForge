@@ -591,6 +591,12 @@ class ProviderConfigurationService:
                     endpoints.setdefault(entry["provider"], entry["base_url"])
                 else:
                     endpoints[entry["provider"]] = entry["base_url"]
+        # Older files remembered other providers' keys but used their registered
+        # default URLs. A custom provider has no default endpoint to recover.
+        api_keys, vision_keys = self._load_provider_key_maps_locked(document)
+        for provider in (api_keys.keys() | vision_keys.keys()) - endpoints.keys() - {"custom"}:
+            default = self._policy.get_provider_defaults(provider)["base_url"]
+            endpoints[provider] = self._policy.normalize_base_url(None, provider, default)
         return endpoints
 
     def _validated_key(self, value: str) -> str:

@@ -500,6 +500,15 @@ def check_release_manifest(
         item_name = Path(str(item.get("name") or item.get("path") or "")).name
         artifacts_by_name.setdefault(item_name, []).append(item)
     required_names = [*RELEASE_ARTIFACTS, f"VRCForge_Windows_x64_{version}.zip"]
+    if version_at_least(version, "1.10.3"):
+        # The publisher takes the independently versioned skill from this checkout.
+        skill_path = Path(__file__).resolve().parents[1] / "artifacts/skills/vrcforge-avatar-slime/manifest.json"
+        skill, error = read_json_document(skill_path)
+        skill_version = str(skill.get("version") or "")
+        if error or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]*", skill_version):
+            return evidence_step("release_artifacts.manifest", False, True, path, category="release",
+                                 reason=f"Cannot determine the published Slime skill filename from {skill_path.name}")
+        required_names.extend([f"VRCForge_Windows_x64_{version}.tar.zst", f"VRCForge_Avatar_Slime_{skill_version}.vsk"])
     required_name_set = set(required_names)
     missing: list[str] = []
     duplicate_entries: list[str] = []

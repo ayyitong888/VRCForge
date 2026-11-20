@@ -231,18 +231,9 @@ namespace VRCForge.Editor
                     warnings
                 };
 
-                if (preview)
-                {
-                    return VRCForgeToolResult.Completed(
-                        $"Preview: would add part '{partName}' (bool '{partParameterName}') gated on '{parameterName}' == {outfitValue} on '{descriptor.name}'.",
-                        new { ok = true, preview = true, plan });
-                }
-
-                // ---- APPLY -------------------------------------------------------
                 var rootMenu = addMenuToggle ? descriptor.expressionsMenu : null;
                 var changedParametersAsset = boolParamExists ? null : parametersAsset;
                 var saveScope = new WardrobeAssetSaveScope(fxController, changedParametersAsset, rootMenu);
-                var menusBefore = ExpressionWritePersistence.Capture(rootMenu);
                 var sceneTargets = setObjectsDefaultOff && !defaultOn
                     ? resolvedTargets.Select(item => item.gameObject).Where(item => item.activeSelf).ToArray()
                     : Array.Empty<GameObject>();
@@ -259,6 +250,16 @@ namespace VRCForge.Editor
                 }
                 WardrobeToggleReadback.RequireParameterType(fxController, parameterName, AnimatorControllerParameterType.Int);
                 WardrobeToggleReadback.RequireParameterType(fxController, partParameterName, AnimatorControllerParameterType.Bool);
+
+                if (preview)
+                {
+                    return VRCForgeToolResult.Completed(
+                        $"Preview: would add part '{partName}' (bool '{partParameterName}') gated on '{parameterName}' == {outfitValue} on '{descriptor.name}'.",
+                        new { ok = true, preview = true, plan });
+                }
+
+                // ---- APPLY -------------------------------------------------------
+                var menusBefore = ExpressionWritePersistence.Capture(rootMenu);
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Add outfit part '{partName}'");
                 mutationStarted = true;

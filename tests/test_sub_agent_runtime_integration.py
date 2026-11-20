@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from contextlib import nullcontext
@@ -424,6 +425,40 @@ def test_plain_text_reply_is_a_successful_terminal_analysis_without_tool_complet
     assert result["rawResult"]["task"]["status"] == "planning"
     assert result["ok"] is True
     assert result["status"] == "completed"
+
+
+def test_package_child_continues_owner_scoped_source_and_delivers_latest_inventory(tmp_path, monkeypatch):
+    from outfit_package_inspector import ArchiveInspectionIndex
+    from tests.test_outfit_package_inspector import make_unitypackage
+
+    source = tmp_path / "materials.unitypackage"
+    make_unitypackage(source)
+    tool = "vrcforge_inspect_outfit_package"
+    initial = {"packagePath": str(source), "maxEntries": 1}
+
+    def follow(request):
+        message = next(row for row in request["messages"] if row.get("tool_call_id") == "scan")
+        cursor = re.search(r"archive_[a-f0-9]{32}_1", message["content"]).group()
+        return call("page", tool, {"archiveCursor": cursor})
+
+    gateway, _, _ = _child_gateway(tmp_path / "gateway", [call("scan", tool, initial), follow, _finish])
+    monkeypatch.setattr(server, "AGENT_GATEWAY", gateway)
+    monkeypatch.setattr(server.runtime_paths, "USER_DATA_DIR", tmp_path / "profile")
+    gateway.register_tool(tool, "When to use: inspect the package. When NOT to use: import.",
+                          "read/debug", server.WARDROBE_OUTFIT_WORKFLOWS.inspect_outfit_package)
+    result = run_outfit_package_inspection(gateway, {
+        **initial, "roleId": "outfit_package_inspection", "task": "Count all the materials.",
+        "childSessionId": "child", "parentSessionId": "parent", "_taskSeed": {"turnId": "linked"},
+        "model": "fixture", "maxSteps": 4, "projectPath": str(tmp_path), "tools": [tool],
+        "_generalReadRoots": (str(tmp_path),),
+    }, threading.Event())
+    assert result["ok"]
+    assert [step["result"]["sourceRead"]["status"] for step in result["rawResult"]["steps"]] == ["partial", "complete"]
+    assert result["plannerEvidence"]["textureCount"] == 1
+    database = tmp_path / "profile" / "archive-inspections.sqlite3"
+    parent = ArchiveInspectionIndex(database, "runtime:parent")
+    assert result["plannerEvidence"]["sourceRead"] == parent.completed(source)["sourceRead"]
+    assert ArchiveInspectionIndex(database, "runtime:other").completed(source) is None
 
 
 def test_child_history_system_prompt_and_model_are_bound_without_parent_history(tmp_path):

@@ -1198,20 +1198,22 @@ export default function App() {
     : undefined, [runtimeConnected, agentProgress, displayChat, runtimeRuns, selectedForegroundTurn?.clientTurnId]);
   const selectedCompaction = compacting && activeChat?.compaction?.status === "compacting";
   const sending = Boolean(selectedForegroundTurn || selectedCompaction || activeRuntimeCancelTarget);
-  const inputPrediction = useChatInputPrediction(
+  const inputPrediction = useChatInputPrediction({
     endpoint,
-    chatInputPredictionOwner(endpoint, activeChatId, activeChat?.sessionId || "", providerSnapshot.provider, providerSnapshot.model),
-    inputPredictionEnabled && activeView === "chat" && runtimeConnected && providerConfigured
-      && Boolean(activeChat?.sessionId) && !activeChatPending && !sending && !visibleQueued.length
+    owner: chatInputPredictionOwner(endpoint, activeChatId, activeChat?.sessionId || ""),
+    provider: providerSnapshot.provider,
+    model: providerSnapshot.model,
+    eligible: inputPredictionEnabled && activeView === "chat" && runtimeConnected && providerConfigured
+      && Boolean(activeChat?.sessionId) && !visibleQueued.length
       && !attachments.length && !attachmentsLoading && !pendingReplyQuestionId && !editingMessage
-      && !pendingApprovalItems.length && !hasUnresolvedRuntimeState(activeChatId, activeChat?.sessionId || ""),
-    Boolean(input),
-  );
+      && !pendingApprovalItems.length && !scopedAgentQuestions.some((question) => question.status === "pending"),
+    busy: Boolean(activeChatPending || sending || hasUnresolvedRuntimeState(activeChatId, activeChat?.sessionId || "")),
+    hasDraft: Boolean(input),
+  });
   onPredictionResumeRef.current = (event, chatId) => {
     if (!inputPredictionEnabled || activeView !== "chat" || activeChatId !== chatId) return;
-    const { provider, model } = providerSnapshot;
     void inputPrediction.offerAfterResume(event, {
-      chatId, provider, model, getChatById,
+      chatId, getChatById,
       refreshRuntime: () => Promise.all([refresh(endpoint), refreshRuntimeRuns(false, endpoint)]),
     }).catch(() => undefined);
   };
@@ -3255,6 +3257,7 @@ export default function App() {
       updateChat(ownerChatId, (chat) => touchChat({
         ...chat,
         title: chat.title || directive.title,
+        sessionId: chat.sessionId || `session-${ownerChatId}`,
       }));
       await persistChatsNow();
       const ownerChat = getChatById(ownerChatId);
@@ -3262,7 +3265,7 @@ export default function App() {
         title: directive.title,
         wakeAt: directive.wakeAt,
         wakeEveryMinutes: directive.wakeEveryMinutes,
-        sessionId: ownerChat?.sessionId || sessionId || undefined,
+        sessionId: ownerChat?.sessionId,
         chatId: ownerChatId,
         projectPath: ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
         projectRoot: ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
@@ -3502,13 +3505,11 @@ export default function App() {
             if (chat?.sessionId !== sessionId
               || latestConversationItemId(chat.items, (item) => item.type === "agent") !== agentItemId) return;
             inputPrediction.offer({
-              owner: chatInputPredictionOwner(endpoint, ownerChatId, sessionId, turn.provider, turn.model),
+              owner: chatInputPredictionOwner(endpoint, ownerChatId, sessionId),
               turnId: agentItemId,
               context: {
                 recent_user_messages: recentPredictionInputs(chat.items, `user-${turn.id}`, composerMessage),
                 assistant_tail: Array.from(reply).slice(-2000).join(""),
-                provider: turn.provider,
-                model: turn.model,
               },
             }, predictionGeneration);
           }

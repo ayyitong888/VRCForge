@@ -148,7 +148,11 @@ class AgentGoalService:
         if not chat_id or not session_id:
             return ""
         goal = self._store.current(chat_id=chat_id, session_id=session_id, project_root=project_root)
-        return str(goal["goalId"]) if goal and goal.get("status") == "active" and goal.get("acceptanceChecks") else ""
+        if (goal and goal.get("status") == "active" and goal.get("acceptanceChecks")
+                and goal.get("sessionId") == session_id
+                and self._store_ports.normalize_path(goal.get("projectRoot") or "") == self._store_ports.normalize_path(project_root)):
+            return str(goal["goalId"])
+        return ""
 
     def get_current_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         raw = params or {}
@@ -195,6 +199,8 @@ class AgentGoalService:
             "blockedAttempts": attempts,
             "blockedThreshold": 3,
             "summary": (
+                "Acceptance checks registered. Run the checks to collect their receipts."
+                if raw.get("status") == "register_acceptance" else
                 f"Goal completed: {goal.get('title') or goal.get('goalId')}"
                 if str(goal.get("status") or "") == "completed"
                 else f"Blocked evidence recorded ({attempts}/3)."

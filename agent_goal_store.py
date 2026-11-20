@@ -566,8 +566,10 @@ class AgentGoalStore:
         chat_id = str(params.get("chatId") or params.get("chat_id") or "").strip()
         session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
         source_message_id = str(params.get("sourceMessageId") or "").strip() if bind_acceptance else ""
-        acceptance: dict[str, Any] = {}
-        if bind_acceptance and (source_message_id or "acceptanceChecks" in params):
+        if source_message_id and not (chat_id and session_id):
+            raise AgentGoalStoreError("The original user message must belong to the Goal's owning chat and session.")
+        acceptance: dict[str, Any] = {"sourceMessageId": source_message_id} if source_message_id else {}
+        if bind_acceptance and "acceptanceChecks" in params:
             if not (chat_id and session_id and source_message_id):
                 raise AgentGoalStoreError("Goal acceptance requires its owning chat, session and original user message ID.")
             try:
@@ -636,7 +638,7 @@ class AgentGoalStore:
         with self._lock:
             if self.current(chat_id=chat_id, session_id=session_id, project_root=project_root) is not None:
                 raise AgentGoalStoreError("An unfinished goal already exists for this conversation.", 409)
-            return self.create({**params, "createdBy": "agent_tool"})
+            return self.create({**params, "createdBy": "agent_tool"}, bind_acceptance=True)
 
     @staticmethod
     def _accepted(goal: dict[str, Any]) -> bool:
@@ -660,13 +662,21 @@ class AgentGoalStore:
             ):
                 return
             previous = goal.get("acceptanceReceipts") or {}
-            receipts = {**previous, **{
-                str(index): receipt_id for index, check in enumerate(goal["acceptanceChecks"])
-                if str(index) not in previous and goal_acceptance_receipt(check, receipt)
-            }}
-            if receipts != previous:
+            receipts = dict(previous)
+            previous_pages = goal.get("acceptancePages") or {}
+            pages = dict(previous_pages)
+            for index, check in enumerate(goal["acceptanceChecks"]):
+                key = str(index)
+                if key in receipts:
+                    continue
+                coverage = {"0": pages[key]} if key in pages else {}
+                if goal_acceptance_receipt(check, receipt, page_coverage=coverage):
+                    receipts[key] = receipt_id
+                if coverage:
+                    pages[key] = coverage["0"]
+            if receipts != previous or pages != previous_pages:
                 self._append({"event": "goal_acceptance_observed", "goalId": goal_id,
-                              "acceptanceReceipts": receipts})
+                              "acceptanceReceipts": receipts, "acceptancePages": pages})
 
     def handoff_acceptances(self, *, session_id: str, project_root: str) -> list[dict[str, Any]]:
         if not session_id:
@@ -700,18 +710,44 @@ class AgentGoalStore:
         goal_id = str(goal_id or "").strip()
         status = str(params.get("status") or "").strip().lower()
         reason = _summarize(params.get("reason") or params.get("evidence"), 1000)
-        if status not in {"complete", "blocked"}:
-            raise AgentGoalStoreError("Agent Goal status must be complete or blocked.")
-        if not reason:
+        if status not in {"complete", "blocked", "register_acceptance"}:
+            raise AgentGoalStoreError("Agent Goal status must be complete or blocked, or register_acceptance.")
+        if not reason and status != "register_acceptance":
             raise AgentGoalStoreError("Agent Goal updates require a concise evidence or blocking reason.")
         with self._lock:
             current = self.project_goals().get(goal_id)
             if current is None:
                 raise AgentGoalStoreError(f"Goal was not found: {goal_id}", 404)
-            self._assert_owner(current, params)
+            # The desktop slash command used to persist the chat before its first
+            # runtime session existed. Bind that empty session once, under this lock.
+            bind_session = status == "register_acceptance" and not current.get("sessionId")
+            owner = {**current, "sessionId": params.get("sessionId")} if bind_session else current
+            self._assert_owner(owner, params)
             if str(current.get("status") or "") != "active":
                 raise AgentGoalStoreError("Only an active goal can be completed or blocked by the Agent.", 409)
+            if status == "register_acceptance":
+                if (params.get("goalId") != goal_id or not current.get("chatId") or not owner.get("sessionId")
+                        or params.get("chatId") != current["chatId"] or params.get("sessionId") != owner["sessionId"]
+                        or self._normalize_path(params.get("projectRoot") or "") != self._normalize_path(current.get("projectRoot") or "")):
+                    raise AgentGoalStoreError("Register acceptance for the active goalId in its owning chat, session and project.", 409)
+                try:
+                    checks = goal_acceptance_checks(params.get("acceptanceChecks"))
+                except ValueError as exc:
+                    raise AgentGoalStoreError(str(exc)) from exc
+                if current.get("acceptanceChecks"):
+                    if current["acceptanceChecks"] != checks:
+                        raise AgentGoalStoreError("This Goal already has registered acceptance checks.", 409)
+                else:
+                    event = {"event": "goal_acceptance_registered", "goalId": goal_id,
+                             "acceptanceChecks": checks, "acceptanceReceipts": {}}
+                    if bind_session:
+                        event.update(event="goal_owner_bound", chatId=current["chatId"],
+                                     sessionId=owner["sessionId"], projectRoot=current.get("projectRoot") or "")
+                    self._append(event)
+                return self.with_live_elapsed(self.project_goals()[goal_id])
             if status == "complete":
+                if not (current.get("acceptanceChecks") or current.get("wakeAt") or current.get("wakeEveryMinutes")):
+                    raise AgentGoalStoreError("Register acceptance receipts first with update_goal(status=register_acceptance, goalId, acceptanceChecks), then run the checks.", 409)
                 if not self._accepted(current) and not (current.get("wakeAt") or current.get("wakeEveryMinutes")):
                     raise AgentGoalStoreError("The Goal still needs its registered acceptance receipts.", 409)
                 return self.update(

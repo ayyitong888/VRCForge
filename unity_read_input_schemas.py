@@ -179,8 +179,8 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object", "additionalProperties": False, "anyOf": [{"required": ["packagePath"]}, {"required": ["archiveCursor"]}],
         "properties": {
             "packagePath": {"type": "string", "minLength": 1, "description": "Exact existing UnityPackage, Booth ZIP, or loose outfit folder path. ZIP inspection lists outer entries and, for bounded nested UnityPackages, reads only UnityPackage pathname metadata; it never extracts assets or reads asset payloads."},
-            "maxEntries": {"type": "integer", "minimum": 1, "maximum": 50000, "default": 5000},
-            "archiveCursor": {"type": "string", "pattern": "^archive_[0-9a-f]{32}_[1-9][0-9]*$", "description": "Exact owner-scoped source cursor from sourceRead.nextRequest. This continues archive inspection, separate from paging a retained tool result."},
+            "maxEntries": {"type": "integer", "minimum": 1, "maximum": 50000, "default": 5000, "description": "Initial archive inventory page or folder scan limit. Resume a partial archive using sourceRead.nextRequest."},
+            "archiveCursor": {"type": "string", "pattern": "^archive_[0-9a-f]{32}_[1-9][0-9]*$", "description": "Use the exact sourceRead.nextRequest from this session. Each page contains the cumulative inventory. Completed inventory is reused when planning the same unchanged package."},
         },
     },
     "vrcforge_preview_material_variant_flatten": MATERIAL_VARIANT_FLATTEN_PUBLIC_INPUT_SCHEMA,
