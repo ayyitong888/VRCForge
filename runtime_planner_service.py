@@ -190,7 +190,8 @@ RUNTIME_SCOPE_GENERAL_INSTRUCTION = (
     "Choose a work split that fits the task. Work directly or use delegate_subagent for parallel work or a second opinion. "
     "Use bounded read-only list/read/find/search tools for filesystem evidence and Shell for commands, scripts, or processes. "
     "A directory listing locates evidence; read relevant contents to explain a mechanism. "
-    "Unity operations require a bound project conversation."
+    "Host project setup tools can inspect local templates, plan creation, and create, register or select a project here. "
+    "Live Unity Editor and avatar operations require a bound project conversation."
 )
 RUNTIME_WORKSPACE_TOOL_ROUTING = (
     "For public web research, use web_search to find sources and web_fetch for supplied URLs. "

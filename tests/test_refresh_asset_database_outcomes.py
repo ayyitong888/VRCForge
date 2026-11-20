@@ -52,8 +52,11 @@ def test_refresh_done_with_clean_compile_is_complete() -> None:
     assert outcome["verification"]["state"] == "passed"
 
 
-def test_refresh_running_without_after_compile_stays_pending() -> None:
-    result = dashboard_server.normalize_refresh_asset_database_outcome(_result("running", None))
+@pytest.mark.parametrize("job_state", ["queued", "running", "scheduled"])
+def test_refresh_without_after_compile_keeps_observed_pending_phase(job_state) -> None:
+    result = dashboard_server.normalize_refresh_asset_database_outcome(_result(job_state, None))
+    assert result["lastKnownStatus"] == job_state
+    assert dashboard_server.normalize_refresh_asset_database_outcome(result)["lastKnownStatus"] == job_state
     assert result["ok"] is False
     assert result["status"] == "pending"
     assert result["operationStatus"] == "pending"

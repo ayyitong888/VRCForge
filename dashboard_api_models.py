@@ -1184,6 +1184,7 @@ class PackageInstallPlanRequest(BaseModel):
     project_path: str = Field(default="", alias="projectPath")
     package_id: str = Field(default="", alias="packageId")
     repository: str = Field(default="", alias="repository")
+    vpm_repository: str = Field(default="", alias="vpmRepository")
     preferred_manager: str = Field(default="", alias="preferredManager")
     allow_agent_managed_download: bool = Field(default=False, alias="allowAgentManagedDownload")
     include_prerelease: bool = Field(default=False, alias="includePrerelease")

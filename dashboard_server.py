@@ -17993,11 +17993,16 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                 "expectedBlock": expected_block,
                 "commitState": "not_started",
             }
-            if exposure_layer != RUNTIME_PLANNER_EXECUTION_LAYER and len(requested_tools) == 1:
-                routable_catalog = _RuntimePlannerCatalog().read(
-                    exposure_layer,
-                    project_context_active=params.get("projectContextActive") is True,
-                )
+            routable_catalog = _RuntimePlannerCatalog().read(
+                exposure_layer,
+                project_context_active=params.get("projectContextActive") is True,
+            )
+            activation_required = {
+                tool.name: tool.block for tool in routable_catalog.routable_tools
+                if tool.name in invalid and tool.requires_user_activation
+                and not routable_catalog.computer_use_model_invocable
+            }
+            if exposure_layer != RUNTIME_PLANNER_EXECUTION_LAYER and len(requested_tools) == 1 and not activation_required:
                 hidden_write = next(
                     (
                         tool for tool in routable_catalog.routable_tools
@@ -18047,6 +18052,18 @@ def load_internal_tool_block(params: dict[str, Any]) -> dict[str, Any]:
                 response["nextActions"] = [
                     "Submit each loadCalls entry separately with its exact block and tool names."
                 ]
+            if activation_required:
+                activation_reason = AGENT_GATEWAY.desktop.computer_use_activation_reason()
+                response["activationRequiredTools"] = sorted(activation_required)
+                response["activationReason"] = activation_reason
+                if set(invalid) == activation_required.keys():
+                    response["errorCode"] = "computer_use_activation_required"
+                    response["error"] = activation_reason
+                    if len(invalid) == 1:
+                        response["expectedBlock"] = activation_required[invalid_name]
+                response.setdefault("nextActions", []).append(
+                    "Once Computer Use is enabled, the user can start a Desktop Rescue turn with + or /desktop."
+                )
             return response
     existing = AGENT_GATEWAY.runtime_sessions.internal_tool_selections(session_id)
     if block in existing and (existing[block] is None or set(requested_tools) <= set(existing[block])):
@@ -18120,6 +18137,7 @@ class _RuntimePlannerCatalog:
     ) -> PlannerCatalogSnapshot:
         layer = normalize_exposure_layer(exposure_layer)
         gateway_config = AGENT_GATEWAY.ensure_config()
+        computer_use_model_invocable = AGENT_GATEWAY.desktop.computer_use_model_invocable(gateway_config)
         profile = (
             CapabilityProfile.UNITY_PROJECT
             if project_context_active
@@ -18139,6 +18157,7 @@ class _RuntimePlannerCatalog:
             for projection in projections
             for tool in [AGENT_GATEWAY._tools.get(projection.internal_name)]
             if tool is not None
+            if not tool.requires_user_activation or computer_use_model_invocable
             if AGENT_GATEWAY._tool_runtime_visible(tool, gateway_config, layer)
             and _runtime_planner_provider_capability_visible(tool)
         )
@@ -18198,9 +18217,7 @@ class _RuntimePlannerCatalog:
             visible_tools=visible_tools,
             routable_tools=routable_tools,
             skills=skills,
-            computer_use_model_invocable=AGENT_GATEWAY.desktop.computer_use_model_invocable(
-                gateway_config
-            ),
+            computer_use_model_invocable=computer_use_model_invocable,
         )
 
 
@@ -28002,6 +28019,8 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
     normalized.setdefault("commitStateKnown", normalized["commitState"] != "unknown")
 
     if raw_status in {"queued", "running", "pending", "scheduled"}:
+        if raw_status != "pending" or not normalized.get("lastKnownStatus"):
+            normalized["lastKnownStatus"] = raw_status
         normalized.update(
             {
                 "ok": False,

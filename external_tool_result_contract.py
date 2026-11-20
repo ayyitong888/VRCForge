@@ -17,10 +17,14 @@ OPERATION_STATUSES = (
     "rolled_back", "failed", "unknown", "user_confirmation_required", "preview", "applied",
 )
 INCOMPLETE_OPERATION_STATES = frozenset({"partial", "interrupted", "cancelled", "rolled_back", "unknown"})
+PAGE_PROGRESS_FIELDS = (
+    "hasMore", "truncated", "nextCursor", "remainingCount", "nextRequest",
+    "offset", "nextOffset", "totalCount", "textOffset", "nextTextOffset", "totalChars", "snapshotDigest",
+)
 OPERATION_PROGRESS_FIELDS = (
     "operationStatus", "completionKnown", "targetEffectVerified", "readbackState",
     "persistenceState", "executionId", "checkpointId", "jobId", "jobStatus",
-    "hasMore", "nextCursor", "remainingCount", "nextRequest",
+    "operationError", *PAGE_PROGRESS_FIELDS,
 )
 
 

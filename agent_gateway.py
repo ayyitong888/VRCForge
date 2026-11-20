@@ -135,6 +135,7 @@ from agent_task_loop import (
     canonical_action_id,
     is_shell_process_observation,
     merge_provider_usage,
+    pending_question_plan,
     prepare_approval_task_continuation,
     prepare_shell_task_continuation,
     prepare_sub_agent_task_continuation,
@@ -210,7 +211,7 @@ from mcp_tool_descriptor import (
 )
 from mcp_resource_registry import McpResourceError, McpResourceRegistry, scoped_base_uri
 from mcp_prompt_registry import McpPromptRegistry
-from operation_context import bind_operation_context
+from operation_context import bind_operation_context, public_tool_receipt
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -4635,9 +4636,10 @@ class AgentGateway:
             "expiresAt": record["expiresAt"],
             "decisionSurface": "vrcforge_app",
         }
-        return {
+        return public_tool_receipt({
             "ok": True,
             "status": "user_confirmation_required",
+            "operationId": record["operationId"],
             "tool": record["targetTool"],
             **(
                 {"executionTargetDigest": record["executionTargetDigest"]}
@@ -4661,6 +4663,10 @@ class AgentGateway:
             "mutationStarted": False,
             "committed": False,
             "commitState": "not_started",
+            "persistenceState": "not_started",
+            "readbackState": "not_started",
+            "cleanupState": "not_applicable",
+            "nextAction": "Wait for the user's decision in the VRCForge App. Then resubmit the original arguments with arguments.confirmation.",
             "message": (
                 (checkpoint_warning + " " if checkpoint_warning else "")
                 + "No write has started. Ask the user to review this request under Needs Your Confirmation "
@@ -4668,7 +4674,7 @@ class AgentGateway:
                 "arguments unchanged and the returned object at arguments.confirmation. "
                 "A decision sent by the MCP client cannot authorize the write."
             ),
-        }
+        }, write=True, tool=str(record["targetTool"]))
 
     def _confirm_external_mcp_write(
         self,
@@ -6801,8 +6807,13 @@ class AgentGateway:
             )
             if continuation.get("source") == "question_answered" else []
         )
+        def read_continuation_allowed(tool_name: str) -> bool:
+            tool = self._tools.get(tool_name)
+            return bool(tool and not tool.write and not tool.advanced and not tool.requires_user_activation
+                        and tool_name not in self._write_handlers)
+
         def assess_task_terminal(plan: Mapping[str, Any]) -> dict[str, Any]:
-            gated = task_loop.gate_terminal(plan, require_completion_claim=bool(
+            gated = task_loop.gate_terminal(plan, read_continuation_allowed=read_continuation_allowed, require_completion_claim=bool(
                 prior_question_answers and any(
                     step.get("actionId") and not step.get("historical") for step in steps
                 )
@@ -7537,6 +7548,7 @@ class AgentGateway:
         runtime_compaction_attempted = False
         planner_argument_failures = 0
         completion_claim_correction_attempted = False
+        offered_continuation_requests: set[str] = set()
         visual_correction_audits: list[Mapping[str, Any]] = []
         visual_correction_started_at: float | None = None
         unresolved_planner_argument_failure: dict[str, Any] | None = None
@@ -8178,11 +8190,13 @@ class AgentGateway:
             )
             completion_gate = ensure_dict(assess_task_terminal(plan).get("completionGate")) if final_candidate else {}
             poll_target = completion_gate.get("pollTarget") if completion_gate.get("reason") == "tool_poll_required" else None
+            continuation_request = completion_gate.get("nextRequest") if completion_gate.get("reason") == "tool_continuation_required" else None
+            continuation_key = json.dumps(continuation_request, sort_keys=True) if continuation_request else ""
             uncovered_requirements = completion_gate.get("uncoveredRequirementIds")
             needs_completion_claim_correction = bool(
                 final_candidate
-                and not completion_claim_correction_attempted
-                and (poll_target or uncovered_requirements or (
+                and (continuation_key not in offered_continuation_requests if continuation_key else not completion_claim_correction_attempted)
+                and (poll_target or continuation_request or uncovered_requirements or (
                     not (ensure_dict(plan.get("completionClaim")).get("satisfied") is False and planner_reply)
                     and task_loop.completed_action_ids() and completion_gate.get("reason") in {
                     "completion_claim_unbound",
@@ -8201,7 +8215,7 @@ class AgentGateway:
                     status=("progress" if message_phase == "commentary" else
                             "failed" if message_phase == "final_answer" and honest_failed_final else
                             "completion_unverified" if message_phase == "final_answer" and (
-                                needs_completion_claim_correction or poll_target or uncovered_requirements
+                                needs_completion_claim_correction or poll_target or continuation_request or uncovered_requirements
                             ) else "done"),
                     phase=message_phase, message_id=public_message["id"],
                 )
@@ -8309,6 +8323,12 @@ class AgentGateway:
                         "Poll the existing operation with its status tool. Do not restart it. Target: "
                         + json.dumps(poll_target, ensure_ascii=False)
                     )
+                elif continuation_request:
+                    correction_summary = (
+                        "The last tool returned " + str(completion_gate["status"]) + ". Continue from its exact "
+                        "receipt or page before claiming completion. Do not replay an unconfirmed write. "
+                        + json.dumps(continuation_request, ensure_ascii=False)
+                    )
                 elif uncovered_requirements:
                     correction_summary = (
                         "The whole task cannot be marked complete. Add an actionable TODO with requirementIds "
@@ -8326,13 +8346,13 @@ class AgentGateway:
                         "outcome": {
                             "status": "needs_correction",
                             "summary": correction_summary,
-                            "nextAction": {"kind": "poll", "target": poll_target} if poll_target else {
+                            "nextAction": continuation_request or ({"kind": "poll", "target": poll_target} if poll_target else {
                                 "kind": "reply_completion_claim",
                                 "requiredEvidenceActionIds": completed_action_ids,
                                 **({"uncoveredRequirementIds": uncovered_requirements,
                                     "uncoveredRequirements": completion_gate["uncoveredRequirements"]}
                                    if uncovered_requirements else {}),
-                            },
+                            }),
                             "verification": {
                                 "state": "not_required",
                                 "checks": [],
@@ -8342,7 +8362,10 @@ class AgentGateway:
                 )
                 if native_binding and not plan.get("nativeCallIds"):
                     native_turn.append_hidden("Runtime completion feedback (data): " + correction_summary)
-                completion_claim_correction_attempted = True
+                if continuation_key:
+                    offered_continuation_requests.add(continuation_key)
+                else:
+                    completion_claim_correction_attempted = True
                 continue
             else:
                 # 没有工具动作（终止答复 / 未连接 / 让用户选模型）→ 结束本轮。
@@ -9909,17 +9932,7 @@ class AgentGateway:
         if pending_question_boundary:
             question = ensure_dict(ensure_dict(pending_question.get("result")).get("question"))
             prompt = str(question.get("question") or "").strip()
-            top_plan = {
-                **top_plan,
-                "summary": prompt or "The tool action needs user input before it can continue.",
-                "reply": prompt or "The tool action needs user input before it can continue.",
-                "continueLoop": False,
-                "nextStep": "needs_user_action",
-                "completionGate": {
-                    "status": "needs_user_action", "reason": "question_pending",
-                    **({"questionId": question["questionId"]} if question.get("questionId") else {}),
-                },
-            }
+            top_plan = pending_question_plan(top_plan, prompt, str(question.get("questionId") or ""))
         if pending_question:
             self.questions.refresh_pending_runtime_tasks(session_id=session_id, client_turn_id=client_turn_id,
                 task_seed=runtime_approval_seed(
@@ -12038,7 +12051,8 @@ def create_agent_mcp_app(
         )
         if on_pending_approval and (
             (result.get("status") == "user_confirmation_required" and "confirmation" not in arguments)
-            or ("confirmation" in arguments and result.get("operationId"))
+            or ("confirmation" in arguments and result.get("operationId")
+                and result.get("status") != "user_confirmation_required")
         ):
             on_pending_approval(result)
         await asyncio.to_thread(

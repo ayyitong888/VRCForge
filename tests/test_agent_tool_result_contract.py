@@ -764,3 +764,38 @@ def test_acknowledgement_and_failed_write_keep_the_extent_of_the_effect():
     assert failed["operationStatus"] == failed["outcome"]["status"] == "failed"
     assert failed["outcome"]["commitState"] == "partial"
     assert failed["outcome"]["summary"] == "Second write failed."
+
+
+def test_failed_check_and_unconfirmed_operation_retain_separate_causes():
+    from operation_context import public_tool_receipt
+
+    receipt = {
+        "ok": False, "status": "unknown", "completionKnown": False, "job_id": "refresh-id",
+        "consoleVerification": {"status": "failed", "code": "unity_console_regression",
+                                "summary": "Unity reported new warnings.", "newErrorCount": 0, "newWarningCount": 39},
+        "error": {"code": "package_resolution_unverified", "message": "Package registration is unverified."},
+    }
+    for raw in (receipt, {"ok": True, "status": "executed", "result": receipt}):
+        native = normalize_agent_tool_result(raw, fallback_summary="refresh", write=True)
+        public = public_tool_receipt(raw, write=True, tool="refresh")["outcome"]
+        for outcome in (native, public, _bounded_outcome(native)):
+            assert (outcome["status"], outcome["error"]["code"]) == ("failed", "unity_console_regression")
+            assert (outcome["operationStatus"], outcome["operationError"]["code"]) == ("unknown", "package_resolution_unverified")
+            assert outcome["summary"] == "Unity reported new warnings. Package registration is unverified."
+            assert outcome["verification"] == {"state": "failed", "checks": [
+                {"kind": "console", "state": "failed", "newErrorCount": 0, "newWarningCount": 39}]}
+            assert not outcome["targetEffectVerified"] and outcome["jobId"] == "refresh-id"
+
+
+def test_paged_read_retains_cursor_and_snapshot_across_result_carriers():
+    from operation_context import public_tool_receipt
+
+    page = {"textOffset": 0, "nextTextOffset": 2000, "totalChars": 5111, "hasMore": True,
+            "snapshotDigest": "fixture", "truncated": True}
+    for raw in (page, {"ok": True, "result": page}):
+        outcome = public_tool_receipt(raw, write=False, tool="read")["outcome"]
+        bounded = _bounded_outcome(outcome)
+        assert bounded["status"] == "ok" and bounded["readbackState"] == "partial"
+        assert {key: bounded[key] for key in page} == page
+    diagnostic = public_tool_receipt({"ok": False, "status": "failed", "errorDetails": page}, write=False, tool="read")
+    assert "hasMore" not in diagnostic["outcome"]

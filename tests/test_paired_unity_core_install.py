@@ -102,7 +102,10 @@ def test_native_avatar_task_can_bootstrap_core_without_a_unity_connection(monkey
     install_name = "unity_install_unity_core"
 
     def load(request):
-        assert "even when the user only asked for ordinary avatar work" in request["instructions"]
+        # The production guidance names both host-side operations and their
+        # common leaf; its wording can change without changing the workflow.
+        for route in (status_name, install_name, "project_environment/assets_packages"):
+            assert route in request["instructions"]
         return call("load", "load_internal_tool_block", {
             "block": "project_environment/assets_packages", "tools": [status_name, install_name],
         })

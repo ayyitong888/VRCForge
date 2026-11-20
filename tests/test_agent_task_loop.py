@@ -1786,6 +1786,25 @@ def test_current_question_wait_precedes_older_failed_action_without_erasing_it()
     assert any(item["status"] == "failed" for item in actions)
     assert any(item["status"] == "needs_user_action" for item in actions)
 
+
+def test_inconclusive_write_points_to_receipt_read_and_does_not_block_later_work():
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    loop = AgentTaskLoop("Perform and inspect the write")
+    request = {"tool": "read_receipt", "arguments": {"executionId": "existing-write"}}
+    raw = {"operationStatus": "unknown", "completionKnown": False, "nextAction": request}
+    loop.record_action(kind="write", tool="update", arguments={}, raw_result=raw,
+                       outcome=normalize_agent_tool_result(raw, write=True, fallback_summary="Update"))
+    plan = {"planner": "llm", "nextStep": "done", "reply": "done"}
+    gated = loop.gate_terminal(plan)
+    assert gated["completionGate"]["nextRequest"] == request
+    assert gated["completionGate"]["status"] == "unknown"
+    assert gated["reply"] != "done"
+    final = {"ok": True, "readbackVerified": True, "executionId": "existing-write", "status": "completed"}
+    loop.record_action(kind="skill", tool="read_receipt", arguments=request["arguments"], raw_result=final,
+                       outcome=normalize_agent_tool_result(final, write=False, fallback_summary="Read receipt"))
+    assert loop.gate_terminal(plan)["nextStep"] == "done"
+
 def test_checkpoint_from_applied_write_is_inline_after_approval_continuation() -> None:
     from runtime_planner_service import RuntimePlannerService
 

@@ -36,6 +36,7 @@ from unity_mcp_tool_contract import (
     PREVIOUS_CORE_TOOL_NAMES,
     PRODUCT_VERSION,
     READ_ONLY_TOOL_NAMES,
+    SCAN_SCOPE_TOOL_NAMES,
     TOOL_CONTRACT_VERSION,
 )
 
@@ -209,7 +210,7 @@ def _write_line(connection: socket.socket, payload: dict) -> None:
 
 
 def _tool_entry(name: str) -> dict:
-    is_read_only = name in READ_ONLY_TOOL_NAMES
+    is_read_only = name in READ_ONLY_TOOL_NAMES or name in SCAN_SCOPE_TOOL_NAMES
     return {
         "name": name,
         "description": (
@@ -592,12 +593,18 @@ def test_previous_core_contract_uses_protocol_compatibility_without_a_second_ver
         server.close()
 
 
-def test_core_190_catalogue_replays_the_actual_previous_contract(core_files):
+@pytest.mark.parametrize("exposure_layer", ["execution", "planning"])
+@pytest.mark.parametrize("truncate", [False, True])
+def test_core_190_catalogue_replays_the_actual_previous_contract(core_files, exposure_layer, truncate):
     fixture = json.loads(
         (Path(__file__).parent / "fixtures" / "core_contract_190.json").read_text(encoding="utf-8")
     )
     names = fixture["toolNames"]
     version = fixture["toolContractVersion"]
+    # The archived list contains the publicly exposed tools. The Editor's
+    # descriptor counts the two backend scan-scope tools as well.
+    advertised = sorted([*names, *SCAN_SCOPE_TOOL_NAMES])
+    returned = advertised[1:] if truncate else advertised
 
     def handler(connection, seen):
         discover = _read_line(connection)
@@ -610,16 +617,23 @@ def test_core_190_catalogue_replays_the_actual_previous_contract(core_files):
         seen.append(request)
         _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {
             "jsonrpc": "2.0", "id": request["message"]["id"],
-            "result": {"resultType": "complete", "tools": [_tool_entry(name) for name in names]},
+            "result": {"resultType": "complete", "tools": [_tool_entry(name) for name in returned]},
         }})
 
     project, descriptor_path, descriptor = core_files
-    descriptor.update(toolCount=len(names), toolContractVersion=version)
+    descriptor.update(toolCount=len(advertised), toolContractVersion=version)
     server = FakeCore(handler)
     _write_descriptor(descriptor_path, descriptor, server.port)
     try:
-        tools = UnityMcpCoreClient(project).list_tools(exposure_layer="execution")
-        assert [tool["name"] for tool in tools] == names
+        client = UnityMcpCoreClient(project)
+        if truncate:
+            with pytest.raises(UnityMcpCoreError, match=f"declared {len(advertised)} tools but returned {len(returned)}"):
+                client.list_tools(exposure_layer=exposure_layer)
+        else:
+            tools = client.list_tools(exposure_layer=exposure_layer)
+            assert [tool["name"] for tool in tools] == [
+                name for name in names if exposure_layer == "execution" or name in PLANNING_TOOL_NAMES
+            ]
     finally:
         server.close()
 

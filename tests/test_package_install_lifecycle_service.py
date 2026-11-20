@@ -350,21 +350,18 @@ def test_preparer_rejects_reserved_repository_and_unavailable_prerelease(
             },
             None,
         )
-    with pytest.raises(AgentGatewayError, match="Repository changes") as repository_error:
-        preparer.prepare(
-            {
-                "projectPath": str(project),
-                "packageId": "com.example.package",
-                "repository": "https://example.invalid",
-            },
-            None,
-        )
-    assert repository_error.value.status_code == 403
-    with pytest.raises(RuntimeError, match="No non-yanked"):
-        preparer.prepare(
-            {"projectPath": str(project), "packageId": "com.example.package"},
-            None,
-        )
+    args = {"projectPath": str(project), "packageId": "com.example.package"}
+    for field in ("repository", "vpmRepository"):
+        with pytest.raises(AgentGatewayError, match=field) as repository_error:
+            preparer.prepare({**args, field: "https://example.invalid"}, None)
+        assert repository_error.value.status_code == 403
+        assert repository_error.value.cause_code == "vpm_repository_input_unsupported"
+        assert repository_error.value.external_error["mutationStarted"] is False
+        assert repository_error.value.external_error["committed"] is False
+    with pytest.raises(RuntimeError, match="includePrerelease=true"):
+        preparer.prepare(args, None)
+    prepared, _ = preparer.prepare({**args, "includePrerelease": True}, None)
+    assert prepared_evidence(prepared)["packageVersion"] == "1.2.3-beta.1"
 
 
 def test_installed_package_preparer_requires_runtime_incompatibility_evidence(

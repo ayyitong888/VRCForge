@@ -14,6 +14,7 @@ from typing import Any
 
 from external_tool_result_contract import (
     INCOMPLETE_OPERATION_STATES,
+    PAGE_PROGRESS_FIELDS,
     canonical_result_facts,
     is_gesture_manager_entry_pending,
     prioritize_result_sources,
@@ -34,6 +35,7 @@ _NEEDS_ACTION_STATUSES = frozenset(
         "needs_input",
         "needs_user_action",
         "pending_approval",
+        "user_confirmation_required",
         "waiting_for_answer",
         "waiting_for_approval",
     }
@@ -48,22 +50,21 @@ TERMINAL_JOB_STATUSES = _FAILED_STATUSES | _SUCCESSFUL_EXECUTION_STATUSES | {
     "done", "cancelled", "canceled", "expired", "interrupted", "not_found", "no_change", "not_started",
     "partial", "incomplete", "rolled_back",
 }
-_KNOWN_NESTED_KEYS = (
+_CARRIER_KEYS = (
     "structuredContent",
     "result",
     "rawResult",
     "entrypoint",
     "toolResult",
-    "errorDetails",
-    "consoleVerification",
 )
+_KNOWN_NESTED_KEYS = (*_CARRIER_KEYS, "errorDetails", "consoleVerification")
 
 
 def _status(value: Any) -> str:
     return str(value or "").strip().casefold().replace("-", "_")
 
 
-def _views(value: Any) -> list[Mapping[str, Any]]:
+def _views(value: Any, *, nested_keys: tuple[str, ...] = _KNOWN_NESTED_KEYS) -> list[Mapping[str, Any]]:
     if not isinstance(value, Mapping):
         return []
     pending: list[tuple[Mapping[str, Any], int]] = [(value, 0)]
@@ -78,7 +79,7 @@ def _views(value: Any) -> list[Mapping[str, Any]]:
         result.append(current)
         if depth >= 3:
             continue
-        for key in _KNOWN_NESTED_KEYS:
+        for key in nested_keys:
             nested = current.get(key)
             if isinstance(nested, Mapping):
                 pending.append((nested, depth + 1))
@@ -234,7 +235,7 @@ def _verification(
     *,
     write: bool,
 ) -> tuple[dict[str, Any], bool]:
-    checks: list[dict[str, str]] = []
+    checks: list[dict[str, Any]] = []
     needs_user_action = False
     explicit_state = ""
     visual_required = any(
@@ -255,6 +256,14 @@ def _verification(
         for view in views
     )
     for view in views:
+        console = view.get("consoleVerification")
+        if isinstance(console, Mapping) and _status(console.get("status")) in _FAILED_STATUSES:
+            check = {"kind": "console", "state": "failed"}
+            for key in ("newErrorCount", "newWarningCount"):
+                if type(console.get(key)) is int:
+                    check[key] = console[key]
+            if check not in checks:
+                checks.append(check)
         if view.get("readbackVerified") is True:
             check = {"kind": "readback", "state": "passed"}
             if check not in checks:
@@ -287,7 +296,9 @@ def _verification(
                 if check not in checks:
                     checks.append(check)
 
-    if needs_user_action:
+    if any(check["kind"] == "console" and check["state"] == "failed" for check in checks):
+        state = "failed"
+    elif needs_user_action:
         state = "needs_user_action"
     elif explicit_state in {"ok", "passed", "verified"} or checks:
         state = "passed"
@@ -546,6 +557,14 @@ def normalize_agent_tool_result(
     if failed_view is not None:
         status = "failed"
         failure_views = prioritize_result_sources([failed_view, *causal_views])
+        if reported_incomplete and isinstance(owner.get("error"), Mapping):
+            # An independently failed check can coexist with an unknown operation.
+            # Its cause belongs to that check; the operation's diagnostic is retained below.
+            failed_checks = [view for view in failure_views if view is not owner
+                             and _status(view.get("status")) in _FAILED_STATUSES
+                             and (view.get("code") or view.get("errorCode") or view.get("causeCode"))]
+            if failed_checks:
+                failure_views = failed_checks
         projected_error = _structured_error(failure_views)
         summary = _first_text(
             failure_views,
@@ -600,7 +619,10 @@ def normalize_agent_tool_result(
         status = "pending"
         summary = (
             "The command was invoked; inspect its actual result without repeating the dispatch."
-            if dispatch else "The job is still running; poll the existing job without starting it again."
+            if dispatch else (
+                f"Last reported job state: {pending_execution.get('lastKnownStatus') or pending_execution.get('status')}. "
+                "Poll the existing job for its result."
+            )
         )
         verification = {"state": "pending", "checks": []}
         error = None
@@ -713,9 +735,21 @@ def normalize_agent_tool_result(
     elif status == "needs_user_action" and needs_action and not verification_needs_action:
         operation = "user_confirmation_required"
     result["operationStatus"] = operation
-    for key in ("completionKnown", "lastKnownStatus", "hasMore", "nextCursor", "remainingCount", "nextRequest"):
+    for key in ("completionKnown", "lastKnownStatus", "nextRequest"):
         if key in owner:
             result[key] = _bounded_value(owner[key])
+    page = next((view for view in _views(value, nested_keys=_CARRIER_KEYS) if type(view.get("hasMore")) is bool
+                 or type(view.get("truncated")) is bool), None)
+    if page is not None:
+        for key in PAGE_PROGRESS_FIELDS:
+            if key in page:
+                result[key] = _bounded_value(page[key])
+        if not write and (page.get("hasMore") or page.get("truncated")):
+            result.setdefault("readbackState", "partial")
+    else:
+        for key in ("nextCursor", "remainingCount"):
+            if key in owner:
+                result[key] = _bounded_value(owner[key])
     if job := job_receipt(value):
         result["jobId"] = job.get("jobId") or job.get("job_id")
         result["jobStatus"] = job.get("lastKnownStatus") or job.get("status")
@@ -738,8 +772,12 @@ def normalize_agent_tool_result(
                 result[key] = identity
     if (execution_pending or reported_incomplete) and isinstance(owner.get("error"), Mapping):
         observation_error = _structured_error([owner])
-        result["summary"] = observation_error["summary"] or result["summary"]
-        result["error"] = error = observation_error
+        if status == "failed" and error and error["code"] != observation_error["code"]:
+            result["operationError"] = observation_error
+            result["summary"] = " ".join(filter(None, (result["summary"], observation_error["summary"])))[:600]
+        else:
+            result["summary"] = observation_error["summary"] or result["summary"]
+            result["error"] = error = observation_error
     if error is not None and isinstance(result.get("safeToRetry"), bool):
         error["retryable"] = result["safeToRetry"]
     if execution_pending:

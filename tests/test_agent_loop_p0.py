@@ -2506,6 +2506,51 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertNotIn("UNACCEPTED_DRAFT", repr(events))
         self.assertNotIn('"action":', repr(events))
 
+    def test_partial_file_read_resumes_each_exact_page_in_one_runtime_turn(self) -> None:
+        gateway = self.gateway
+        tool = "vrcforge_fixture_read_file_page"
+        path = Path(self.temp_dir.name) / "values.json"
+        path.write_text(json.dumps(list(range(43))), encoding="utf-8")
+        offsets = []
+        feedback = []
+
+        def read_page(args):
+            rows = json.loads(path.read_text(encoding="utf-8"))
+            offset = args["offset"]
+            offsets.append(offset)
+            end = min(offset + 20, len(rows))
+            receipt = {
+                "ok": True, "status": "completed", "items": rows[offset:end],
+                "hasMore": end < len(rows), "totalCount": len(rows), "remainingCount": len(rows) - end,
+            }
+            if receipt["hasMore"]:
+                receipt.update(status="partial", nextRequest={"tool": tool, "arguments": {"offset": end}})
+            return receipt
+
+        gateway.register_tool(tool, "Read a page of the fixture file.", "read/debug", read_page)
+        self.addCleanup(gateway._tools.pop, tool)
+
+        def plan(_message, _params, _observe, _history=None, *, loop_state=None, **_kwargs):
+            last = (loop_state or [{}])[-1]
+            route = None
+            if last.get("tool") == "runtime_completion_gate":
+                route = last["outcome"]["nextAction"]
+                feedback.append(route)
+            if not offsets or route:
+                return {"planner": "llm", "skillNeeded": True, "skillTool": tool,
+                        "skillParams": route["arguments"] if route else {"offset": 0},
+                        "continueLoop": True, "nextStep": "call_skill"}
+            return {"planner": "llm", "reply": "done", "continueLoop": False, "nextStep": "done",
+                    "completionClaim": {"satisfied": True, "evidenceActionIds": [last["actionId"]]}}
+
+        with patch.object(gateway.runtime_planner, "plan_agent_turn", side_effect=plan):
+            result = gateway.runtime_message({"message": "Read all values", "session_id": "read-all-values",
+                                              "client_turn_id": "one-turn"})
+        self.assertEqual(offsets, [0, 20, 40])
+        self.assertEqual(feedback, [{"tool": tool, "arguments": {"offset": n}} for n in (20, 40)])
+        self.assertEqual([step["outcome"]["status"] for step in result["steps"]], ["partial", "partial", "ok"])
+        self.assertEqual(result["plan"]["nextStep"], "done")
+
     def test_projectless_completion_claim_correction_is_bounded_and_fails_closed(self) -> None:
         gateway = self.gateway
         planner_calls = 0

@@ -41,13 +41,18 @@ _VPM_INSTALL_TIMEOUT_SECONDS = 300
 _VPM_JSON_READBACK_MAX_BYTES = 4 * 1024 * 1024
 _RUNTIME_COMPATIBILITY_ERROR_MAX_CHARS = 2000
 _VPM_REPOSITORY_INPUT_REJECTION = (
-    "Omit repository and retry with the same package ID and version using the configured sources. "
+    "Repository changes cannot be made by an install request. No installation was started. "
+    "Omit repository and vpmRepository and retry with the same package ID and version using the configured sources. "
     "A new source requires a separate registration step if the package cannot be resolved."
 )
 _UPM_RESOLUTION_GUIDANCE = (
     "Open the selected project with its matching Unity Editor and let Unity Package Manager resolve "
     "the declared dependency. If resolution fails, inspect the Editor's package error."
 )
+
+
+def _requests_vpm_repository(arguments: dict[str, Any]) -> bool:
+    return any(str(arguments.get(field) or "").strip() for field in ("repository", "vpmRepository"))
 
 
 class RunBoundedProcessPort(Protocol):
@@ -657,9 +662,7 @@ class PackageInstallWorkflowService:
         project_value = self._project_path(normalized)
         managers = self._ports.locate_managers()
         strategy = self.select_strategy(normalized, managers)
-        explicit_repository = bool(str(
-            normalized.get("repository") or normalized.get("vpmRepository") or ""
-        ).strip())
+        explicit_repository = _requests_vpm_repository(normalized)
         package_state = None
         if project_value and Path(project_value).is_dir():
             package_state = self._ports.detect_package(Path(project_value), [package_id])
@@ -707,10 +710,7 @@ class PackageInstallWorkflowService:
         preserve_legacy = normalized.get("preserveLegacyFiles") is True
         preservation_ready = bool(preserve_legacy and baseline_report and "treeDigest" in baseline_report)
         assets_migration_required = assets_migration_required and not (baseline_ok or preservation_ready)
-        blocker = {
-            "code": "vpm_repository_input_unsupported",
-            "message": _VPM_REPOSITORY_INPUT_REJECTION,
-        } if explicit_repository else None
+        blocker = None
         upm_pending = (package_state or {}).get("resolution") == "pending"
         upm_upgrade = upgrade_requested and (package_state or {}).get("source") == "packages-lock"
         version_conflict = (package_state or {}).get("resolution") == "version_mismatch"
@@ -736,6 +736,11 @@ class PackageInstallWorkflowService:
             action = "use_installed" if installed else "install_missing"
         if action == "use_installed":
             strategy["message"] = f"Use the installed {package_id} {installed_version}."
+        if explicit_repository:
+            blocker = {
+                "code": "vpm_repository_input_unsupported",
+                "message": _VPM_REPOSITORY_INPUT_REJECTION,
+            }
         return {
             "ok": True,
             **strategy,
@@ -1259,6 +1264,7 @@ def select_sealed_vpm_version(
 ) -> str:
     versions = info.get("versions") or info.get("Versions") or []
     candidates: list[tuple[tuple[Any, ...], str]] = []
+    excluded_prereleases: set[str] = set()
     for item in versions:
         if isinstance(item, str):
             value, yanked = item.strip(), False
@@ -1268,14 +1274,18 @@ def select_sealed_vpm_version(
         else:
             continue
         precedence = _semver_precedence(value)
-        if (
-            not value
-            or yanked
-            or precedence is None
-            or (not include_prerelease and "-" in value)
-        ):
+        if yanked or precedence is None:
+            continue
+        if not include_prerelease and not precedence[3]:
+            excluded_prereleases.add(value)
             continue
         candidates.append((precedence, value))
+    if requested in excluded_prereleases or (not requested and not candidates and excluded_prereleases):
+        raise RuntimeError(
+            "The package version is unavailable under the current stable-only policy. "
+            "A non-yanked prerelease was found. To select a prerelease intentionally, "
+            "retry with includePrerelease=true."
+        )
     if requested:
         if requested not in [value for _key, value in candidates]:
             raise RuntimeError(
@@ -1285,8 +1295,8 @@ def select_sealed_vpm_version(
         return requested
     if not candidates:
         raise RuntimeError(
-            "No non-yanked package version is available through the selected "
-            "existing repository configuration."
+            "The configured sources returned no eligible non-yanked semantic version. "
+            "Check the package ID and the configured source's version listing."
         )
     return max(candidates)[1]
 
@@ -1476,13 +1486,17 @@ class VpmPackageInstallPreparer:
         )
         if not _is_unity_project_root(project_path):
             raise RuntimeError("A valid Unity projectPath is required.")
-        repository = str(
-            arguments.get("repository") or arguments.get("vpmRepository") or ""
-        ).strip()
-        if repository:
+        if _requests_vpm_repository(arguments):
             raise AgentGatewayError(
                 _VPM_REPOSITORY_INPUT_REJECTION,
                 status_code=403,
+                cause_code="vpm_repository_input_unsupported",
+                failure_layer="argument_validation",
+                failure_phase="preparation",
+                operation_kind="write",
+                tool="vrcforge_install_vpm_package",
+                mutation_started=False,
+                committed=False,
             )
         state = _sealed_vpm_project_state(
             project_path,

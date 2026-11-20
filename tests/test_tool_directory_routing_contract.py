@@ -176,3 +176,36 @@ def test_full_catalog_reaches_the_same_non_core_leaf(
         | set(dashboard_server.RUNTIME_PLANNER_CORE_AGENT_TOOLS)
     )
     assert core_runtime_names <= native_core | {"vrcforge_list_internal_tool_blocks"}
+
+
+def test_desktop_directory_reports_settings_and_turn_grant_separately(tmp_path, monkeypatch):
+    from agent_gateway import AgentGateway
+
+    isolated = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "_desktop", isolated.desktop)
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "ensure_config", isolated.ensure_config)
+    name = "agent_desktop_action"
+    owner = "project_environment/shell"
+    params = {"block": owner, "tools": [name], "exposureLayer": "execution"}
+    config = isolated.ensure_config()
+    config.computer_use_enabled = False
+    isolated.save_config(config)
+    disabled = dashboard_server.load_internal_tool_block(params)
+    assert disabled["errorCode"] == "computer_use_activation_required"
+    assert "disabled" in disabled["error"]
+    assert disabled["expectedBlock"] == owner and disabled["mutationStarted"] is False
+
+    config.developer_options_enabled = config.computer_use_enabled = True
+    isolated.save_config(config)
+    denied = dashboard_server.load_internal_tool_block(params)
+    assert "no user-issued" in denied["error"]
+    assert "/desktop" in denied["nextActions"][-1]
+
+    scope = {"sessionId": "discovery", "clientTurnId": "test-grant"}
+    grant = isolated.desktop.issue_computer_use_turn_grant(scope)
+    with isolated.desktop.runtime_turn_context({
+        **scope, "_computerUseRequested": True, "_computerUseGrantId": grant["grantId"]
+    }):
+        shown = dashboard_server.build_internal_tool_block_inventory(params)
+        assert name in {tool["name"] for tool in shown["tree"]["tools"]}
+    assert dashboard_server.load_internal_tool_block(params)["error"] == denied["error"]

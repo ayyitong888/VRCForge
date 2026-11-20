@@ -65,7 +65,7 @@ def test_optional_readonly_registry_pair_is_validated_then_hidden_from_model_cat
     tools = client.list_tools(exposure_layer="execution")
 
     assert {tool["name"] for tool in tools} == EXPECTED_TOOL_NAMES
-    assert len(tools) == 97
+    assert len(tools) == len(EXPECTED_TOOL_NAMES)
 
 
 @pytest.mark.parametrize("tools", [

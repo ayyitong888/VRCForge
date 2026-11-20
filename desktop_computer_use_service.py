@@ -574,12 +574,15 @@ class DesktopComputerUseService:
         return bool(getattr(self._runtime_computer_use_context, "enabled", False))
 
     def computer_use_model_invocable(self, config: Any = None) -> bool:
+        return not self.computer_use_activation_reason(config)
+
+    def computer_use_activation_reason(self, config: Any = None) -> str:
         config = config or self._ports.ensure_config()
-        return bool(
-            config.developer_options_enabled
-            and config.computer_use_enabled
-            and self.computer_use_turn_active()
-        )
+        if not config.developer_options_enabled or not config.computer_use_enabled:
+            return "Computer Use is disabled. Enable it in Developer Options to use Desktop Rescue."
+        if not self.computer_use_turn_active():
+            return "Computer Use is enabled, but this turn has no user-issued Desktop Rescue grant."
+        return ""
 
     def browser_model_invocable(self) -> bool:
         context = self._runtime_computer_use_context

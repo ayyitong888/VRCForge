@@ -64,7 +64,11 @@ def test_general_filesystem_tools_are_visible_without_unity_project() -> None:
     assert NAMES <= set(visible)
     assert all(visible[name].write is False for name in NAMES)
     assert {visible[name].runtime_name for name in NAMES} == INTERNAL_NAMES
-    assert all(not name.startswith("unity_") for name in visible)
+    assert {name for name in visible if name.startswith("unity_")} == {
+        "unity_project_create_plan", "unity_project_lifecycle_status",
+    }
+    assert not visible["unity_project_create_plan"].write
+    assert not visible["unity_project_lifecycle_status"].write
 
 
 def test_general_filesystem_handlers_work_with_camel_case_bounds(tmp_path: Path) -> None:

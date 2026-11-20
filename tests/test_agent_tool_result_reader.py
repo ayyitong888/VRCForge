@@ -245,6 +245,31 @@ def test_bounded_pages_advance_without_dropping_rows_and_nested_target_is_exact(
     assert pointers == [f"/rows/{i}" for i in range(28)]
 
 
+def test_terminal_plan_receives_exact_next_page_until_real_read_finishes():
+    from agent_task_loop import AgentTaskLoop
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    step = retained({"rows": list(range(48))})
+    loop = AgentTaskLoop("Read all 48 rows")
+    args = {"resultRef": step["resultRead"]["resultRef"], "jsonPointer": "/rows", "limit": 20}
+    offsets = []
+    with bind_tool_result_context("session", "turn", "project", [step]):
+        while True:
+            page = read_tool_result(args, sanitize=sanitize)
+            offsets.append(page["offset"])
+            loop.record_action(kind="skill", tool=TOOL_NAME, arguments=args, raw_result=page,
+                               outcome=normalize_agent_tool_result(page, write=False, fallback_summary="Read rows"))
+            terminal = loop.gate_terminal({"planner": "llm", "nextStep": "done", "reply": "done"})
+            if not page["hasMore"]:
+                assert terminal["nextStep"] == "done"
+                break
+            assert terminal["nextStep"] == "paused"
+            assert terminal["completionGate"]["status"] == "partial"
+            assert terminal["completionGate"]["nextRequest"] == page["nextRequest"]
+            args = terminal["completionGate"]["nextRequest"]["arguments"]
+    assert offsets == [0, 20, 40]
+
+
 def test_default_12000_page_keeps_medium_candidate_list_and_source_unchanged():
     import hashlib
     from copy import deepcopy

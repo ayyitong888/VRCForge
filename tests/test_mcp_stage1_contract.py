@@ -6,6 +6,7 @@ from pathlib import Path
 from agent_mcp_2026 import Mcp2026Router, PROTOCOL_VERSION
 from agent_gateway import AgentGateway
 from mcp_tool_descriptor import standardize_tool_descriptor
+from tests.external_mcp_approval_support import review_external_proposal
 
 
 def _meta() -> dict:
@@ -99,17 +100,36 @@ def test_gateway_read_and_supervised_write_return_operation_and_fresh_readback_c
     assert read_result["commitState"] == "not_started"
     assert read_result["readbackState"] == "complete"
 
+    target = tmp_path / "value.txt"
+
+    def write_value(arguments):
+        target.write_text(str(arguments["value"]), encoding="utf-8")
+        return {"ok": True, "status": "success", "mutationStarted": True, "mutationApplied": True, "committed": True, "commitState": "complete"}
+
+    def read_back(arguments, _baseline, result):
+        actual = target.read_text(encoding="utf-8")
+        verified = actual == str(arguments["value"])
+        return {**result, "verified": verified, "persistedReadback": verified, "readback": {"value": actual}}
+
     gateway.approval_transactions.register_write_handler(
         "vrcforge_stage1_supervised_write",
         "Write one exact value.",
         "medium",
-        lambda _args: {"ok": True, "status": "success", "mutationStarted": True, "mutationApplied": True, "commitState": "complete"},
+        write_value,
         pre_write_checkpoint_required=False,
-        verification_finalize_handler=lambda _args, _baseline, result: {**dict(result), "persistedReadback": True},
+        fresh_readback_required=True,
+        verification_finalize_handler=read_back,
     )
     gateway.register_external_mcp_unity_tool("vrcforge_stage1_supervised_write", "avatar")
-    write_result = gateway.call_external_mcp_tool("vrcforge_stage1_supervised_write", {"value": 2})
-    assert write_result["operationId"].startswith("mcpwrite_")
+    proposal = gateway.call_external_mcp_tool("vrcforge_stage1_supervised_write", {"value": 2})
+    assert proposal["outcome"]["status"] == "needs_user_action"
+    assert "VRCForge App" in proposal["nextAction"] and "arguments.confirmation" in proposal["nextAction"]
+    assert proposal["commitState"] == proposal["readbackState"] == "not_started"
+    assert not target.exists()
+    confirmation = review_external_proposal(gateway, proposal)
+    write_result = gateway.call_external_mcp_tool("vrcforge_stage1_supervised_write", {"value": 2, "confirmation": confirmation})
+    assert write_result["operationId"] == proposal["operationId"] == confirmation["operationId"]
+    assert target.read_text(encoding="utf-8") == "2"
     assert write_result["readbackState"] == "verified"
-    assert write_result["persistenceState"] == "verified"
+    assert write_result["persistenceState"] == "persisted"
     assert write_result["outcome"]["status"] != "failed"

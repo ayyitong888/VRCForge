@@ -8,7 +8,7 @@ filesystem, network, or persistence capability.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import copy
 import hashlib
@@ -317,6 +317,17 @@ def _mapping_views(value: Any) -> list[Mapping[str, Any]]:
     return result
 
 
+def pending_question_plan(plan: Mapping[str, Any], prompt: str, question_id: str = "") -> dict[str, Any]:
+    text = prompt or "The tool action needs user input before it can continue."
+    return {
+        **plan, "summary": text, "reply": text, "continueLoop": False, "nextStep": "needs_user_action",
+        "completionGate": {
+            "status": "needs_user_action", "reason": "question_pending",
+            **({"questionId": question_id} if question_id else {}),
+        },
+    }
+
+
 def _running_state(value: Any) -> str:
     for view in _mapping_views(value):
         state = _status(view.get("status"))
@@ -410,7 +421,7 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
             bounded_error["retainImages"] = error["retainImages"]
     result = {
         "status": _bounded_text(value.get("status"), 40),
-        "summary": _bounded_text(value.get("summary"), 600),
+        "summary": _bounded_text(value.get("summary"), 1000 if value.get("questionId") else 600),
         "error": bounded_error,
         "evidence": [
             {
@@ -428,6 +439,7 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
                     {
                         "kind": _bounded_text(item.get("kind"), 80),
                         "state": _bounded_text(item.get("state"), 80),
+                        **{key: item[key] for key in ("newErrorCount", "newWarningCount") if type(item.get(key)) is int},
                     }
                     for item in verification.get("checks", [])[:12]
                     if isinstance(item, Mapping)
@@ -439,6 +451,7 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     for key in (
         *OPERATION_PROGRESS_FIELDS,
+        "questionId",
         "success",
         "ready",
         "blockingReasons",
@@ -602,14 +615,14 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     status = _status(value.get("status"))
     if status not in {
-        "cancelled",
         "completed",
         "failed",
         "needs_user_action",
         "paused",
+        "pending",
         "running",
         "superseded",
-    }:
+    } | INCOMPLETE_OPERATION_STATES:
         return None
     outcome = value.get("outcome")
     result = {
@@ -625,6 +638,8 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
     superseded_by = _bounded_text(value.get("supersededBy"), 80)
     if status == "superseded" and superseded_by:
         result["supersededBy"] = superseded_by
+    if value.get("continuedBy"):
+        result["continuedBy"] = _bounded_text(value["continuedBy"], 80)
     if value.get("preProvider") is True:
         result["preProvider"] = True
     if value.get("_nativeReadObservation") is True:
@@ -1539,6 +1554,7 @@ class AgentTaskLoop:
     history: list[dict[str, Any]] = field(default_factory=list)
     model_override_base: str = ""
     _actions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _latest_action_id: str = ""
     _requirements: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Requirements seeded from the previous turn's pending obligations, mapped
     # to their carryover generation for observation, never automatic dismissal.
@@ -1876,6 +1892,14 @@ class AgentTaskLoop:
             verification_profile=requirement_profile,
         )
         outcome_status = _status(effective.get("status"))
+        if outcome_status == "needs_user_action" and tool in {"vrcforge_ask_user", "vrcforge_call_user"}:
+            for view in _mapping_views(raw_result):
+                question = view.get("question")
+                if isinstance(question, Mapping) and question.get("question"):
+                    effective["summary"] = str(question["question"])
+                    if question.get("questionId"):
+                        effective["questionId"] = str(question["questionId"])
+                    break
         # Process controls return a snapshot of the target process. Its lifetime
         # belongs to the original launch, including after stdin is delivered.
         running_state = "" if tool == "vrcforge_shell_process" else _running_state(raw_result)
@@ -1998,6 +2022,24 @@ class AgentTaskLoop:
                         prior.update(status=terminal_status, runtimeStatus=terminal_status, outcome=dict(effective),
                             completionReadActionId=action_id)
         self._actions[action_id] = record
+        self._latest_action_id = action_id
+        # A continuation advances the same read obligation. Preserve every
+        # page's original status, and move exact requirements onto the page
+        # the tool actually requested, including intermediate partial pages.
+        if kind == "skill" and outcome_status in {"ok", "partial"}:
+            for prior in self._actions.values():
+                if prior is record or prior["kind"] != kind or prior["tool"] != tool:
+                    continue
+                previous = prior["outcome"]
+                continuation = previous.get("nextRequest")
+                if (previous.get("hasMore") is not True or not isinstance(continuation, Mapping)
+                        or continuation.get("tool") != tool or not isinstance(continuation.get("arguments"), Mapping)
+                        or _action_identity_arguments(continuation["arguments"]) != _action_identity_arguments(arguments)):
+                    continue
+                prior["continuedBy"] = action_id
+                for requirement in self._requirements.values():
+                    if requirement.get("actionId") == prior["actionId"]:
+                        requirement["actionId"] = action_id
         corrected_ids = [accepted_correction_id] if accepted_correction_id else []
         if native_read_identity and not accepted_correction_id and lifecycle == "completed" and outcome_status == "ok":
             semantic_id, receipt_id = native_read_identity
@@ -2349,7 +2391,10 @@ class AgentTaskLoop:
                 return True
         return False
 
-    def gate_terminal(self, plan: Mapping[str, Any], *, require_completion_claim: bool = False) -> dict[str, Any]:
+    def gate_terminal(
+        self, plan: Mapping[str, Any], *, require_completion_claim: bool = False,
+        read_continuation_allowed: Callable[[str], bool] | None = None,
+    ) -> dict[str, Any]:
         gated = dict(plan)
         next_step = _status(gated.get("nextStep"))
         if next_step in _TERMINAL_BYPASS_STEPS:
@@ -2361,20 +2406,47 @@ class AgentTaskLoop:
         # user can actually answer now.
         actions = list(self._actions.values())
         running = [action for action in actions if _status(action.get("status")) == "running"]
-        question_wait = any(
-            _status(item.get("status")) == "needs_user_action"
-            and str(item.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
-            for item in actions
+        for item in reversed(actions):
+            if (_status(item.get("status")) == "needs_user_action"
+                    and item.get("tool") in {"vrcforge_ask_user", "vrcforge_call_user"}):
+                outcome = item["outcome"]
+                return {
+                    **pending_question_plan(gated, outcome.get("summary") or "", outcome.get("questionId") or ""),
+                    "task": self.snapshot(),
+                }
+        # A fresh partial page or inconclusive operation can provide an exact
+        # follow-up. Historical optional reads do not obligate a later turn.
+        latest = self._actions.get(self._latest_action_id, {})
+        outcome = latest.get("outcome", {})
+        state = latest.get("status")
+        claim = gated.get("completionClaim")
+        page_incomplete = outcome.get("readbackState") == "partial" and outcome.get("hasMore") is True
+        # An optional page need not be exhausted when an independent completed
+        # action already establishes the user's requested outcome.
+        evidence_ids = (claim.get("evidenceActionIds") or claim.get("evidence_action_ids")) if isinstance(claim, Mapping) else None
+        independent_evidence = (
+            isinstance(evidence_ids, list) and bool(evidence_ids)
+            and all(isinstance(key, str) and key != self._latest_action_id and key in self._actions
+                    and self._action_completion_confirmed(self._actions[key]) for key in evidence_ids)
         )
-        if question_wait:
-            actions.sort(
-                key=lambda item: 0
-                if (
-                    _status(item.get("status")) == "needs_user_action"
-                    and str(item.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
-                )
-                else 1
-            )
+        if page_incomplete and not independent_evidence:
+            state = "partial"
+        if next_step == "done" and state in {"partial", "unknown"}:
+            for route in (outcome.get("nextRequest"), outcome.get("nextAction")):
+                if (isinstance(route, Mapping) and isinstance(route.get("tool"), str) and route["tool"]
+                        and isinstance(route.get("arguments"), Mapping)
+                        and (read_continuation_allowed is None or read_continuation_allowed(route["tool"]))):
+                    explanation = "工具只返回了部分结果" if state == "partial" else "工具尚未确认执行结果"
+                    return {
+                        **gated, "summary": outcome.get("summary") or "", "continueLoop": False,
+                        "reply": f"{explanation}，下一步需用 {route['tool']} 接着核对。",
+                        "nextStep": "paused",
+                        "completionGate": {
+                            "status": state, "reason": "tool_continuation_required",
+                            "actionId": self._latest_action_id, "nextRequest": dict(route),
+                        },
+                        "task": self.snapshot("paused"),
+                    }
         for action in actions:
             status = _status(action.get("status"))
             if status == "superseded":
@@ -2386,16 +2458,7 @@ class AgentTaskLoop:
             if status == "failed" and not self.action_blocks_completion(str(action.get("actionId") or "")):
                 continue
             outcome = action.get("outcome")
-            is_question_wait = (
-                status == "needs_user_action"
-                and str(action.get("tool") or "") in {"vrcforge_ask_user", "vrcforge_call_user"}
-            )
-            eligible = (
-                status == "failed" or is_question_wait
-                if question_wait
-                else status in {"failed", "needs_user_action"}
-            )
-            if eligible and isinstance(outcome, Mapping):
+            if status in {"failed", "needs_user_action"} and isinstance(outcome, Mapping):
                 replacement = completion_gate_plan(gated, outcome)
                 if replacement is not None:
                     replacement["task"] = self.snapshot()

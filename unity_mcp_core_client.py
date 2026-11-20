@@ -35,6 +35,7 @@ from unity_mcp_tool_contract import (
     PRODUCT_VERSION,
     READ_ONLY_TOOL_NAMES,
     SCAN_SCOPE_TOOL_NAMES,
+    TOOL_CONTRACT_VERSION,
     is_direct_read_call,
 )
 
@@ -329,11 +330,13 @@ class UnityMcpCoreClient:
         )
         if self._connection.transport != "tcp-newline-jsonrpc":
             raise UnityMcpCoreError("Unity MCP Core transport is not supported.")
-        self._expected_tool_names = (
-            PREVIOUS_CORE_TOOL_NAMES
-            if self._connection.tool_contract_version == PREVIOUS_CORE_TOOL_CONTRACT_VERSION
-            else EXPECTED_TOOL_NAMES
-        )
+        self._expected_tool_names: frozenset[str] | None = EXPECTED_TOOL_NAMES
+        if self._connection.tool_contract_version == PREVIOUS_CORE_TOOL_CONTRACT_VERSION:
+            self._expected_tool_names = PREVIOUS_CORE_TOOL_NAMES
+        elif self.uses_previous_contract:
+            # The authenticated descriptor supplies this revision's actual count.
+            # Older compatible Cores cannot be expected to implement newer tools.
+            self._expected_tool_names = None
         self._timeout_seconds = float(timeout_seconds)
 
     @property
@@ -342,7 +345,10 @@ class UnityMcpCoreClient:
 
     @property
     def uses_previous_contract(self) -> bool:
-        return self._connection.tool_contract_version == PREVIOUS_CORE_TOOL_CONTRACT_VERSION
+        revision = self._connection.tool_contract_version.lstrip("0")
+        return (len(revision) <= len(TOOL_CONTRACT_VERSION)
+                and revision.isascii() and revision.isdecimal()
+                and int(revision) < int(TOOL_CONTRACT_VERSION))
 
     def core_info(self) -> dict[str, Any]:
         """Verify the bound Core identity and product version without listing tools."""
@@ -371,18 +377,39 @@ class UnityMcpCoreClient:
     def list_tools(self, *, exposure_layer: str = "planning") -> list[dict[str, Any]]:
         if exposure_layer not in {"planning", "execution"}:
             raise ValueError("exposure_layer must be planning or execution.")
-        result = self._request("tools/list", {"exposureLayer": exposure_layer})
+        # For an older revision without a packaged catalogue, validate the full
+        # inventory against its descriptor before projecting its planning tools.
+        layer = "execution" if self._expected_tool_names is None else exposure_layer
+        result = self._request("tools/list", {"exposureLayer": layer})
         tools = result.get("tools") if isinstance(result, dict) else None
         if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
             raise UnityMcpCoreError("Unity MCP Core returned an invalid tools list.")
         names = [tool.get("name") for tool in tools]
-        expected_names = PLANNING_TOOL_NAMES if exposure_layer == "planning" else self._expected_tool_names
         if not all(isinstance(name, str) and name for name in names):
             raise UnityMcpCoreError("Unity MCP Core returned an invalid tools list.")
         returned_names = set(names)
-        if len(set(names)) != len(names) \
-                or returned_names not in (expected_names, expected_names | SCAN_SCOPE_TOOL_NAMES):
-            raise UnityMcpCoreError("Unity MCP Core tool contract does not match the packaged VRCForge tools.")
+        if len(returned_names) != len(names):
+            raise UnityMcpCoreError("Unity MCP Core returned duplicate names in its tools list.")
+        internal = returned_names & SCAN_SCOPE_TOOL_NAMES
+        if internal and internal != SCAN_SCOPE_TOOL_NAMES:
+            raise UnityMcpCoreError("Unity MCP Core returned an incomplete scan-scope tool pair.")
+        public = returned_names - internal
+        expected = self._expected_tool_names
+        if expected is None:
+            if len(names) != self._connection.tool_count:
+                raise UnityMcpCoreError(
+                    f"Unity MCP Core declared {self._connection.tool_count} tools but returned {len(names)}."
+                )
+            if public - EXPECTED_TOOL_NAMES:
+                raise UnityMcpCoreError("Unity MCP Core advertised tools outside the App's supported catalogue.")
+        else:
+            if layer == "planning":
+                expected = expected & PLANNING_TOOL_NAMES
+            if public != expected:
+                raise UnityMcpCoreError(
+                    f"Unity MCP Core {layer} catalogue differs from its packaged contract "
+                    f"({len(expected - public)} missing, {len(public - expected)} unexpected)."
+                )
         for tool in tools:
             name = tool["name"]
             input_schema = tool.get("inputSchema")
@@ -407,7 +434,11 @@ class UnityMcpCoreClient:
                 raise UnityMcpCoreError("Unity MCP Core tool permissions do not match the packaged VRCForge tools.")
         # The optional Core capability is for backend freshness checks only; keep
         # the fixed model and catalog tool surface unchanged.
-        return [tool for tool in tools if tool["name"] not in SCAN_SCOPE_TOOL_NAMES]
+        return [
+            tool for tool in tools if tool["name"] not in SCAN_SCOPE_TOOL_NAMES
+            and (layer == exposure_layer
+                 or (tool["name"] in PLANNING_TOOL_NAMES and tool["_meta"]["exposureLayer"] == "planning"))
+        ]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None,
                   *, execution_context: dict[str, Any] | None = None) -> dict[str, Any]:
