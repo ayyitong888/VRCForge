@@ -2,7 +2,6 @@ import type { AgentApproval, AgentQuestion, AgentRuntimeRun } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
 import { normalizeProjectPathKey } from "./project-path";
 import { approvalIdFromResponse } from "./runtime-parsing";
-import { isBlockingAgentQuestion } from "./agent-question-notifications";
 
 export type RuntimeScope = {
   sessionId: string;
@@ -96,7 +95,7 @@ export function questionContinuationOwner(
 }
 
 export function pendingQuestionReviewTargets(chats: ChatThread[], questions: AgentQuestion[], activeChatId: string) {
-  const targets = questions.filter(isBlockingAgentQuestion).flatMap((question) => {
+  const targets = questions.filter((question) => question.status === "pending" && question.sourceTool !== "runtime_tool_loop").flatMap((question) => {
     const chat = questionContinuationOwner(chats, question);
     if (!chat || chat.archived || chat.items.some((item) => item.type === "question_answer" && item.questionId === question.questionId)) return [];
     return [{ chat, question }];

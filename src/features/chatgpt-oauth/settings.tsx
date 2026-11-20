@@ -30,6 +30,7 @@ type ChatGptOAuthSettingsProps = {
   developerOptionsEnabled: boolean;
   onTestProvider: (capability: "text" | "structured" | "vision") => void;
   onProviderConfigChanged: () => Promise<void> | void;
+  onActiveModelsChange?: (models: ChatGptOAuthModel[]) => void;
 };
 
 export function ChatGptOAuthSettings({
@@ -45,6 +46,7 @@ export function ChatGptOAuthSettings({
   developerOptionsEnabled,
   onTestProvider,
   onProviderConfigChanged,
+  onActiveModelsChange,
 }: ChatGptOAuthSettingsProps) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<ChatGptOAuthStatus | null>(null);
@@ -179,6 +181,11 @@ export function ChatGptOAuthSettings({
   const activeAccount = status?.activeAccountId
     ? status.accounts.find((account) => account.id === status.activeAccountId)
     : undefined;
+  const activeAccountId = activeAccount?.connected ? activeAccount.id : "";
+  useEffect(() => {
+    onActiveModelsChange?.(runtimeConnected && activeAccountId && modelsAccountId === activeAccountId ? models : []);
+  }, [activeAccountId, models, modelsAccountId, onActiveModelsChange, runtimeConnected]);
+
   const activeModel = status?.activeModel || "";
   const activeThinkingLevel = status?.activeThinkingLevel || "";
   const selectedModelRecord = models.find((model) => model.id === selectedModel);

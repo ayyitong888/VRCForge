@@ -10872,6 +10872,8 @@ class AgentGateway:
             item["progressId"]: item for item in self._scoped_runtime_todos(session_id, project_root)
         }
         normalized_items: list[dict[str, Any]] = []
+        progress_ids: set[str] = set()
+        completion_pending: list[dict[str, str]] = []
         requested_requirements: dict[str, set[str]] = {}
         for index, item in enumerate(raw_items):
             if not isinstance(item, dict):
@@ -10890,8 +10892,13 @@ class AgentGateway:
                 "order": int(item.get("order") if isinstance(item.get("order"), int) else index),
                 "owner": summarize_text(str(item.get("owner") or "agent"), 80),
             }
-            previous = existing.get(entry["progressId"], {})
-            self._bind_todo_completion(entry, item, previous)
+            progress_id = entry["progressId"]
+            if progress_id in progress_ids:
+                raise AgentGatewayError(f"Progress replacement contains duplicate progressId: {progress_id}.", status_code=400)
+            progress_ids.add(progress_id)
+            previous = existing.get(progress_id, {})
+            if pending := self._bind_todo_completion(entry, item, previous):
+                completion_pending.append(pending)
             if links := self._bind_todo_requirements(entry, item, previous):
                 requested_requirements[entry["progressId"]] = links
             normalized_items.append(entry)
@@ -10919,6 +10926,8 @@ class AgentGateway:
                 and all(all(observed[item_id].get(key) == value for key, value in row.items())
                         for item_id, row in expected.items())):
             snapshot["readbackVerified"] = True
+        if completion_pending:
+            snapshot["completionPending"] = completion_pending
         return snapshot
 
     def create_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -10942,14 +10951,15 @@ class AgentGateway:
             "owner": summarize_text(str(params.get("owner") or "agent"), 80),
             "order": int(params.get("order")) if isinstance(params.get("order"), int) else 0,
         }
-        self._bind_todo_completion(event, params, {})
+        pending = self._bind_todo_completion(event, params, {})
         requested_requirements = self._bind_todo_requirements(event, params, {})
         if requested_requirements:
             self._validate_todo_requirements({progress_id: requested_requirements}, event["sessionId"], event["projectRoot"])
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
         progress = self._find_agent_progress(progress_id, event)
         return {"ok": True, "progress": progress,
-                "readbackVerified": all(progress.get(key) == value for key, value in event.items())}
+                "readbackVerified": all(progress.get(key) == value for key, value in event.items()),
+                **({"completionPending": [pending]} if pending else {})}
 
     @staticmethod
     def _require_agent_item_scope(existing: dict[str, Any], params: dict[str, Any], *, label: str) -> None:
@@ -10989,14 +10999,15 @@ class AgentGateway:
             "owner": summarize_text(str(params.get("owner") or existing.get("owner") or "agent"), 80),
             "order": int(params.get("order")) if isinstance(params.get("order"), int) else int(existing.get("order") or 0),
         }
-        self._bind_todo_completion(event, params, existing)
+        pending = self._bind_todo_completion(event, params, existing)
         requested_requirements = self._bind_todo_requirements(event, params, existing)
         if requested_requirements:
             self._validate_todo_requirements({progress_id: requested_requirements}, event["sessionId"], event["projectRoot"])
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
         progress = self._find_agent_progress(progress_id, event)
         return {"ok": True, "progress": progress,
-                "readbackVerified": all(progress.get(key) == value for key, value in event.items())}
+                "readbackVerified": all(progress.get(key) == value for key, value in event.items()),
+                **({"completionPending": [pending]} if pending else {})}
 
     @staticmethod
     def _bind_todo_requirements(entry: dict[str, Any], values: dict[str, Any], previous: dict[str, Any]) -> set[str]:
@@ -11072,33 +11083,36 @@ class AgentGateway:
             raise AgentGatewayError("Link requirements to a concrete TODO item, not a group of tasks.", status_code=400)
 
     @staticmethod
-    def _bind_todo_completion(entry: dict[str, Any], values: dict[str, Any], previous: dict[str, Any]) -> None:
+    def _bind_todo_completion(
+        entry: dict[str, Any], values: dict[str, Any], previous: dict[str, Any],
+    ) -> dict[str, str] | None:
         checks = previous.get("completionChecks")
         if checks and entry["title"] != previous["title"] and "completionChecks" not in values:
             # A reused item ID can describe different work after a replan.
             entry.update(completionChecks=[], completionEvidence={}, completionPages={})
-            if entry["status"] == "completed":
-                entry["status"] = "in_progress"
-            return
+            checks = None
         if "completionChecks" in values:
             try:
                 checks = completion_checks(values["completionChecks"])
             except ValueError as exc:
                 raise AgentGatewayError(str(exc), status_code=400) from exc
-        if not checks:
-            if entry["status"] == "completed":
-                entry["status"] = "in_progress"
-            return
-        evidence = dict(previous.get("completionEvidence") or {}) if checks == previous.get("completionChecks") else {}
-        entry.update(completionChecks=checks, completionEvidence=evidence)
-        if previous.get("completionPages"):
-            entry["completionPages"] = previous["completionPages"] if checks == previous.get("completionChecks") else {}
-        if entry["status"] == "deleted":
-            return
-        if all(evidence.get(str(index)) for index in range(len(checks))):
-            entry["status"] = "completed"
-        elif entry["status"] == "completed":
+        if checks:
+            unchanged = checks == previous.get("completionChecks")
+            evidence = dict(previous.get("completionEvidence") or {}) if unchanged else {}
+            entry.update(completionChecks=checks, completionEvidence=evidence)
+            if previous.get("completionPages"):
+                entry["completionPages"] = previous["completionPages"] if unchanged else {}
+            if entry["status"] != "deleted" and all(evidence.get(str(index)) for index in range(len(checks))):
+                entry["status"] = "completed"
+                return None
+        if entry["status"] == "completed":
             entry["status"] = "in_progress"
+            return {
+                "progressId": entry["progressId"],
+                "status": entry["status"],
+                "reason": "completion_receipt_missing" if checks else "completion_checks_required",
+            }
+        return None
 
     def _scoped_runtime_todos(
         self, session_id: str, project_root: str, *, projected: list[dict[str, Any]] | None = None,

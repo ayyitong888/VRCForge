@@ -315,6 +315,86 @@ def test_read_todo_collects_only_complete_same_snapshot_pages_across_restart(tmp
     assert read(0) == "completed"
 
 
+def test_runtime_progress_replace_rejects_duplicate_ids_without_changing_plan(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    scope = {"sessionId": "progress-owner", "projectRoot": str(tmp_path)}
+    gateway.replace_agent_progress({**scope, "items": [{"id": "keep", "title": "Keep me"}]})
+    before = gateway.agent_progress_log_path.read_bytes()
+    with pytest.raises(AgentGatewayError, match="duplicate progressId"):
+        gateway.replace_agent_progress({**scope, "items": [
+            {"id": "same", "title": "First"},
+            {"progressId": "same", "title": "Second"},
+        ]})
+    assert gateway.agent_progress_log_path.read_bytes() == before
+    assert gateway.list_agent_progress(session_id=scope["sessionId"])["items"][0]["title"] == "Keep me"
+
+
+def test_unverified_todo_completion_reports_repairable_reason(tmp_path):
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    scope = {"sessionId": "progress-owner", "projectRoot": str(tmp_path)}
+    item = {"id": "inspect", "title": "Inspect the selected object", "status": "completed"}
+    created = gateway.create_agent_progress({**scope, **item})
+    replaced = gateway.replace_agent_progress({**scope, "items": [item]})
+    updated = gateway.update_agent_progress("inspect", {**scope, "status": "completed"})
+    for result in (created, replaced, updated):
+        row = result.get("progress") or result["items"][0]
+        assert row["status"] == "in_progress"
+        assert result["readbackVerified"]
+        assert result["completionPending"] == [{
+            "progressId": row["progressId"],
+            "status": "in_progress",
+            "reason": "completion_checks_required",
+        }]
+    assert "completionPending" not in gateway.list_agent_progress(session_id=scope["sessionId"])["items"][0]
+
+    checks = [{"tool": "inspect", "result": {"object": "target"}}]
+    pending = gateway.update_agent_progress("inspect", {**scope, "status": "completed", "completionChecks": checks})
+    assert pending["completionPending"][0]["reason"] == "completion_receipt_missing"
+    gateway._advance_runtime_todos(scope["sessionId"], scope["projectRoot"], [
+        {"tool": "inspect", "id": "observed-action", "arguments": {}, "result": {"object": "target"}},
+    ])
+    completed = gateway.update_agent_progress("inspect", {**scope, "status": "completed"})
+    assert completed["progress"]["status"] == "completed"
+    assert "completionPending" not in completed
+
+
+def test_native_todo_retry_can_bind_an_earlier_receipt_without_rerunning_the_tool(tmp_path):
+    from tests.test_native_runtime_gateway import call, finish, run, setup_gateway
+
+    read = "vrcforge_read_text_file"
+    replace = "vrcforge_progress_replace"
+    opened = []
+
+    def retry_completion(request):
+        receipt = next(message["content"] for message in request["messages"]
+                       if message.get("tool_call_id") == "todo")
+        assert "completionPending=" in receipt
+        assert "completion_checks_required" in receipt
+        return call("bind", replace, {"items": [{
+            "id": "inspect", "title": "Read the source", "status": "completed",
+            "completionChecks": [{"tool": read, "arguments": {"path": "README.txt"}, "result": {"truncated": False}}],
+        }]})
+
+    def finish_after_verification(request):
+        saved = gateway.list_agent_progress(session_id="native-session")["items"][0]
+        assert saved["status"] == "completed"
+        assert saved["completionEvidence"]["0"]
+        return finish(request)
+
+    gateway, _, _ = setup_gateway(tmp_path, [
+        call("readme", read, {"path": "README.txt"}),
+        call("todo", replace, {"items": [{"id": "inspect", "title": "Read the source", "status": "completed"}]}),
+        retry_completion,
+        finish_after_verification,
+    ])
+    gateway.register_tool(read, "When to use: read. When NOT to use: write.", "plan/preview",
+                          lambda p: opened.append(p["path"]) or {"text": "source", "truncated": False, "bytes": 6})
+    gateway.register_tool(replace, "When to use: plan. When NOT to use: write.", "plan/preview",
+                          gateway.replace_agent_progress)
+    assert run(gateway, tmp_path)["plan"]["nextStep"] == "done"
+    assert opened == ["README.txt"]
+
+
 def test_progress_completion_is_owned_by_matching_receipts_across_replacement(tmp_path):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     scope = {"sessionId": "progress-owner", "projectRoot": str(tmp_path)}

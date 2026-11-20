@@ -1,6 +1,7 @@
 import { AlertTriangle, ArrowDown, ArrowUp, HelpCircle, ListEnd, Loader2, MoreHorizontal, Paperclip, Pause, Pencil, Play, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
+import { createPortal } from "react-dom";
 import { updateAgentGoal } from "../../lib/api";
 import type { AgentApproval, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
 import type { RunningEnterAction } from "../../lib/app-preferences";
@@ -200,6 +201,7 @@ export function ChatWorkspace({
   onDismissQuestion,
   onReopenQuestion,
   reviewQuestionReveal,
+  questionPanelTarget,
   onReplyInChat,
   onOpenChatById,
   lookupChatTitle,
@@ -315,6 +317,7 @@ export function ChatWorkspace({
   onDismissQuestion: (questionId: string) => void;
   onReopenQuestion?: (questionId: string) => void;
   reviewQuestionReveal?: { questionId: string } | null;
+  questionPanelTarget?: HTMLElement | null;
   onReplyInChat?: (questionId: string) => void;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
@@ -394,7 +397,7 @@ export function ChatWorkspace({
   const dockQuestions = pendingQuestionPrompts.filter((question) => !dismissedQuestionIds?.has(question.questionId));
   const [questionReveal, setQuestionReveal] = useState<{ questionId: string }>();
   useEffect(() => {
-    if (reviewQuestionReveal) setQuestionReveal(reviewQuestionReveal);
+    setQuestionReveal(reviewQuestionReveal ?? undefined);
   }, [reviewQuestionReveal]);
   const [questionCardVisible, setQuestionCardVisible] = useState(false);
   const replyBanner = pendingReplyQuestion ? (
@@ -444,9 +447,20 @@ export function ChatWorkspace({
     return turnOrigins.get(clientTurnId)
       || turnOrigins.get(question.originTurnId || "");
   };
-  const pendingQuestionsByOrigin = new Map<ConversationItem | undefined, AgentQuestion[]>();
-  for (const question of pendingQuestionPrompts) {
+  const isLiveTurn = (origin?: Extract<ConversationItem, { type: "agent" | "streaming" }>) => {
+    if (!origin) return false;
+    if (origin.type === "streaming") {
+      return runtimeTurnActivityStatus(runtimeRuns, origin.sessionId || runtimeSessionId, origin.clientTurnId) !== false;
+    }
+    const { response } = origin;
+    return !origin.completedAt && !response.completedAt
+      && runtimeTurnActivityStatus(runtimeRuns, response.sessionId || response.session_id || runtimeSessionId, response.clientTurnId) === true;
+  };
+  const liveQuestions = pendingQuestionPrompts.filter(question => isLiveTurn(questionOrigin(question)));
+  const pendingQuestionsByOrigin = new Map<ConversationItem, AgentQuestion[]>();
+  for (const question of liveQuestions) {
     const origin = questionOrigin(question);
+    if (!origin) continue;
     const questions = pendingQuestionsByOrigin.get(origin) || [];
     questions.push(question);
     pendingQuestionsByOrigin.set(origin, questions);
@@ -466,7 +480,6 @@ export function ChatWorkspace({
       </button>
     </div>
   );
-  const unboundQuestionEntries = pendingQuestionsByOrigin.get(undefined)?.map((question) => renderQuestionEntry(question, true));
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
   const [expandedProcesses, setExpandedProcesses] = useState<Record<string, boolean>>({});
   const historyInteraction = readOnlyHistory ? { inert: "" } : undefined;
@@ -548,12 +561,19 @@ export function ChatWorkspace({
       clientTurnId: ownerTurn,
     };
   };
-  const questionDock = dockQuestions.length > 0 && !pendingReplyQuestion ? (
+  const questionDockInSidebar = Boolean(questionPanelTarget && questionReveal
+    && dockQuestions.some((question) => question.questionId === questionReveal.questionId));
+  const questionDockQuestions = questionDockInSidebar
+    ? dockQuestions : liveQuestions.filter((question) => !dismissedQuestionIds?.has(question.questionId));
+  const questionDock = questionDockQuestions.length > 0 && !pendingReplyQuestion ? (
     <AgentQuestionCard
-      questions={dockQuestions}
+      questions={questionDockQuestions}
       reveal={questionReveal}
       onAnswerQuestion={onAnswerQuestion}
-      onDismissQuestion={onDismissQuestion}
+      onDismissQuestion={(questionId) => {
+        setQuestionReveal(undefined);
+        onDismissQuestion(questionId);
+      }}
       onVisibilityChange={setQuestionCardVisible}
       onReplyInChat={onReplyInChat}
       capturePreviewsForQuestion={questionCapturePreviews}
@@ -622,7 +642,7 @@ export function ChatWorkspace({
       actions={actions}
       onAction={onAction}
       compact={compact}
-      questionPromptVisible={Boolean(questionDock && questionCardVisible)}
+      questionPromptVisible={Boolean(questionDock && !questionDockInSidebar && questionCardVisible)}
       disabledReason={disabledReason}
       submissionBlocked={approvalBlocksSubmission}
       attachments={attachments}
@@ -685,9 +705,13 @@ export function ChatWorkspace({
       ) : null}
     </section>
   ) : null;
-  const approvalCard = !pendingReplyQuestion && scopedPendingApprovals.length ? (
+  const liveApprovals = scopedPendingApprovals.filter((approval) => {
+    const owner = approval.taskContext;
+    return isLiveTurn(turnOrigins.get(owner?.clientTurnId || "") || turnOrigins.get(owner?.turnId || ""));
+  });
+  const approvalCard = !pendingReplyQuestion && liveApprovals.length ? (
     <ScopedPendingApprovalCard
-      approvals={scopedPendingApprovals}
+      approvals={liveApprovals}
       actions={approvalActions}
       disabled={sending}
       reveal={approvalReveal}
@@ -770,7 +794,6 @@ export function ChatWorkspace({
                 onDismiss={onBackgroundGoalCatchUpDismiss}
               />
             </div>
-            {unboundQuestionEntries}
           </div>
         </div>
       ) : (
@@ -847,7 +870,8 @@ export function ChatWorkspace({
                 </div>
               );
             }
-            const approval = !readOnlyHistory && item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
+            const liveAgent = item.type === "agent" && isLiveTurn(item);
+            const approval = !readOnlyHistory && liveAgent ? pendingApprovalForResponse(item.response) : null;
             const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
             const turnSessionId = runtimeSessionId || (item.type === "agent" ? item.response.sessionId || item.response.session_id : "");
             const runtimeActive = turnId && turnSessionId ? runtimeTurnActivityStatus(runtimeRuns, turnSessionId, turnId) : undefined;
@@ -929,6 +953,7 @@ export function ChatWorkspace({
                 } : undefined}
                 attachmentPayloads={attachmentPayloads}
                 approval={approval}
+                hidePendingApproval={!liveAgent}
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
                 approvalRuns={runtimeRuns}
                 canRetry={!sending && queued.length === 0 && item.id === latestRetryableItemId}
@@ -960,7 +985,6 @@ export function ChatWorkspace({
             );
             });
           })()}
-            {unboundQuestionEntries}
             <div ref={conversationEndRef} />
           </div>
         </div>
@@ -995,7 +1019,7 @@ export function ChatWorkspace({
             </div>
           ) : null}
           {activeGoalBar}
-          {questionDock}
+          {questionDockInSidebar && questionPanelTarget ? createPortal(questionDock, questionPanelTarget) : questionDock}
           {pendingQueue}
           {approvalCard}
           {composer(hasHistory)}

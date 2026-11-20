@@ -54,6 +54,7 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["provider.reasoningEffort", "provider.reasoningEffortHint"], ["provider.testConnection"], ["provider.testStructured"], ["provider.testVision"],
   ]),
   ...group("models", "vision", [["settings.visionProfile", "settings.visionProfileDesc"], ["vision.enabledLabel", "vision.disabledDescription"], ["provider.apiProvider"], ["provider.apiKey"], ["provider.baseUrl"], ["provider.model"]]),
+  ...group("models", "input-prediction-model", [["settings.inputPredictionModel", "settings.inputPredictionModelDesc"]]),
   ...group("memory", "memory", [["settings.memoryEnabled", "settings.memoryEnabledDesc"], ["settings.crossSessionMemory", "settings.crossSessionMemoryDesc"], ["settings.memoryReviewTitle", "settings.memoryReviewDesc"]]),
   ...group("storage", "checkpoints", [
     ["settings.storage"], ["settings.checkpointArchiveCapacity"], ["settings.checkpointArchiveLimit", "settings.checkpointArchiveLimitHint"],

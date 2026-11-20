@@ -44,8 +44,8 @@ export function RightRuntimeSidebar({
   onOpenUserAttachmentSource,
   approvalsLoaded,
   pendingApprovals,
-  hasExternalPendingApprovals,
   approvalPanel,
+  onQuestionPanelTarget,
   pendingQuestions,
   runtimeReview,
   dismissedQuestion,
@@ -82,6 +82,7 @@ export function RightRuntimeSidebar({
   pendingApprovals: number;
   hasExternalPendingApprovals?: boolean;
   approvalPanel?: ReactNode;
+  onQuestionPanelTarget?: (target: HTMLDivElement | null) => void;
   dismissedQuestion?: { label: string; onReopen: () => void };
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
@@ -153,6 +154,7 @@ export function RightRuntimeSidebar({
           </button>
         ) : null}
         {approvalPanel}
+        {onQuestionPanelTarget ? <div ref={onQuestionPanelTarget} data-runtime-question-panel /> : null}
         {workspaceProjectType === "unity" ? (
           <CoreVersionNotice
             detail={unityToolsComponent?.detail}
@@ -181,7 +183,6 @@ export function RightRuntimeSidebar({
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
             onOpenUserAttachmentSource={onOpenUserAttachmentSource}
             pendingApprovals={pendingApprovals}
-            hasExternalPendingApprovals={hasExternalPendingApprovals}
             pendingQuestions={pendingQuestions}
             runtimeReview={runtimeReview}
             workspaceSummary={workspaceSummary}

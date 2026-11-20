@@ -203,7 +203,7 @@ export function Composer({
     }
   }
   const paletteOpen = actionMenuOpen || (!paletteDismissed && slashMatches.length > 0);
-  const suggestion = !attachments.length && !disabledReason && !submissionBlocked
+  const suggestion = !attachments.length && !disabledReason
     && !sending && !editing && !questionPromptVisible && !paletteOpen ? inputSuggestion : undefined;
   const paletteCommands: ComposerSlashCommand[] = actionMenuOpen ? commandActions : slashMatches;
   const providerModelLabel = [providerLabel?.trim(), model?.trim()].filter(Boolean).join(" · ");

@@ -43,13 +43,16 @@ function Fixture() {
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState(new Set());
   const [runs, setRuns] = useState([]);
   const [draft, setDraft] = useState("");
+  const [questionPanelTarget, setQuestionPanelTarget] = useState(null);
+  const [reviewQuestionReveal, setReviewQuestionReveal] = useState(null);
+  const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
   const conversationEndRef = useRef(null);
   window.setConversation = setConversation;
   window.setQuestions = setQuestions;
   window.setRuns = setRuns;
   const sessionId = "question-replay";
   const chat = projectQuestionContinuationActivity({ id: "fixture", sessionId, items: conversation }, questions, runs);
-  return <ChatWorkspace
+  return <><ChatWorkspace
     projectPromptTitle="New task welcome"
     conversationPending={false}
     conversationPendingMessage="Loading selected conversation…"
@@ -61,6 +64,9 @@ function Fixture() {
     agentQuestions={questions} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
     onBackgroundGoalCatchUpRendered={noop} onBackgroundGoalProviderWarningsRendered={noop}
     onBackgroundGoalCatchUpDismiss={noop} dismissedQuestionIds={dismissedQuestionIds}
+    questionPanelTarget={questionPanelTarget} reviewQuestionReveal={reviewQuestionReveal}
+    onReplyInChat={setPendingReplyQuestionId} pendingReplyQuestionId={pendingReplyQuestionId}
+    onCancelReply={() => setPendingReplyQuestionId("")}
     onDismissQuestion={(id) => setDismissedQuestionIds(new Set([id]))}
     onReopenQuestion={() => setDismissedQuestionIds(new Set())}
     onAnswerQuestion={(id, option, value) => {
@@ -78,7 +84,16 @@ function Fixture() {
     runtimeRuns={runs} runtimeSessionId={sessionId} onSaveOperationAsSkill={noop}
     sessionHandoffEndpoint="" sessionHandoffSourceChatId="" sessionHandoffTargetChats={[]}
     handoffSendOpen={false} onHandoffSendOpenChange={noop}
-  />;
+  />
+    <aside className="fixed right-0 top-0 w-72">
+      {questions.some(question => question.status === "pending") ? <button type="button" data-open-sidebar-questions
+        onClick={() => {
+          setDismissedQuestionIds(new Set());
+          setReviewQuestionReveal({ questionId: questions.find(question => question.status === "pending").questionId });
+        }}>Open questions</button> : null}
+      <div ref={setQuestionPanelTarget} data-fixture-question-panel />
+    </aside>
+  </>;
 }
 void initializeI18n().then(() => createRoot(document.getElementById("root")).render(<Fixture />));
 `,
@@ -218,22 +233,25 @@ try {
     questionId: "reference-q", status: "pending", originClientTurnId: "first", question: prompt,
     options: ["脸部细节", "全身效果", "侧面轮廓"].map((label) => ({ id: label, label })),
   }]), referencePrompt);
-  const questionDock = page.locator("[data-chat-question-dock]");
+  const questionDock = page.locator("[data-fixture-question-panel] [data-chat-question-dock]");
   const questionEntry = page.locator('[data-chat-answer-question="reference-q"]');
+  const questionButton = page.locator("[data-open-sidebar-questions]");
+  assert.equal(await page.locator("[data-chat-question-dock]").count(), 0, "settled questions stay collapsed until opened");
+  assert.equal(await questionEntry.count(), 0, "a settled question has no inline action");
+  await questionButton.click();
   await questionDock.waitFor();
-  assert.equal(await questionEntry.locator("xpath=ancestor::*[@data-conversation-item-id]").getAttribute("data-conversation-item-id"), referencePrompt);
-  assert.equal(await questionEntry.evaluate((node) => node.parentElement.previousElementSibling?.textContent), referencePrompt,
-    "the timeline action sits immediately below the question text");
-  const modelLabel = page.getByText("fixture-question-model", { exact: true });
-  assert.ok((await questionEntry.boundingBox()).y < (await modelLabel.boundingBox()).y, "the question action precedes model metadata");
-  assert.ok(await questionDock.locator("xpath=following-sibling::*").count(), "question card sits above the independent composer");
+  assert.equal(await page.locator("[data-chat-composer-dock] [data-chat-question-dock]").count(), 0);
   await page.clock.runFor(30_000);
-  assert.equal(await questionDock.count(), 0, "idle collapse leaves no duplicate entry above the composer");
-  assert.equal(await questionEntry.count(), 1, "the inline action remains available after idle collapse");
-  await questionEntry.click();
+  assert.equal(await questionDock.count(), 0, "the sidebar can collapse");
+  await questionButton.click();
   await questionDock.getByRole("button", { name: /close|关闭/i }).click();
-  assert.equal(await questionDock.count(), 0, "close hides the dock card");
-  await questionEntry.click();
+  assert.equal(await questionDock.count(), 0, "close hides the sidebar card");
+  await questionButton.click();
+  await questionDock.locator("[data-question-reply-in-chat]").click();
+  await page.locator("[data-question-reply-mode]").waitFor();
+  assert.equal(await questionDock.count(), 0, "explicit Reply in Chat uses the existing composer");
+  await page.locator("[data-question-reply-mode] button").click();
+  await questionDock.waitFor();
   await questionDock.getByRole("button", { name: /脸部细节/ }).click();
   const referenceAnswer = page.locator('[data-question-answer="reference-q"]');
   await referenceAnswer.waitFor();

@@ -26,6 +26,8 @@ const bundle = await build({
     import React, { useState } from "react";
     import { createRoot } from "react-dom/client";
     import { ChatWorkspace } from "./src/components/chat/chat-workspace";
+    import { PendingApprovalsStrip } from "./src/components/approvals/pending-approvals-strip";
+    import { RightRuntimeSidebar } from "./src/components/runtime/runtime-sidebar";
     import { useApprovalExecution } from "./src/hooks/use-approval-execution";
     import { initializeI18n, setLocale } from "./src/i18n";
     const chat = ${JSON.stringify(chat)};
@@ -40,7 +42,19 @@ const bundle = await build({
     function Fixture() {
       const [input, setInput] = useState("");
       const [approvals, setApprovals] = useState([]);
+      const [approvalOpen, setApprovalOpen] = useState(false);
       const [history, setHistory] = useState([]);
+      const [questions, setQuestions] = useState([]);
+      const [questionPanelTarget, setQuestionPanelTarget] = useState(null);
+      const [reviewQuestionReveal, setReviewQuestionReveal] = useState(null);
+      const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
+      window.showTestQuestion = (live) => {
+        setQuestions([{ questionId: "question", status: "pending", sessionId: chat.sessionId,
+          originClientTurnId: "question-turn", question: "Which side should we check?", options: [{ id: "front", label: "Front" }] }]);
+        setHistory(live ? [{ id: "question-live", type: "streaming", clientTurnId: "question-turn", sessionId: chat.sessionId, text: "" }]
+          : [{ id: "question-settled", type: "agent", response: { ok: true, status: "blocked", sessionId: chat.sessionId,
+            clientTurnId: "question-turn", turnId: "question-backend-turn", plan: { summary: "", nextStep: "needs_user_action" } } }]);
+      };
       window.setTestHistory = (hasHistory) => setHistory(hasHistory ? chat.items : []);
       window.showTestApproval = () => setApprovals([approval]);
       const execution = useApprovalExecution({
@@ -53,18 +67,34 @@ const bundle = await build({
         loadCheckpoints: async () => { window.checkpointsRefreshed = (window.checkpointsRefreshed || 0) + 1; },
         reloadChatStorageState: async () => false,
       });
-      return <ChatWorkspace
-        input={input} setInput={setInput} sending={false} queueAllowed={false}
+      return <div className="flex min-h-0 flex-1"><ChatWorkspace
+        input={input} setInput={setInput} inputSuggestion="Check the result" sending={false} queueAllowed={false}
         onSubmit={(event) => { event?.preventDefault(); window.composerSubmitted++; }}
         onSwitchMode={noop} commands={[]} actions={[]} attachments={[]} projects={[]}
         activeGoal={null} disabledReason="" conversation={history} queued={[]} runtimeRuns={[]}
-        agentQuestions={[]} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
+        agentQuestions={questions} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
+        runtimeSessionId={chat.sessionId} questionPanelTarget={questionPanelTarget} reviewQuestionReveal={reviewQuestionReveal}
+        pendingReplyQuestionId={pendingReplyQuestionId} onReplyInChat={setPendingReplyQuestionId}
+        onCancelReply={() => setPendingReplyQuestionId("")} onDismissQuestion={() => setReviewQuestionReveal(null)}
+        onAnswerQuestion={(id, option) => { window.answeredOption = option; setQuestions([]); }}
         scopedPendingApprovals={approvals} approvalActions={execution.approvalActions}
         pendingApprovalForResponse={execution.pendingApprovalForResponse}
         onApprove={execution.approveShell} onReject={execution.rejectShell}
         onModifyApproval={execution.modifyApprovalInComposer}
         sessionHandoffSourceChatId={chat.id} onConversationScroll={noop} onConversationMouseUp={noop}
-      />;
+      />
+        <div style={{width:320,flexShrink:0}}><RightRuntimeSidebar runtimeConnected loadingUnityStatus={false} workspaceProjectLabel="Fixture"
+          workspaceProjectType="general" projectWorkspace authorizationStatus={{source:"none",status:"unknown"}}
+          agentProgress={[]} userAttachmentSources={[]} approvalsLoaded pendingApprovals={approvals.length}
+          onQuestionPanelTarget={setQuestionPanelTarget}
+          pendingQuestions={questions.length ? {count:questions.length,
+            onOpen:() => setReviewQuestionReveal({questionId:questions[0].questionId})} : undefined}
+          approvalPanel={approvalOpen ? <PendingApprovalsStrip approvals={approvals} actions={execution.approvalActions}
+            loading={false} onApprove={execution.approveShell} onReject={execution.rejectShell} /> : undefined}
+          workspaceSummary={null} activeDesktopActions={[]} refreshUnityStatus={noop} providerTestAttempted={false}
+          onHideSidebar={noop} onOpenPendingApprovals={() => setApprovalOpen((value) => !value)}
+          localizeHealthMessage={() => ""} /></div>
+      </div>;
     }
     void mount();
   ` },
@@ -105,6 +135,14 @@ try {
     await input.waitFor();
     await page.evaluate((value) => window.setTestHistory(value), hasHistory);
     await page.locator(hasHistory ? "[data-chat-history-scroll]" : "[data-empty-chat-content]").waitFor({ state: "attached" });
+    await page.evaluate(() => window.showTestApproval());
+    const card = page.locator("[data-runtime-approval-panel]");
+    const approvalEntry = page.locator('[data-vrcforge-status="approval"]');
+    await approvalEntry.waitFor();
+    assert.equal(await card.count(), 0, "settled approval stays collapsed until the right-side button is used");
+    assert.equal(await page.locator("[data-chat-composer-dock] [data-scoped-pending-approval]").count(), 0);
+    assert.equal(await page.locator("[data-composer-input-suggestion]").innerText(), "Check the result");
+    assert.equal(await page.locator("[data-composer-send]").isDisabled(), true, "prediction does not permit sending past approval");
     await input.fill("Keep this draft");
     const isCompact = () => input.evaluate((node) => node.closest(".chat-composer-frame").classList.contains("px-2.5"));
     assert.equal(await isCompact(), hasHistory);
@@ -115,8 +153,7 @@ try {
       draft: window.originalInput.value,
       selection: [window.originalInput.selectionStart, window.originalInput.selectionEnd],
     }));
-    await page.evaluate(() => window.showTestApproval());
-    const card = page.locator("[data-scoped-pending-approval]");
+    await approvalEntry.evaluate((button) => button.click());
     const approve = card.getByRole("button", { name: "Allow once", exact: true });
     await approve.waitFor({ timeout: 4000 });
     const pendingState = await inputState();
@@ -143,10 +180,28 @@ try {
     assert.equal(await page.evaluate(() => window.composerSubmitted), 1);
     assert.equal(requests.length, 1);
     assert.equal(await page.evaluate(() => window.approvalError), "");
+    if (hasHistory) {
+      await page.evaluate(() => window.showTestQuestion(true));
+      await page.locator("[data-chat-composer-dock] [data-chat-question-dock]").waitFor();
+      await page.evaluate(() => window.showTestQuestion(false));
+      await page.locator('[data-conversation-item-id="question-settled"]').waitFor({ state: "attached" });
+      assert.equal(await page.locator("[data-chat-question-dock]").count(), 0);
+      assert.equal(await page.locator("[data-chat-answer-question]").count(), 0);
+      await page.locator('[data-vrcforge-status="runtime-question"]').click();
+      const questionCard = page.locator("[data-runtime-question-panel] [data-chat-question-dock]");
+      await questionCard.waitFor();
+      assert.equal(await page.locator("[data-chat-composer-dock] [data-chat-question-dock]").count(), 0);
+      await questionCard.locator("[data-question-reply-in-chat]").click();
+      await page.locator("[data-question-reply-mode]").waitFor();
+      await page.locator("[data-question-reply-mode] button").click();
+      await questionCard.getByRole("button", { name: /Front/ }).click();
+      await questionCard.waitFor({ state: "detached" });
+      assert.equal(await page.evaluate(() => window.answeredOption), "front");
+    }
     assert.deepEqual(errors, []);
     await page.close();
   }
 } finally {
   await browser.close();
 }
-console.log("rollback approval preserves the composer, draft, selection and focus in both chat layouts");
+console.log("settled decisions reopen in the sidebar; approval preserves the composer draft and question can be answered");

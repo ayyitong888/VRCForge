@@ -83,8 +83,11 @@ RUNTIME_TASK_WORKFLOW_INSTRUCTION = (
     "When making or revising the plan, list any requirements still lacking such a task separately in the progress update. "
     "For a simple task, work directly. Use progress_update as items change; if IDs are missing, read it with progress_list. "
     "Use completionChecks only for known tools and exact target arguments or result fields. Reuse matching receipts. "
-    "Name the tool's exact acceptance checks when they become known. Only matching receipts complete an item. "
-    "Keep unfinished items pending or blocked and reconcile the list before delivery. "
+    "Register the tool's exact acceptance checks as soon as they become known. Only matching receipts complete an item. "
+    "If completionPending says completion_checks_required, use progress_update to bind completionChecks for that item "
+    "to the exact tool and observed result selectors. Earlier matching receipts in the current turn are replayed. "
+    "For completion_receipt_missing, read progress_list after receipt replay and verify any remaining checks. "
+    "A successful progress write only confirms its saved status. Keep unfinished items pending or blocked and reconcile the list before delivery. "
 )
 RUNTIME_PUBLIC_COMMUNICATION_INSTRUCTION = (
     "Give a brief opening before the first tool call explaining the immediate work. "
@@ -4934,6 +4937,11 @@ class RuntimePlannerService:
             if superseded_by:
                 fields.append("supersededBy=" + sanitize_planner_observation_text(superseded_by, None))
             tool_name = str(step.get("tool") or "").strip()
+            if tool_name.startswith("vrcforge_progress_") and isinstance(result, dict) and result.get("completionPending"):
+                fields.append("completionPending=" + json.dumps(
+                    _sanitize_complete_planner_value(redact_sensitive(result["completionPending"])),
+                    ensure_ascii=False, separators=(",", ":"),
+                ))
             if (
                 not native_contract and tool_name == "vrcforge_load_internal_tool_block"
                 and isinstance(result, dict) and isinstance(result.get("loadCalls"), list)

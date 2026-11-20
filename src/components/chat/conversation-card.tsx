@@ -80,6 +80,7 @@ export function ConversationCard({
   saveOperationTool,
   onSaveOperationAsSkill,
   questionAlreadyShown,
+  hidePendingApproval = false,
   pendingQuestions = [],
   renderQuestionEntry,
   onOpenChatById,
@@ -105,6 +106,7 @@ export function ConversationCard({
   chatResourceImageContext?: Pick<ChatResourceImageContextValue, "endpoint" | "chatId" | "projectPath">;
   attachmentPayloads?: AttachmentPayloadVault;
   approval?: AgentApproval | null;
+  hidePendingApproval?: boolean;
   approvalAction?: ApprovalActionState;
   approvalRuns?: readonly AgentRuntimeRun[];
   editing?: boolean;
@@ -551,7 +553,7 @@ export function ConversationCard({
   const providerLine = compactAgentReply || approvalWaitWithoutReply || loopStop ? "" : formatRuntimeModelLine("", response.model);
   const replySource = providerLine;
   const showReplyActions = !sharedProcess || sharedProcess.last;
-  const awaitingApproval = shell?.status === "pending_approval";
+  const awaitingApproval = !hidePendingApproval && shell?.status === "pending_approval";
   const completedAtMs = Date.parse(item.completedAt || response.completedAt || "");
   const timelineRows = buildAgentTimelineRows({
     response,

@@ -26,6 +26,7 @@ export const AUTOMATIC_UPDATE_CHECK_DISABLED_KEY = "vrcforge_automatic_update_ch
 const STARTUP_ANIMATION_KEY = "vrcforge_startup_animation";
 const RUNNING_ENTER_ACTION_KEY = "vrcforge_running_enter_action";
 const INPUT_PREDICTION_KEY = "vrcforge_input_prediction";
+const INPUT_PREDICTION_MODELS_KEY = "vrcforge_input_prediction_models";
 
 export function loadInputPredictionEnabled(): boolean {
   try {
@@ -40,6 +41,26 @@ export function persistInputPredictionEnabled(enabled: boolean): void {
     window.localStorage.setItem(INPUT_PREDICTION_KEY, String(enabled));
   } catch {
     // The preference still applies to the current window.
+  }
+}
+
+export function loadInputPredictionModels(): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(INPUT_PREDICTION_MODELS_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed)
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string" && Boolean(entry[1].trim()))
+      .map(([provider, model]) => [provider, model.trim()]));
+  } catch {
+    return {};
+  }
+}
+
+export function persistInputPredictionModels(models: Record<string, string>): void {
+  try {
+    window.localStorage.setItem(INPUT_PREDICTION_MODELS_KEY, JSON.stringify(models));
+  } catch {
+    // The model preference still applies to the current window.
   }
 }
 

@@ -78,7 +78,7 @@ import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspa
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
 import { useComposerDraft } from "./hooks/use-composer-draft";
-import { chatInputPredictionOwner, recentPredictionInputs, useChatInputPrediction } from "./hooks/use-chat-input-prediction";
+import { chatInputPredictionOwner, predictionTurnForChat, recentPredictionInputs, useChatInputPrediction } from "./hooks/use-chat-input-prediction";
 import { useConversationScroll } from "./hooks/use-conversation-scroll";
 import { useContextCompactionController } from "./hooks/use-context-compaction-controller";
 import { useDoctorFixController } from "./hooks/use-doctor-fix-controller";
@@ -118,7 +118,9 @@ import {
   loadDeveloperOptionsEnabled,
   loadRunningEnterAction,
   loadInputPredictionEnabled,
+  loadInputPredictionModels,
   persistInputPredictionEnabled,
+  persistInputPredictionModels,
   loadThemePreference,
   persistAutomaticUpdateCheckEnabled,
   persistRunningEnterAction,
@@ -356,6 +358,8 @@ export default function App() {
   const [settingsSearchSelection, setSettingsSearchSelection] = useState<SettingsSearchSelection | null>(null);
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
   const [inputPredictionEnabled, setInputPredictionEnabled] = useState(loadInputPredictionEnabled);
+  const [inputPredictionModels, setInputPredictionModels] = useState(loadInputPredictionModels);
+  const [questionPanelTarget, setQuestionPanelTarget] = useState<HTMLDivElement | null>(null);
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
   const actionErrorMessage = useCallback((key: string, cause: unknown, values?: Record<string, string>) => {
     if (developerOptionsEnabled) console.warn(key, cause);
@@ -1025,7 +1029,8 @@ export default function App() {
     if (!owner) return false;
     openChat(owner);
     setSelectedSubAgentPanelOpen(false);
-    setPendingApprovalPanelOpen(false);
+    setRightSidebarCollapsed(false);
+    setPendingApprovalPanelOpen(true);
     setApprovalReveal({ chatId: owner.id, approvalId: approval.id });
     return true;
   }, [openChat, sidebarChats]);
@@ -1198,17 +1203,22 @@ export default function App() {
     : undefined, [runtimeConnected, agentProgress, displayChat, runtimeRuns, selectedForegroundTurn?.clientTurnId]);
   const selectedCompaction = compacting && activeChat?.compaction?.status === "compacting";
   const sending = Boolean(selectedForegroundTurn || selectedCompaction || activeRuntimeCancelTarget);
+  const predictionProvider = normalizeProviderForContext(providerSnapshot.provider);
+  const inputPredictionModel = inputPredictionModels[predictionProvider] || "";
+  const latestPredictionReply = useMemo(() => activeChat && inputPredictionEnabled
+    ? predictionTurnForChat(endpoint, activeChat, scopedAgentQuestions, pendingApprovalItems) : undefined,
+  [activeChat, endpoint, inputPredictionEnabled, scopedAgentQuestions, pendingApprovalItems]);
   const inputPrediction = useChatInputPrediction({
     endpoint,
     owner: chatInputPredictionOwner(endpoint, activeChatId, activeChat?.sessionId || ""),
     provider: providerSnapshot.provider,
-    model: providerSnapshot.model,
+    model: inputPredictionModel || providerSnapshot.model,
     eligible: inputPredictionEnabled && activeView === "chat" && runtimeConnected && providerConfigured
       && Boolean(activeChat?.sessionId) && !visibleQueued.length
-      && !attachments.length && !attachmentsLoading && !pendingReplyQuestionId && !editingMessage
-      && !pendingApprovalItems.length && !scopedAgentQuestions.some((question) => question.status === "pending"),
-    busy: Boolean(activeChatPending || sending || hasUnresolvedRuntimeState(activeChatId, activeChat?.sessionId || "")),
+      && !attachments.length && !attachmentsLoading && !pendingReplyQuestionId && !editingMessage,
+    busy: Boolean(activeChatPending || sending),
     hasDraft: Boolean(input),
+    latestReply: latestPredictionReply,
   });
   onPredictionResumeRef.current = (event, chatId) => {
     if (!inputPredictionEnabled || activeView !== "chat" || activeChatId !== chatId) return;
@@ -1528,6 +1538,7 @@ export default function App() {
         }
         if (question.status === "pending") {
           openChat(chat);
+          setRightSidebarCollapsed(false);
           reopenAgentQuestion(question.questionId);
           setReviewQuestionReveal({ chatId: chat.id, questionId: question.questionId });
         }
@@ -4420,6 +4431,18 @@ export default function App() {
               runtimeConnected={runtimeConnected}
               currentLanguage={i18n.language}
               inputPredictionEnabled={inputPredictionEnabled}
+              inputPredictionProvider={predictionProvider}
+              inputPredictionModel={inputPredictionModel}
+              inputPredictionModelOptions={modelOptionsScope
+                && normalizeProviderForContext(modelOptionsScope.provider) === predictionProvider
+                && modelOptionsScope.baseUrl.trim() === savedBaseUrl.trim() ? modelOptions : []}
+              onInputPredictionModelChange={(model) => {
+                const next = { ...inputPredictionModels };
+                if (model) next[predictionProvider] = model;
+                else delete next[predictionProvider];
+                setInputPredictionModels(next);
+                persistInputPredictionModels(next);
+              }}
               onInputPredictionChange={(enabled) => {
                 setInputPredictionEnabled(enabled);
                 persistInputPredictionEnabled(enabled);
@@ -4631,6 +4654,7 @@ export default function App() {
               onDismissQuestion={(questionId) => setDismissedQuestionIds((current) => new Set(current).add(questionId))}
               onReopenQuestion={reopenAgentQuestion}
               reviewQuestionReveal={reviewQuestionReveal?.chatId === displayChat?.id ? reviewQuestionReveal : null}
+              questionPanelTarget={questionPanelTarget}
               onReplyInChat={replyToAgentQuestionInComposer}
               focusInput={Boolean(pendingReplyQuestionId)}
               pendingReplyQuestionId={pendingReplyQuestionId}
@@ -4742,9 +4766,12 @@ export default function App() {
                   loading={loading}
                   onApprove={approveShell}
                   onReject={rejectShell}
+                  onModifyApproval={modifyApprovalInComposer}
+                  reveal={approvalReveal}
                   onClose={() => setPendingApprovalPanelOpen(false)}
                 />
               ) : undefined}
+              onQuestionPanelTarget={setQuestionPanelTarget}
               pendingQuestions={reviewQuestionTarget ? {
                 count: questionReview.questionIds.size,
                 onOpen: () => {
@@ -4760,7 +4787,10 @@ export default function App() {
               } : undefined}
               dismissedQuestion={dismissedAgentQuestion ? {
                 label: dismissedAgentQuestion.header || dismissedAgentQuestion.question || dismissedAgentQuestion.questionId,
-                onReopen: () => reopenAgentQuestion(dismissedAgentQuestion.questionId),
+                onReopen: () => {
+                  reopenAgentQuestion(dismissedAgentQuestion.questionId);
+                  if (displayChat) setReviewQuestionReveal({ chatId: displayChat.id, questionId: dismissedAgentQuestion.questionId });
+                },
               } : undefined}
               workspaceSummary={workspaceDiff}
               activeDesktopActions={activeDesktopActions}
@@ -4768,11 +4798,7 @@ export default function App() {
               onTestAgentConnection={() => void runProviderTest("text")}
               providerTestAttempted={Boolean(providerTestMessage.trim())}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
-              onOpenPendingApprovals={() => {
-                const target = pendingApprovalInbox.length === 1 ? projectPendingApprovalItems[0] : undefined;
-                if (target && openPendingApprovalOwner(target)) return;
-                setPendingApprovalPanelOpen((current) => !current);
-              }}
+              onOpenPendingApprovals={() => setPendingApprovalPanelOpen((current) => !current)}
               localizeHealthMessage={localizeHealthMessage}
               />}
             </SidebarMountTracker>

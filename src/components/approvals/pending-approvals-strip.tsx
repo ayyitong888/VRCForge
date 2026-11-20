@@ -1,11 +1,12 @@
-import { AlertTriangle, ChevronDown, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { AlertTriangle, ChevronDown, Pencil, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { presentApproval } from "../../lib/approval-presentation";
 import type { AgentApproval } from "../../lib/api";
 import type { ApprovalActionState } from "../../lib/chat-types";
 import { Button } from "../ui/button";
 import { ApprovalAllowSplitButton } from "./approval-allow-split-button";
+import { ApprovalRevisionEditor } from "./approval-revision-editor";
 
 type PendingApprovalsStripProps = {
   approvals: AgentApproval[];
@@ -14,20 +15,33 @@ type PendingApprovalsStripProps = {
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
   onClose?: () => void;
+  onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
+  reveal?: { approvalId: string } | null;
 };
 
-export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, onReject, onClose }: PendingApprovalsStripProps) {
+export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, onReject, onClose, onModifyApproval, reveal }: PendingApprovalsStripProps) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
+  const [editingApprovalId, setEditingApprovalId] = useState("");
+  const panelRef = useRef<HTMLDivElement>(null);
   const visibleApprovals = approvals.filter(
     (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
   );
   const hasPendingExternalApproval = visibleApprovals.some((approval) => approval.approvalChannel === "external_mcp_confirmation");
+  const editingVisibleApproval = visibleApprovals.some((approval) => approval.id === editingApprovalId);
   useEffect(() => {
-    if (hasPendingExternalApproval || loading || Object.values(actions).some(Boolean)) return undefined;
+    if (reveal) setCollapsed(false);
+  }, [reveal]);
+  useEffect(() => {
+    if (!reveal || collapsed) return;
+    const cards = panelRef.current?.querySelectorAll<HTMLElement>("[data-approval-id]");
+    Array.from(cards ?? []).find((card) => card.dataset.approvalId === reveal.approvalId)?.scrollIntoView({ block: "nearest" });
+  }, [reveal, collapsed, visibleApprovals.length]);
+  useEffect(() => {
+    if (hasPendingExternalApproval || loading || editingVisibleApproval || Object.values(actions).some(Boolean)) return undefined;
     const timer = window.setTimeout(() => setCollapsed(true), 30_000);
     return () => window.clearTimeout(timer);
-  }, [hasPendingExternalApproval, loading, actions, visibleApprovals.length]);
+  }, [hasPendingExternalApproval, loading, editingVisibleApproval, actions, reveal, visibleApprovals.length]);
   if (visibleApprovals.length === 0) {
     return null;
   }
@@ -36,11 +50,20 @@ export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, 
   }
 
   return (
-    <div className="max-h-[40vh] shrink-0 space-y-3 overflow-auto border-t border-amber-500/20 bg-amber-500/5 py-3">
+    <div ref={panelRef} data-runtime-approval-panel className="max-h-[40vh] shrink-0 space-y-3 overflow-auto border-t border-amber-500/20 bg-amber-500/5 py-3">
       {onClose ? <div className="flex justify-end"><Button variant="ghost" onClick={onClose}>{t("common.close")}</Button></div> : null}
       <div className="text-sm font-semibold text-foreground">{t("approval.requestTitle")}</div>
       {visibleApprovals.map((approval) => (
-        <ApprovalCard key={approval.id} approval={approval} loading={loading || Boolean(actions[approval.id])} onApprove={onApprove} onReject={onReject} />
+        <ApprovalCard
+          key={approval.id}
+          approval={approval}
+          loading={loading || Boolean(actions[approval.id])}
+          onApprove={onApprove}
+          onReject={onReject}
+          editing={editingApprovalId === approval.id}
+          onEditingChange={(editing) => setEditingApprovalId(editing ? approval.id : "")}
+          onModifyApproval={onModifyApproval}
+        />
       ))}
     </div>
   );
@@ -51,17 +74,25 @@ function ApprovalCard({
   loading,
   onApprove,
   onReject,
+  editing,
+  onEditingChange,
+  onModifyApproval,
 }: {
   approval: AgentApproval;
   loading: boolean;
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
+  onModifyApproval?: PendingApprovalsStripProps["onModifyApproval"];
 }) {
   const { t } = useTranslation();
   const presentation = presentApproval(approval, t);
+  const canRequestChanges = onModifyApproval && approval.approvalChannel !== "external_mcp_confirmation"
+    && !approval.goalDeliveryId?.trim() && approval.taskContext && approval.taskContext.approvalRevisionUsed !== true;
 
   return (
-    <section className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 shadow-panel">
+    <section data-approval-id={approval.id} className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 shadow-panel">
       <div className="flex min-w-0 items-center gap-2">
         <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
         <div className="truncate text-sm font-semibold">{presentation.title}</div>
@@ -98,6 +129,12 @@ function ApprovalCard({
           <X className="h-4 w-4 shrink-0" />
           {t("approval.reject")}
         </Button>
+        {canRequestChanges ? (
+          <Button variant="outline" disabled={loading} onClick={() => onEditingChange(!editing)}>
+            <Pencil className="h-4 w-4 shrink-0" />
+            {editing ? t("approval.modifyCancel") : t("approval.modify")}
+          </Button>
+        ) : null}
         <ApprovalAllowSplitButton
           approvalId={approval.id}
           allowFutureEligible={approval.allowFutureEligible === true}
@@ -105,6 +142,15 @@ function ApprovalCard({
           onApprove={onApprove}
         />
       </div>
+      {canRequestChanges && editing ? (
+        <ApprovalRevisionEditor
+          onCancel={() => onEditingChange(false)}
+          onSubmit={(reason, reasonCode) => {
+            onEditingChange(false);
+            onModifyApproval(approval, reason, reasonCode);
+          }}
+        />
+      ) : null}
     </section>
   );
 }

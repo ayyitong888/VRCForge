@@ -105,7 +105,8 @@ try {
   await approval.click();
   assert.equal(await page.evaluate(() => window.approvalsOpened), true);
   await show("ready", 1, "general", false);
-  await approval.waitFor({ state: "detached" });
+  await approval.click();
+  assert.equal(await page.evaluate(() => window.approvalsOpened), true, "internal general-project approvals remain available in the sidebar");
   const fixture = process.env.VRCFORGE_REVIEW_REPLAY
     ? JSON.parse(readFileSync(process.env.VRCFORGE_REVIEW_REPLAY, "utf8"))
     : {

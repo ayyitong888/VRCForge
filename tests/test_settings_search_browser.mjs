@@ -22,6 +22,7 @@ import ja from './src/locales/ja-JP.json';
 import { AppSidebar } from './src/components/sidebar/app-sidebar';
 import { SettingsWorkspace } from './src/components/settings/settings-workspace';
 import { DEFAULT_THEME_CUSTOMIZATION } from './src/lib/theme-customization';
+import { loadInputPredictionModels, persistInputPredictionModels } from './src/lib/app-preferences';
 import { SETTINGS_SEARCH_ENTRIES, searchSettings } from './src/lib/settings-search';
 i18n.use(initReactI18next).init({lng:'en-US', resources:{'en-US':{translation:en},'zh-CN':{translation:zh},'zh-TW':{translation:tw},'ja-JP':{translation:ja}},interpolation:{escapeValue:false}});
 window.mutations = 0;
@@ -42,16 +43,24 @@ function Fixture() {
  const [apiProvider,setApiProvider] = useState('chatgpt');
  const [running,setRunning] = useState(false);
  const [model,setModel] = useState("a-model");
+ const [predictionModels,setPredictionModels] = useState(loadInputPredictionModels);
  const [visionEnabled,setVisionEnabled] = useState(false);
  const select = entry => {setSection(entry.section);setSelection(previous=>({entry,requestId:(previous?.requestId||0)+1}));};
  window.fixture = {select, setModel, setRunning, setDeveloper, setCollapsed, apiProvider, setApiProvider, visionEnabled, setVisionEnabled, language:code=>i18n.changeLanguage(code), entries:SETTINGS_SEARCH_ENTRIES,
-  search:query=>searchSettings(query,key=>i18n.t(key),developer), label:key=>i18n.t(key)};
+  search:query=>searchSettings(query,key=>i18n.t(key),developer), label:key=>i18n.t(key), loadInputPredictionModels};
  return <div style={{display:'grid',gridTemplateColumns:(collapsed?'56px':'260px')+' minmax(0,1fr)',height:'100vh'}}>
  <AppSidebar collapsed={collapsed} activeView='settings' activeSettingsSection={section} developerOptionsEnabled={developer}
   projectItems={[]} chatSidebar={{temporaryChats:[],testChats:[],projectChatsByPath:new Map()}}
   onOpenSettingsSection={next=>{setSelection(null);setSection(next);}} onSelectSettingsSearchResult={select} onBackFromSettings={()=>{}} />
  <SettingsWorkspace {...props} apiConnectionSaved={apiProvider === 'openai'} runtimeConnected={running} providerConfigurationLocked={running}
   modelOptions={[{id:'a-model'},{id:'b-model'}]} apiModel={model} apiThinkingLevel="high"
+  inputPredictionProvider={apiProvider} inputPredictionModel={predictionModels[apiProvider] || ""}
+  inputPredictionModelOptions={apiProvider === "custom" ? [] : [{id:'api-fast',label:'API Fast'}]}
+  onInputPredictionModelChange={model=>{
+    const next = {...predictionModels,[apiProvider]:model};
+    setPredictionModels(next);
+    persistInputPredictionModels(next);
+  }}
   reasoningVariants={{variants:[{key:'high',displayKey:'provider.reasoning_high'},{key:'low',displayKey:'provider.reasoning_low'}]}}
   onApiModelChange={model=>{window.pickedModel=model;setModel(model);}} onApiThinkingLevelChange={effort=>{window.pickedEffort=effort;}}
   onSaveApiProvider={e=>{e.preventDefault();window.savedSelection=true;}} apiProvider={apiProvider} visionEnabled={visionEnabled} activeSection={section} developerOptionsEnabled={developer} searchSelection={selection}/>
@@ -220,6 +229,18 @@ try {
  await page.evaluate(()=>{window.fixture.setRunning(true);window.fixture.setApiProvider('chatgpt');window.fixture.select(window.fixture.entries.find(e=>e.id==='account:chatgptOAuth.model'));});
  const model=page.locator('[data-chatgpt-model-select]');
  await model.locator('option[value="b-model"]').waitFor({state:'attached'});
+ const completionPanel = page.locator('[data-settings-panel="input-prediction-model"]');
+ assert.equal(await completionPanel.evaluate(panel=>panel.previousElementSibling?.getAttribute('data-settings-panel')),'vision');
+ await selectResult('input-prediction-model:settings.inputPredictionModel');
+ const completionModel=completionPanel.locator('select');
+ await completionModel.locator('option[value="b-model"]').waitFor({state:'attached'});
+ assert.equal(await completionModel.inputValue(),'','completion follows the main model by default');
+ await completionModel.selectOption('b-model');
+ assert.equal(await model.inputValue(),'a-model','completion selection does not change the main model');
+ assert.deepEqual(await page.evaluate(()=>window.fixture.loadInputPredictionModels()),{chatgpt:'b-model'});
+ await page.locator('[aria-controls="api-model-settings"]').click();
+ assert.equal(await completionModel.inputValue(),'b-model','completion panel is shared between provider tabs');
+ await page.locator('[aria-controls="subscription-model-settings"]').click();
  await model.selectOption('b-model');
  await page.locator('[data-chatgpt-reasoning-select]').selectOption('high');
  const activate=page.getByRole('button',{name:await page.evaluate(()=>window.fixture.label('chatgptOAuth.activate')),exact:true});
@@ -232,6 +253,11 @@ try {
  assert.equal(activated.postDataJSON().thinking_level,'high');
  await page.evaluate(()=>{window.fixture.setApiProvider('openai');window.fixture.select(window.fixture.entries.find(e=>e.id==='api:provider.model'));});
  const api=page.locator('[data-settings-panel="api"]');
+ assert.equal(await completionModel.inputValue(),'','a different provider defaults to its own main model');
+ await completionModel.selectOption('api-fast');
+ assert.deepEqual(await page.evaluate(()=>window.fixture.loadInputPredictionModels()),{chatgpt:'b-model',openai:'api-fast'});
+ await completionModel.selectOption('');
+ assert.deepEqual(await page.evaluate(()=>window.fixture.loadInputPredictionModels()),{chatgpt:'b-model'});
  await api.locator('[data-onboarding-provider="model"] select').selectOption('b-model');
  await api.locator('select').filter({has:page.locator('option[value="low"]')}).selectOption('low');
  assert.ok(await api.locator('input[type=password]').isDisabled());
@@ -241,6 +267,10 @@ try {
  await page.evaluate(()=>{window.fixture.setApiProvider('custom');window.fixture.setModel('');window.fixture.select(window.fixture.entries.find(e=>e.id==='api:provider.model'));});
  assert.ok(await api.locator('input[type=password]').isEnabled());
  assert.ok(await api.locator('[data-onboarding-provider="endpoint"] input').isEnabled());
+ const manualCompletionModel=completionPanel.locator('input');
+ assert.equal(await manualCompletionModel.inputValue(),'');
+ await manualCompletionModel.fill('local-model-id');
+ assert.deepEqual(await page.evaluate(()=>window.fixture.loadInputPredictionModels()),{chatgpt:'b-model',custom:'local-model-id'});
  assert.ok(await api.locator('button[type="submit"]').isDisabled());
  await api.getByText(await page.evaluate(()=>window.fixture.label('provider.chooseModelToSave')),{exact:true}).waitFor();
  await api.locator('[data-onboarding-provider="model"] select').selectOption('a-model');

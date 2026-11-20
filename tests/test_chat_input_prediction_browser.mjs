@@ -7,11 +7,21 @@ const bundle = await build({
   stdin: { resolveDir: process.cwd(), loader: "tsx", contents: `
     import React, { useState } from "react";
     import { createRoot } from "react-dom/client";
-    import { chatInputPredictionOwner, useChatInputPrediction } from "./src/hooks/use-chat-input-prediction";
+    import { chatInputPredictionOwner, predictionTurnForChat, useChatInputPrediction } from "./src/hooks/use-chat-input-prediction";
     function Chat() {
       const [state, setState] = useState({ busy: true, eligible: true, hasDraft: false, provider: "chatgpt", model: "first" });
       const owner = chatInputPredictionOwner(location.origin, "chat", "session");
-      const prediction = useChatInputPrediction({ ...state, endpoint: location.origin, owner });
+      const [history, setHistory] = useState();
+      const latestReply = history && predictionTurnForChat(location.origin, {
+        id: "chat", sessionId: "session", items: [{ id: "input", type: "user", text: "Check this" }, {
+          id: history.id, type: "agent", response: { ok: true, turnId: history.id, turnStatus: { status: history.status },
+            approvalId: history.approvalId, plan: { nextStep: history.nextStep, reply: history.reply,
+              summary: "", completionGate: { reason: history.reason } },
+          },
+        }],
+      }, history.questions || [], history.approvals || []);
+      const prediction = useChatInputPrediction({ ...state, endpoint: location.origin, owner, latestReply });
+      window.openHistory = setHistory;
       window.change = (patch) => setState(prev => ({ ...prev, ...patch }));
       window.start = () => { window.submission = prediction.dismiss(); window.change({ busy: true }); };
       window.type = prediction.onInputActivity;
@@ -125,7 +135,28 @@ try {
   await change({ busy: false });
   assert.equal(requests.length, 6);
   assert.equal(await page.locator("output").textContent(), "");
-  console.log("PASS: foreground and continued completions, deduplication, waiting, typing, approval and cancellation");
+  const restoreHistory = (response) => render(value => window.openHistory(value), response);
+  const expectHistorySuggestion = async (response, expectedTail, expectedModel = "third") => {
+    const request = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"));
+    await restoreHistory(response);
+    const payload = (await request).postDataJSON();
+    assert.equal(payload.assistant_tail, expectedTail);
+    assert.equal(payload.model, expectedModel);
+    await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
+  };
+  const restored = { id: "saved", status: "completed", nextStep: "done", reply: "Saved final reply" };
+  await expectHistorySuggestion(restored, restored.reply);
+  const pendingApproval = { id: "pending-approval", status: "blocked", nextStep: "pending_approval", approvalId: "approval",
+    approvals: [{ id: "approval", status: "pending", reason: "Approve the proposed operation?" }] };
+  await expectHistorySuggestion(pendingApproval, "Approve the proposed operation?");
+  const pendingQuestion = { id: "pending-question", status: "waiting_user", nextStep: "needs_user_action", reason: "question_pending",
+    questions: [{ status: "pending", originTurnId: "pending-question", question: "Which option should we use?" }] };
+  await expectHistorySuggestion(pendingQuestion, "Which option should we use?");
+  const modelSwitch = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"));
+  await change({ model: "dedicated-completion-model" });
+  assert.equal((await modelSwitch).postDataJSON().model, "dedicated-completion-model");
+  assert.equal(requests.length, 10);
+  console.log("PASS: completed and restored replies, user decisions, model changes, deduplication, typing and cancellation");
 } finally {
   finishSlow?.();
   await browser?.close();

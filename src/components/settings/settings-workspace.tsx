@@ -1,5 +1,5 @@
 import { version as appVersion } from "../../../package.json";
-import { Check, ChevronDown, Eye, Globe, Loader2, RefreshCw } from "lucide-react";
+import { Check, ChevronDown, Eye, Globe, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import type { FormEvent } from "react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -35,6 +35,7 @@ import { ThemeCustomizationPanel } from "./theme-customization-panel";
 import type { ThemeCustomization } from "../../lib/theme-customization";
 import { DataRootSettingsPanel } from "./data-root-settings-panel";
 import { ChatGptOAuthSettings } from "../../features/chatgpt-oauth/settings";
+import type { ChatGptOAuthModel } from "../../features/chatgpt-oauth/api";
 import { TelegramSettingsPanel } from "./telegram-settings-panel";
 import { AgentQuestionNotificationSoundSettings } from "./agent-question-notification-sound";
 
@@ -55,6 +56,10 @@ type SettingsWorkspaceProps = {
   currentLanguage: string;
   inputPredictionEnabled: boolean;
   onInputPredictionChange: (enabled: boolean) => void;
+  inputPredictionModel: string;
+  inputPredictionProvider?: string;
+  inputPredictionModelOptions: ProviderModelInfo[];
+  onInputPredictionModelChange: (model: string) => void;
   runningEnterAction: RunningEnterAction;
   onRunningEnterActionChange: (action: RunningEnterAction) => void;
   themeCustomization: ThemeCustomization;
@@ -166,6 +171,10 @@ export function SettingsWorkspace({
   currentLanguage,
   inputPredictionEnabled,
   onInputPredictionChange,
+  inputPredictionModel = "",
+  inputPredictionProvider,
+  inputPredictionModelOptions = [],
+  onInputPredictionModelChange,
   runningEnterAction,
   onRunningEnterActionChange,
   themeCustomization,
@@ -264,6 +273,10 @@ export function SettingsWorkspace({
   const focusedSearchSelection = useRef<SettingsSearchSelection | null>(null);
   const [startupAnimationEnabled, setStartupAnimationEnabled] = useState(loadStartupAnimationEnabled);
   const [providerPanel, setProviderPanel] = useState<"subscription" | "api" | null>(null);
+  const [activeChatGptModels, setActiveChatGptModels] = useState<ChatGptOAuthModel[]>([]);
+  const completionModelOptions = (inputPredictionProvider ?? apiProvider) === "chatgpt"
+    ? activeChatGptModels.map(({ id, name }) => ({ id, label: name }))
+    : inputPredictionModelOptions;
   const visibleProvider = providerPanel ?? (apiProvider === "chatgpt" ? "subscription" : "api");
   useEffect(() => setProviderPanel(null), [apiProvider]);
   const currentPermissionVisual = permissionVisualState(permission);
@@ -546,6 +559,7 @@ export function SettingsWorkspace({
                 developerOptionsEnabled={developerOptionsEnabled}
                 onTestProvider={onProviderTest}
                 onProviderConfigChanged={onProviderConfigChanged}
+                onActiveModelsChange={setActiveChatGptModels}
               />
             </div>
             <div id="api-model-settings" data-settings-panel="api" hidden={visibleProvider !== "api"}>
@@ -615,6 +629,48 @@ export function SettingsWorkspace({
                 onSubmit={onSaveVisionProfile}
                 onClear={onClearVisionProfile}
               />
+            </div>
+          </details>
+          <details className="group mt-3 rounded-xl border border-border bg-card px-4" data-settings-panel="input-prediction-model">
+            <summary className="flex min-w-0 cursor-pointer list-none flex-wrap items-center gap-2 rounded-md py-3 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+              <Sparkles className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <span>{t("settings.inputPredictionModel")}</span>
+              <Badge tone={inputPredictionModel ? "ok" : "muted"} className="h-6 min-w-0 max-w-full">
+                <span className="truncate" title={inputPredictionModel || undefined}>
+                  {inputPredictionModel || t("settings.inputPredictionModelDefault")}
+                </span>
+              </Badge>
+              <ChevronDown className="ml-auto h-4 w-4 shrink-0 text-muted-foreground group-open:rotate-180" aria-hidden="true" />
+            </summary>
+            <div className="border-t border-border py-4">
+              <p id="settings-input-prediction-model-description" className="mb-4 text-sm text-muted-foreground">
+                {t("settings.inputPredictionModelDesc")}
+              </p>
+              <label className="mb-2 block text-sm font-medium" htmlFor="settings-input-prediction-model">{t("provider.model")}</label>
+              {completionModelOptions.length ? (
+                <select
+                  id="settings-input-prediction-model"
+                  aria-describedby="settings-input-prediction-model-description"
+                  value={inputPredictionModel}
+                  onChange={(event) => onInputPredictionModelChange(event.currentTarget.value)}
+                  className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+                >
+                  <option value="">{t("settings.inputPredictionModelDefault")}</option>
+                  {inputPredictionModel && !completionModelOptions.some((model) => model.id === inputPredictionModel) ? (
+                    <option value={inputPredictionModel}>{inputPredictionModel}</option>
+                  ) : null}
+                  {completionModelOptions.map((model) => <option key={model.id} value={model.id}>{model.label || model.id}</option>)}
+                </select>
+              ) : (
+                <input
+                  id="settings-input-prediction-model"
+                  aria-describedby="settings-input-prediction-model-description"
+                  value={inputPredictionModel}
+                  onChange={(event) => onInputPredictionModelChange(event.currentTarget.value)}
+                  placeholder={t("settings.inputPredictionModelDefault")}
+                  className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
+                />
+              )}
             </div>
           </details>
         </section>
