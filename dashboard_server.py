@@ -11722,6 +11722,8 @@ def install_vrcforge_into_unity_project(
             _remove_path_with_meta(target_vrcforge)
         raise
 
+    from unity_editor_refresh import request_installed_core_refresh
+    refresh_signal["editorRequest"] = request_installed_core_refresh(resolved_project)
     summary_parts = [
         f"Installed Assets/VRCForge into: {resolved_project}",
         f"Project backups are under: {backup_root}",

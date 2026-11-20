@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -125,6 +126,8 @@ def test_native_avatar_task_can_bootstrap_core_without_a_unity_connection(monkey
 
 
 def test_verified_unity_core_install_retains_previous_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import unity_editor_refresh
+
     payload = tmp_path / "payload"
     _write_verified_payload(payload)
     project = _write_project(tmp_path / "project")
@@ -135,6 +138,14 @@ def test_verified_unity_core_install_retains_previous_tree(monkeypatch: pytest.M
         lambda value: str(Path(value).resolve()),
     )
 
+    def refresh_after_copy(project_root: Path) -> int:
+        assert project_root == project.resolve()
+        assert (project_root / "Assets/VRCForge/new-core.txt").read_text(encoding="utf-8") == "new"
+        return 47
+
+    monkeypatch.setattr(unity_editor_refresh, "resolve_unity_project_process_id", refresh_after_copy)
+    monkeypatch.setattr(unity_editor_refresh, "_request_assets_refresh", lambda pid: pid == 47)
+
     result = dashboard_server.install_verified_unity_core_sync(
         {"projectPath": str(project)}
     )
@@ -142,6 +153,10 @@ def test_verified_unity_core_install_retains_previous_tree(monkeypatch: pytest.M
     assert result["ok"] is True
     assert result["committed"] is True
     assert result["commitState"] == "full"
+    if os.name == "nt":
+        assert result["details"]["refreshSignal"]["editorRequest"] == {
+            "status": "refresh_requested", "unityProcessId": 47, "nextAction": "check_core_upgrade_status"
+        }
     assert result["restoreRequiresApproval"] is True
     assert (project / "Assets" / "VRCForge" / "new-core.txt").read_text(encoding="utf-8") == "new"
     signal_path = project / result["details"]["refreshSignal"]["assetPath"]

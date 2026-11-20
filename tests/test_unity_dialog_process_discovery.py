@@ -86,3 +86,16 @@ def test_import_worker_alone_does_not_make_project_look_open(process_snapshot):
     assert host.KNOW_YOURSELF_READINESS._ports.list_running_unity_processes_strict() == []
     assert native.resolve_unity_project_process_id(project) is None
     assert host._checkpoint_restore_editor_is_definitely_closed(project) is False
+
+
+def test_install_refresh_does_not_dispatch_to_an_unidentified_or_ambiguous_editor(process_snapshot, monkeypatch):
+    import unity_editor_refresh
+
+    project, processes = process_snapshot
+    monkeypatch.setattr(unity_editor_refresh, "_request_assets_refresh", lambda _: pytest.fail("wrong editor"))
+    processes[105] = list(processes[101])
+    assert unity_editor_refresh.request_installed_core_refresh(project)["status"] == "refresh_request_failed"
+    processes[101] = ["Unity.exe"]
+    del processes[105]
+    receipt = unity_editor_refresh.request_installed_core_refresh(project)
+    assert receipt == {"status": "matching_editor_not_found", "nextAction": "check_core_upgrade_status"}
