@@ -135,7 +135,6 @@ export function ComposerLinkInput({ inputRef, value, className, suggestion, onDi
               event.preventDefault();
               pendingCaret.current = projectDraft(suggestion, titles).text.length;
               onChange(suggestion);
-              onDismissSuggestion?.();
               return;
             }
           }

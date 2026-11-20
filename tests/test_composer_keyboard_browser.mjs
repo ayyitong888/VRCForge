@@ -119,6 +119,18 @@ try {
   await input.press("Tab");
   assert.equal(await input.inputValue(), "继续检查输入预测");
   assert.deepEqual(await calls(), beforeTab, "Tab accepts the suffix without sending");
+  assert.equal(await preview.count(), 0, "the accepted text is the draft");
+  await input.press("Control+a");
+  await input.press("Backspace");
+  assert.equal(await input.inputValue(), "");
+  await preview.waitFor({ timeout: 2000 });
+  assert.equal(await preview.innerText(), "继续检查输入预测", "clearing the draft restores the same suggestion");
+  await input.press("Tab");
+  assert.equal(await input.inputValue(), "继续检查输入预测");
+  await input.press("Escape");
+  await input.fill("");
+  assert.equal(await preview.count(), 0, "explicit dismissal still clears the suggestion");
+  assert.deepEqual(await calls(), beforeTab, "reusing or clearing a suggestion does not send");
   assert.deepEqual(errors, []);
   console.log("PASS composer delivery keys, settings, slash palette, IME, gate and inline prediction");
 } finally {
