@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import subprocess
-from threading import Thread
+from threading import Event, Thread
 from typing import Mapping, Sequence
 
 
@@ -63,6 +63,7 @@ def run_bounded_process(
     max_output_bytes: int = 2 * 1024 * 1024,
     creationflags: int = 0,
     fallback_encoding: str = "",
+    started: Event | None = None,
 ) -> BoundedProcessResult:
     if not argv or not all(isinstance(item, str) and item for item in argv):
         raise ValueError("Bounded process argv is invalid.")
@@ -78,6 +79,8 @@ def run_bounded_process(
         shell=False,
         creationflags=creationflags,
     )
+    if started is not None:
+        started.set()
     assert process.stdout is not None and process.stderr is not None
     captured: dict[str, object] = {}
     stdout_thread = Thread(

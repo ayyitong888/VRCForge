@@ -12,6 +12,67 @@ _KNOWN_COMMIT_STATES = frozenset(
     {"not_started", "pending", "partial", "complete", "no_change", "rolled_back", "unknown"}
 )
 _UNSET = object()
+OPERATION_STATUSES = (
+    "success", "no_change", "pending", "partial", "interrupted", "cancelled",
+    "rolled_back", "failed", "unknown", "user_confirmation_required", "preview", "applied",
+)
+INCOMPLETE_OPERATION_STATES = frozenset({"partial", "interrupted", "cancelled", "rolled_back", "unknown"})
+OPERATION_PROGRESS_FIELDS = (
+    "operationStatus", "completionKnown", "targetEffectVerified", "readbackState",
+    "persistenceState", "executionId", "checkpointId", "jobId", "jobStatus",
+    "hasMore", "nextCursor", "remainingCount", "nextRequest",
+)
+
+
+def receipt_operation_status(receipt: Mapping[str, Any], *, write: bool) -> str:
+    """Classify this operation only. A successful observation can describe an unready target."""
+    def normalize(value: Any) -> str:
+        return str(value or "").strip().casefold().replace("-", "_")
+
+    execution = normalize(receipt.get("toolExecutionStatus"))
+    explicit = normalize(receipt.get("operationStatus"))
+    domain = normalize(receipt.get("status"))
+    aliases = {
+        "ok": "success", "done": "success", "completed": "success", "executed": "success",
+        "loaded": "success", "unloaded": "success", "scheduled": "pending", "queued": "pending",
+        "started": "pending", "running": "pending", "in_progress": "pending",
+        "incomplete": "partial", "canceled": "cancelled", "error": "failed",
+        "failure": "failed", "blocked": "failed", "awaiting_user": "user_confirmation_required",
+    }
+    reported = explicit or execution or domain
+    status = aliases.get(reported, reported)
+    if not reported:
+        accepted = receipt.get("ok", receipt.get("success"))
+        if isinstance(accepted, bool):
+            status = "success" if accepted else "failed"
+        elif not write and receipt and receipt != {"value": None}:
+            status = "success"
+        else:
+            status = "unknown"
+    if status in {"success", "applied", "no_change", "unknown", ""}:
+        if receipt.get("preview") is True:
+            return "preview"
+        if receipt.get("partial") is True or receipt.get("commitState") == "partial":
+            return "partial"
+        if receipt.get("commitState") == "rolled_back":
+            return "rolled_back"
+        if receipt.get("completionKnown") is False:
+            return "pending" if receipt.get("pending") is True else "unknown"
+        if not execution and receipt.get("ok") is False and status != "unknown":
+            return "failed"
+        if receipt.get("commitState") == "no_change":
+            return "no_change"
+        if write and not reported and status == "success":
+            if receipt.get("readbackVerified") is True or receipt.get("persistedReadback") is True:
+                return "success"
+            if receipt.get("committed") is True:
+                return "applied"
+            return "unknown"
+    if status in OPERATION_STATUSES:
+        return status
+    return "success" if not write and receipt.get("ok") is True and not explicit else "unknown"
+
+
 _GENERIC_ERROR_CODES = frozenset(
     {
         "agent_gateway_rejected",

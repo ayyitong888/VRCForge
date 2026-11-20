@@ -322,6 +322,15 @@ def _unresolved_write_guidance(
     }
 
 
+def _write_result_error(result: Mapping[str, Any], fallback: str, layer: str) -> AgentGatewayError:
+    error = result.get("error")
+    detail = error if isinstance(error, Mapping) else {}
+    message = (detail.get("message") or detail.get("summary") or (error if isinstance(error, str) else "")
+               or result.get("summary") or result.get("message") or result.get("reason") or fallback)
+    code = result.get("errorCode") or detail.get("code") or "agent_gateway_rejected"
+    return AgentGatewayError(str(message), cause_code=str(code), failure_layer=layer)
+
+
 def _domain_write_receipt(value: Any) -> Mapping[str, Any] | Any:
     """Find the bounded Unity domain receipt inside transport wrappers."""
 
@@ -2387,13 +2396,7 @@ class AgentApprovalTransactionService:
                     and result.get("status") == "conflict"
                     and result.get("changed") is False
                 )
-                message = (
-                    result.get("error")
-                    or result.get("message")
-                    or result.get("reason")
-                    or f"{target_tool} returned ok=false."
-                )
-                raise AgentGatewayError(str(message))
+                raise _write_result_error(result, f"{target_tool} returned ok=false.", failure_layer)
             observation_pending = (
                 target_tool == "vrcforge_start_runtime_observation"
                 and isinstance(result, Mapping)
@@ -2430,7 +2433,7 @@ class AgentApprovalTransactionService:
             completion_status = str(completion_outcome["status"])
             if completion_status == "failed":
                 failure_layer = "result_verification"
-                raise AgentGatewayError(str(completion_outcome["summary"]))
+                raise _write_result_error(completion_outcome, "Write failed.", failure_layer)
             pending_execution = pending_execution_receipt(result)
             dispatch_invoked = bool(pending_execution and pending_execution.get("triggered") is True)
             job_pending = pending_execution is not None and not dispatch_invoked
@@ -4978,13 +4981,7 @@ class AgentApprovalTransactionService:
                 }
             if isinstance(result, dict) and result.get("ok") is False:
                 failure_layer = str(result.get("failureLayer") or "write_handler")[:80]
-                message = (
-                    result.get("error")
-                    or result.get("message")
-                    or result.get("reason")
-                    or f"{target_tool} returned ok=false."
-                )
-                raise AgentGatewayError(str(message))
+                raise _write_result_error(result, f"{target_tool} returned ok=false.", failure_layer)
 
             domain_receipt = _domain_write_receipt(result)
             completion_outcome = ensure_dict(
@@ -4998,7 +4995,7 @@ class AgentApprovalTransactionService:
             )
             if str(completion_outcome.get("status") or "").casefold() == "failed":
                 failure_layer = "result_verification"
-                raise AgentGatewayError(str(completion_outcome.get("summary") or "Write failed."))
+                raise _write_result_error(completion_outcome, "Write failed.", failure_layer)
             pending_execution = pending_execution_receipt(result)
             dispatch_invoked = bool(pending_execution and pending_execution.get("triggered") is True)
             job_pending = pending_execution is not None and not dispatch_invoked

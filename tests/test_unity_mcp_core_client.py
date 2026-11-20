@@ -98,6 +98,11 @@ def test_internal_stop_ack_keeps_live_receipt_and_blocks_next_core_dispatch(core
                                                     execution_context=context))
                     receipts.append(client._request("server/write-operation", {"executionId": "submitted"}))
                     receipts.append(client._request("tools/call", {"name": "vrc_get_property", "arguments": {}}))
+                    receipts.append(client.call_tool("vrc_build_and_upload_avatar", {"jobId": "a" * 32},
+                                                     execution_context={"lane": "app_avatar_upload_poll"}))
+                    with pytest.raises(ValueError, match="exact jobId"):
+                        client.call_tool("vrc_build_and_upload_avatar", {"jobId": "a" * 32, "uploadMode": "new"},
+                                         execution_context={"lane": "app_avatar_upload_poll"})
                     with pytest.raises(UnityMcpRuntimeStopped):
                         client._request("tools/call", {"name": "vrc_set_property", "arguments": {}},
                                         execution_context={**context, "executionId": "must-not-send"})
@@ -114,7 +119,7 @@ def test_internal_stop_ack_keeps_live_receipt_and_blocks_next_core_dispatch(core
 
     def run_server():
         try:
-            for _ in range(5):
+            for _ in range(6):
                 connection, _ = listener.accept()
                 with connection:
                     connection.settimeout(5)
@@ -141,9 +146,10 @@ def test_internal_stop_ack_keeps_live_receipt_and_blocks_next_core_dispatch(core
         listener.close()
         server.join(5)
     assert not worker.is_alive() and not server.is_alive() and not server_errors
-    assert len(receipts) == 3
+    assert len(receipts) == 4
     assert [(request["method"], request["params"].get("name")) for request in seen] == [
         ("tools/call", "vrc_set_property"), ("server/write-operation", None), ("tools/call", "vrc_get_property"),
+        ("tools/call", "vrc_build_and_upload_avatar"),
     ]
     assert len(errors) == 1
     assert errors[0].cause_code == "runtime_core_dispatch_stopped"

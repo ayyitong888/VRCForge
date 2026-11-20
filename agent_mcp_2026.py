@@ -27,8 +27,7 @@ from urllib.parse import urlsplit
 
 from dashboard_foundation import read_vrcforge_version
 from external_tool_result_contract import build_external_tool_error
-from agent_tool_result_contract import normalize_agent_tool_result
-from operation_context import ensure_operation_result
+from operation_context import public_tool_receipt
 from mcp_tool_descriptor import identity_scope
 from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, resource_uri_without_selection, result_mode, result_resource_links, select_tools, tool_names
 
@@ -809,10 +808,10 @@ class Mcp2026Router:
                     or descriptor.get("requiresApproval")
                     or str(descriptor_meta.get("permission") or "").strip().casefold() == "write"
                 )
-                callback_result = ensure_operation_result(
+                callback_result = public_tool_receipt(
                     await _resolve(self._tool_call(resolved_tool_name, dict(arguments))),
                     write=is_write,
-                    operation_kind="tool",
+                    tool=str(resolved_tool_name),
                 )
                 revision_after = (
                     self._tool_list_revision()
@@ -841,15 +840,8 @@ class Mcp2026Router:
                     self._pending_notifications.append(
                         {"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"}
                     )
-                raw_structured = dict(callback_result) if isinstance(callback_result, Mapping) else {"value": callback_result}
-                outcome = normalize_agent_tool_result(
-                    raw_structured,
-                    fallback_summary=f"{tool_name} completed.",
-                    write=is_write,
-                )
-                raw_structured.setdefault("outcome", outcome)
-                _project_explicit_no_write_state(raw_structured, outcome)
-                structured = _strict_json_clone(raw_structured)
+                _project_explicit_no_write_state(callback_result, callback_result["outcome"])
+                structured = _strict_json_clone(callback_result)
                 structured = project_result(structured, mode=presentation_mode, resource_readable=self._resource_read is not None)
                 result = {
                     "content": [

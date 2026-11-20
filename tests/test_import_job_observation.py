@@ -10,6 +10,7 @@ from types import SimpleNamespace
     ("app_unitypackage_import_poll", "vrc_import_unitypackage", "jobId"),
     ("app_setup_outfit_poll", "vrc_setup_outfit", "jobId"),
     ("app_build_test_poll", "vrc_build_test_avatar", "jobId"),
+    ("app_avatar_upload_poll", "vrc_build_and_upload_avatar", "jobId"),
     (None, "vrc_poll_job", "job_id"),
 ])
 def test_exact_readonly_job_poll_does_not_depend_on_native_window_probe(tmp_path, monkeypatch, lane, tool, key):

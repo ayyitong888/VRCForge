@@ -68,7 +68,11 @@ def accepted_receipt(
     if any(facts.get(key) is True for facts in (arguments, result, outcome)
            for key in ("preview", "mock", "mock_execute", "mockExecute", "partial")):
         return None
-    if any(facts.get(key) is True for facts in (arguments, outcome) for key in ("truncated", "hasMore")):
+    # A verified text range contributes to coverage. Its copied hasMore flag
+    # must agree with the page and never proves the whole source was read.
+    if any(arguments.get(key) is True or
+           (outcome.get(key) is True and not (page and result.get(key) is True))
+           for key in ("truncated", "hasMore")):
         return None
     if (not page and (result.get("truncated") is True or result.get("hasMore") is True or result.get("nextTextOffset") not in (None, ""))
             or result.get("sourceComplete") is False or result.get("rangeComplete") is False

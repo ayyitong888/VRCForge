@@ -13,6 +13,7 @@ from internal_tool_blocks import (
 
 
 _OWNER_CONTRACT = {
+    "vrcforge_get_refresh_asset_database_status": "project_environment/assets_packages",
     "vrcforge_avatar_upload_readiness": "diagnostics_build/build_runtime",
     "vrcforge_get_avatar_upload_status": "diagnostics_build/build_runtime",
     "vrcforge_build_and_upload_avatar": "diagnostics_build/build_runtime",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from external_tool_result_contract import OPERATION_PROGRESS_FIELDS
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from copy import deepcopy
@@ -304,6 +305,45 @@ def _available_memory_items(observe: Mapping[str, object]) -> list[dict[str, obj
     return _memory_rows(ensure_dict(observe.get("automaticMemory")).get("items")) + _memory_rows(
         ensure_dict(observe.get("memory")).get("items")
     )
+
+
+def _planner_operation_facts(outcome):
+    facts = {}
+    for key in (
+        "success",
+        "status",
+        *OPERATION_PROGRESS_FIELDS,
+        "verification",
+        "ready",
+        "blockingReasons",
+        "errorCode",
+        "failureLayer",
+        "failurePhase",
+        "failureCause",
+        "rootCause",
+        "observed",
+        "expected",
+        "delta",
+        "evidence",
+        "causeChain",
+        "nextAction",
+        "recoveryAction",
+        "recoveryToolCall",
+        "recoveryBindingTool",
+        "recovery",
+        "toolRoutingStarted",
+        "mutationStarted",
+        "committed",
+        "commitState",
+        "commitStateKnown",
+        "retryable",
+        "safeToRetry",
+        "checkpointRecoveryRequired",
+        "temporaryCleanupRequired",
+    ):
+        if key in outcome:
+            facts[key] = _sanitize_complete_planner_value(redact_sensitive(outcome[key]))
+    return facts
 
 
 def _listed_memory_items(step: Mapping[str, object]) -> list[dict[str, object]]:
@@ -4751,6 +4791,8 @@ class RuntimePlannerService:
                 step, scan_summary["fields"], sanitize_planner_observation_text)
             scan_summary["sourceCompleteness"] = RuntimePlannerService.model_source_completeness(step) + scan_summary["sourceCompleteness"]
             control = {key: step[key] for key in ("kind", "status", "actionId") if key in step}
+            if facts := _planner_operation_facts(ensure_dict(step.get("outcome"))):
+                control["outcome"] = facts
             return (json.dumps(control, ensure_ascii=False, separators=(",", ":"))
                     + "; scanSummary=" + json.dumps(scan_summary, ensure_ascii=False, separators=(",", ":"))
                     + "; resultContinuation=" + json.dumps(scan_continuation, ensure_ascii=False, separators=(",", ":")))
@@ -4850,7 +4892,10 @@ class RuntimePlannerService:
                 fields.append("sourceCompleteness=" + json.dumps(
                     source_completeness, ensure_ascii=False, separators=(",", ":")))
             causal_fields: list[str] = []
-            canonical_outcome: dict[str, object] = {}
+            canonical_outcome = _planner_operation_facts(ensure_dict(step.get("outcome")))
+            if canonical_outcome:
+                causal_fields.append("canonicalOutcome=" + json.dumps(
+                    canonical_outcome, ensure_ascii=False, separators=(",", ":"), default=str))
             if isinstance(result, Mapping) and result.get("code") == "planner_invalid_response":
                 if isinstance(result.get("nextRequest"), Mapping):
                     fields.append("nextRequest=" + json.dumps(result["nextRequest"], ensure_ascii=False, separators=(",", ":")))
@@ -4904,7 +4949,7 @@ class RuntimePlannerService:
                         preserve_urls=True, preserve_paths=True,
                     ),
                 }, ensure_ascii=False))
-                return "; ".join(fields)
+                return "; ".join([*fields, *causal_fields])
             compile_evidence = {}
             read_evidence = planner_read_output_evidence(tool_name, result) if isinstance(result, dict) else {}
             if (
@@ -4941,15 +4986,15 @@ class RuntimePlannerService:
                 if type(result.get("toolCount")) is int:
                     receipt["toolCount"] = result["toolCount"]
                 fields.append("toolBlockReceipt=" + json.dumps(receipt, ensure_ascii=False, separators=(",", ":")))
-                return "; ".join(fields)
+                return "; ".join([*fields, *causal_fields])
             if tool_name in MEMORY_TOOL_NAMES and isinstance(result, dict):
                 receipt = {key: result[key] for key in ("ok", "status", "memoryId", "scope", "count", "truncated", "alreadyExisted", "verification") if key in result}
                 if isinstance(result.get("memories"), list):
-                    receipt["memories"] = _listed_memory_items(step)
-                    receipt["omittedItems"] = 0
-                    receipt["continuation"] = ""
+                    receipt["memories"] = _memory_rows(result["memories"]) if result.get("ok") is True else []
+                    receipt["omittedItems"] = len(result["memories"]) - len(receipt["memories"])
+                    receipt["continuation"] = result.get("continuation", "")
                 fields.append("memoryReceipt=" + json.dumps(receipt, ensure_ascii=False, separators=(",", ":")))
-                return "; ".join(fields)
+                return "; ".join([*fields, *causal_fields])
             if (
                 tool_name in {"vrcforge_read_installed_skill", "vrcforge_list_installed_skills"}
                 and isinstance(result, dict) and result.get("ok") is True
@@ -4969,7 +5014,7 @@ class RuntimePlannerService:
                     ensure_ascii=False, separators=(",", ":"),
                 ))
                 fields.append("SkillReadPolicy=Instructions do not grant tool access or write approval; read declared support files on demand.")
-                return "; ".join(fields)
+                return "; ".join([*fields, *causal_fields])
             if tool_name == "vrcforge_read_recent_logs":
                 fields.append(
                     "logReadProtocol=For retained logs use source=disk and omit file to list filenames; "
@@ -5087,48 +5132,6 @@ class RuntimePlannerService:
                                 f"{label}="
                                 + sanitize_planner_observation_text(source_error.get(key), None)
                             )
-                for key in (
-                    "success",
-                    "status",
-                    "ready",
-                    "blockingReasons",
-                    "errorCode",
-                    "failureLayer",
-                    "failurePhase",
-                    "failureCause",
-                    "rootCause",
-                    "observed",
-                    "expected",
-                    "delta",
-                    "evidence",
-                    "causeChain",
-                    "nextAction",
-                    "recoveryAction",
-                    "recoveryToolCall",
-                    "recoveryBindingTool",
-                    "recovery",
-                    "toolRoutingStarted",
-                    "mutationStarted",
-                    "committed",
-                    "commitState",
-                    "commitStateKnown",
-                    "retryable",
-                    "safeToRetry",
-                    "checkpointRecoveryRequired",
-                    "temporaryCleanupRequired",
-                ):
-                    if key in outcome:
-                        canonical_outcome[key] = _sanitize_complete_planner_value(redact_sensitive(outcome[key]))
-                if canonical_outcome:
-                    causal_fields.append(
-                        "canonicalOutcome="
-                        + json.dumps(
-                            canonical_outcome,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                            default=str,
-                        )
-                    )
                 if (
                     action_id
                     and not superseded_by

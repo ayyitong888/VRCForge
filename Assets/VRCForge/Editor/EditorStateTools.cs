@@ -900,6 +900,7 @@ namespace VRCForge.Editor
             var payload = new JObject
             {
                 ["job_id"] = record["job_id"]?.DeepClone() ?? JValue.CreateNull(),
+                ["tool"] = record["tool"]?.DeepClone(),
                 ["before"] = record["before"]?.DeepClone() ?? new JObject(),
                 ["after"] = record["after"]?.DeepClone() ?? JValue.CreateNull(),
                 ["status"] = record["status"]?.DeepClone() ?? new JValue("failed"),

@@ -13357,7 +13357,8 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("resolvePackages", source)
         self.assertIn("Client.Resolve()", source)
         self.assertIn("packageResolve", source)
-        self.assertIn('status = "started"', source)
+        self.assertIn('["nativeRequestCompletionKnown"] = false', source)
+        self.assertIn("GetAllRegisteredPackages()", source)
 
     def test_refresh_asset_database_releases_response_before_self_reload(self) -> None:
         source = (

@@ -133,7 +133,7 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "resolvePackages": {
                 "type": "boolean",
                 "default": False,
-                "description": "Resolve Package Manager dependencies during refresh only when explicitly needed.",
+                "description": "Request Package Manager resolution and compare its dependency graph with packages registered by Unity. An unverified receipt must not be treated as completion or replayed as a new write.",
             },
             "packageResolveTimeoutSeconds": {
                 "type": "integer",

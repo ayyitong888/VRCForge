@@ -57,8 +57,7 @@ def test_complete_projection_keeps_private_memory_fields_excluded():
 
 
 def test_shared_outlet_pages_complete_owner_text_for_native_and_legacy():
-    planner = RuntimePlannerService.__new__(RuntimePlannerService)
-    planner._catalog = SimpleNamespace(read=lambda *args, **kwargs: PlannerCatalogSnapshot())
+    planner = RuntimePlannerService(catalog=SimpleNamespace(read=lambda *args, **kwargs: PlannerCatalogSnapshot()), desktop=None)
     step = {"index": 0, "actionId": "read-memory", "tool": "vrcforge_list_memory", "result": {
         "ok": True, "memories": [{"memoryId": "mem", "text": LONG, "scope": "user", "kind": "fact"}]},
         "outcome": {"status": "failed", "nextAction": "Do not retry the write."}}
@@ -83,8 +82,7 @@ def test_shared_outlet_pages_complete_owner_text_for_native_and_legacy():
 
 
 def test_shared_outlet_small_payload_is_not_duplicated():
-    planner = RuntimePlannerService.__new__(RuntimePlannerService)
-    planner._catalog = SimpleNamespace(read=lambda *args, **kwargs: PlannerCatalogSnapshot())
+    planner = RuntimePlannerService(catalog=SimpleNamespace(read=lambda *args, **kwargs: PlannerCatalogSnapshot()), desktop=None)
     step = {"index": 0, "tool": "vrcforge_ask_user", "result": {"questionId": "q", "answer": "Unique answer."}}
     complete = planner.complete_model_information(step)
     step.update(retain_model_information("session", "turn", "", step, {"text": complete}, sanitize_planner_observation_text))

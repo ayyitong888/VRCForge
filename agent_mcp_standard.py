@@ -25,8 +25,7 @@ from agent_mcp_2026 import (
     is_jsonrpc_notification,
 )
 from external_tool_result_contract import build_external_tool_error
-from agent_tool_result_contract import normalize_agent_tool_result
-from operation_context import ensure_operation_result
+from operation_context import public_tool_receipt
 from external_mcp_result_projection import RESOURCE_SELECTION, TOOL_SELECTION, project_prompt, project_resource, project_result, project_tool, resource_selection, resource_uri_without_selection, result_mode, result_resource_links, select_tools, tool_names
 from dashboard_foundation import read_vrcforge_version
 
@@ -375,7 +374,7 @@ class McpStandardRouter:
                 )
                 raw_result = await _resolve(self._tool_call(str(resolved_name), dict(arguments)))
                 result = _strict_json_clone(
-                    ensure_operation_result(raw_result, write=is_write, operation_kind="tool")
+                    public_tool_receipt(raw_result, write=is_write, tool=str(resolved_name))
                 )
                 revision_after = (
                     self._tool_list_revision()
@@ -404,16 +403,8 @@ class McpStandardRouter:
                     self._pending_notifications.append(
                         {"jsonrpc": "2.0", "method": "notifications/prompts/list_changed"}
                     )
-                if not isinstance(result, Mapping):
-                    result = {"ok": True, "value": result}
-                structured = dict(result)
-                outcome = normalize_agent_tool_result(
-                    structured,
-                    fallback_summary=f"{name} completed.",
-                    write=is_write,
-                )
-                structured["outcome"] = outcome
-                structured = project_result(structured, mode=presentation_mode, resource_readable=self._resource_read is not None)
+                outcome = result["outcome"]
+                structured = project_result(result, mode=presentation_mode, resource_readable=self._resource_read is not None)
                 return _success(
                     request_id,
                     {

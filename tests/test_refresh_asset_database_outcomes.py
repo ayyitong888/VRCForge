@@ -11,10 +11,12 @@ from agent_completion_verifier import UnityConsoleCompletionVerifier
 
 def _result(status: str, compile_payload: dict | None) -> dict:
     if compile_payload is not None:
-        compile_payload = {"isCompiling": False, "captureComplete": True, **compile_payload}
+        compile_payload = {"isCompiling": False, "captureComplete": True, "source": "compilation_pipeline",
+                           "capturedAt": "2026-10-13T00:59:37Z", **compile_payload}
     return {
         "job_id": "a" * 32,
         "status": status,
+        "before": {"observedAtUtc": "2026-10-13T00:59:31Z"},
         "after": {"compile": compile_payload} if compile_payload is not None else None,
     }
 
@@ -59,6 +61,27 @@ def test_refresh_running_without_after_compile_stays_pending() -> None:
     assert result["commitState"] == "unknown"
     assert result["commitStateKnown"] is False
     assert result["completionKnown"] is False
+
+
+def test_historical_resolver_submission_is_not_dependency_verification() -> None:
+    # Job 6e92acd43a184211965ce4b60c5e9662 had a fresh clean compilation
+    # and a terminal refresh, but the only package receipt was "started".
+    raw = _result("done", {"errorCount": 0})
+    raw["packageResolve"] = {"requested": True, "completed": False, "status": "started"}
+    result = dashboard_server.normalize_refresh_asset_database_outcome(raw)
+    assert result["status"] == "unknown"
+    assert result["completionKnown"] is False and result["safeToRetry"] is False
+    raw["after"]["packageResolve"] = {"requested": True, "completed": True, "status": "verified"}
+    result = dashboard_server.normalize_refresh_asset_database_outcome(raw)
+    assert result["status"] == "done" and result["packageResolve"]["status"] == "verified"
+
+
+@pytest.mark.parametrize("error_count", [0, 1])
+def test_previous_compilation_cannot_verify_or_fail_a_new_refresh(error_count: int) -> None:
+    raw = _result("done", {"errorCount": error_count, "capturedAt": "2026-10-13T00:59:30Z"})
+    result = dashboard_server.normalize_refresh_asset_database_outcome(raw)
+    assert result["ok"] is True
+    assert result["verification"]["state"] == "unknown"
 
 
 def test_real_refresh_failure_record_survives_extraction_and_outcome_normalization() -> None:
@@ -160,8 +183,8 @@ def test_done_refresh_uses_current_console_without_claiming_a_compilation_pass(n
     assert outcome["success"] is (not new_error)
 
 
-@pytest.mark.parametrize("new_warning", [False, True])
-def test_package_resolution_refresh_passes_actual_external_write_completion_guard(monkeypatch, tmp_path: Path, new_warning: bool) -> None:
+@pytest.mark.parametrize(("new_warning", "resolved"), [(False, True), (True, True), (False, False)])
+def test_package_resolution_refresh_passes_actual_external_write_completion_guard(monkeypatch, tmp_path: Path, new_warning: bool, resolved: bool) -> None:
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     config = gateway.ensure_config()
     config.enabled = True
@@ -196,12 +219,19 @@ def test_package_resolution_refresh_passes_actual_external_write_completion_guar
     monkeypatch.setattr(type(service), "_create_pre_write_checkpoint", lambda *_: {
         "ok": True, "status": "ready", "id": "ckpt_refresh", "projectRoot": str(project),
     })
+    receipt = _result("done", {"errorCount": 0, "errors": []})
+    receipt["after"]["packageResolve"] = {"requested": True, "completed": resolved}
     monkeypatch.setattr(type(service), "_call_external_mcp_write_handler", lambda *_, recovery=None:
-        dashboard_server.normalize_refresh_asset_database_outcome(_result("done", {"errorCount": 0, "errors": []})))
+        dashboard_server.normalize_refresh_asset_database_outcome(receipt))
     # This case asserts checkpoint recovery; plain non-saving refresh no longer
     # creates one. Package resolution selects the checkpointed transaction.
     prepared = service.prepare_external_mcp_write(name, {"projectPath": str(project), "resolvePackages": True})
     result = service.execute_prepared_external_mcp_write(prepared)
+    if not resolved:
+        assert result["ok"] is False
+        assert result["result"]["completionKnown"] is False
+        assert result["writeFailure"]["errorCode"] == "package_resolution_unverified"
+        return
     if new_warning:
         assert result["ok"] is False, result
         assert result["result"]["status"] == "done"

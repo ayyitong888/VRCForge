@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import io
 from pathlib import Path
-import subprocess
+import sys
 import tarfile
 import zipfile
 from typing import Any
@@ -12,7 +12,7 @@ import pytest
 
 from agent_gateway import AgentGatewayError
 
-from bounded_process import BoundedProcessResult
+from bounded_process import BoundedProcessResult, run_bounded_process
 from package_install_workflow_service import (
     PackageDetectionPorts,
     PackageDetectionService,
@@ -719,6 +719,28 @@ def test_prestate_drift_blocks_before_install_child(tmp_path: Path) -> None:
     }
 
 
+def test_unlaunchable_sealed_cli_never_started_install(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    cli = tmp_path / "vrc-get.exe"
+    cli.write_bytes(b"invalid executable")
+    detection = _detection()
+    prepared, _ = _preparer(project, cli, detection, []).prepare(
+        {"projectPath": str(project), "packageId": "com.example.package"}, None,
+    )
+    executor = VpmPackageInstallExecutor(
+        VpmPackageInstallExecutionPorts(detection.detect, dict, run_bounded_process)
+    )
+    result = executor.execute(prepared)
+
+    assert result["error"]
+    assert result["ok"] is result["verified"] is False
+    assert result["processStarted"] is False
+    assert result["mutationStarted"] is result["mutationApplied"] is result["committed"] is False
+    assert result["commitState"] == result["recovery"]["commitState"] == "not_started"
+    assert result["unityRefreshRequired"] is False
+    assert "readback" not in result
+
+
 def test_nonzero_child_exit_is_unknown_and_recoverable(tmp_path: Path) -> None:
     project = _project(tmp_path)
     cli = tmp_path / "vrc-get.exe"
@@ -733,9 +755,8 @@ def test_nonzero_child_exit_is_unknown_and_recoverable(tmp_path: Path) -> None:
         VpmPackageInstallExecutionPorts(
             detect_package=detection.detect,
             process_environment=dict,
-            run_install_process=lambda _argv, **_kwargs: _process_result(
-                7,
-                stderr="failed",
+            run_install_process=lambda _argv, **kwargs: run_bounded_process(
+                [sys.executable, "-c", "raise SystemExit(7)"], **kwargs,
             ),
         )
     )
@@ -744,11 +765,68 @@ def test_nonzero_child_exit_is_unknown_and_recoverable(tmp_path: Path) -> None:
 
     assert result["ok"] is False
     assert result["exitCode"] == 7
+    assert result["committed"] is None
+    assert result["processStarted"] is True and result["mutationStarted"] is None
+    assert result["targetSatisfied"] is False and result["readback"]["changed"] == []
+    assert result["readback"]["verified"] is False
+    assert result["nextAction"]["arguments"]["packageVersion"] == "1.2.3"
     assert result["recovery"] == {
         "checkpointMustBeRestoredOnlyIfUserChooses": True,
-        "committed": True,
+        "committed": None,
         "commitState": "unknown",
     }
+
+
+@pytest.mark.parametrize("already_satisfied", [False, True])
+def test_failed_cli_with_exact_package_keeps_exit_target_and_mutation_separate(
+    tmp_path: Path, already_satisfied: bool,
+) -> None:
+    project = _project(tmp_path)
+    cli = Path(sys.executable)
+    detection = _detection()
+    package_id = "com.example.package"
+    if already_satisfied:
+        _set_installed_package(project, package_id, "1.2.3")
+        (project / "Packages" / "vpm-manifest.json").write_text(
+            json.dumps({"locked": {package_id: "1.2.3"}}), encoding="utf-8",
+        )
+        # Exercise a prepared request whose discovery missed an already-satisfied target.
+        detection.detect = lambda *_args: {"installed": False}
+    prepared, _ = _preparer(project, cli, detection, []).prepare(
+        {"projectPath": str(project), "packageId": package_id}, None,
+    )
+    # The sealed command is Python "install -p ... <id> <version>". A project-local
+    # script named install exercises the exact production child-process port and argv.
+    script = project / "install"
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "pid, version = sys.argv[-2:]\n"
+        "path = Path('Packages') / pid\n"
+        "if not path.exists():\n"
+        "    path.mkdir()\n"
+        "    (path / 'package.json').write_text(json.dumps({'name': pid, 'version': version}))\n"
+        "    (path.parent / 'vpm-manifest.json').write_text(json.dumps({'locked': {pid: version}}))\n"
+        "sys.exit(7)\n",
+        encoding="utf-8",
+    )
+
+    executor = VpmPackageInstallExecutor(
+        VpmPackageInstallExecutionPorts(detection.detect, dict, run_bounded_process)
+    )
+    result = executor.execute(prepared)
+    assert result["exitCode"] == 7 and result["ok"] is False
+    assert result["readback"]["embeddedPackage"]["name"] == package_id
+    assert result["verified"] is result["targetSatisfied"] is result["processStarted"] is True
+    assert result["readback"]["before"]["targetSatisfied"] is already_satisfied
+    if already_satisfied:
+        assert result["readback"]["changed"] == []
+        assert result["mutationStarted"] is result["mutationApplied"] is result["committed"] is None
+        assert result["commitState"] == result["recovery"]["commitState"] == "unknown"
+    else:
+        assert result["readback"]["changed"] == ["lockedVersion", "embeddedPackage"]
+        assert result["mutationStarted"] is result["mutationApplied"] is result["committed"] is True
+        assert result["commitState"] == result["recovery"]["commitState"] == "committed"
 
 
 def test_timeout_after_child_start_is_unknown_and_recoverable(tmp_path: Path) -> None:
@@ -762,8 +840,9 @@ def test_timeout_after_child_start_is_unknown_and_recoverable(tmp_path: Path) ->
         None,
     )
 
-    def timeout(argv: list[str], **_kwargs: Any) -> BoundedProcessResult:
-        raise subprocess.TimeoutExpired(argv, 300)
+    def timeout(_argv: list[str], **kwargs: Any) -> BoundedProcessResult:
+        kwargs["timeout_seconds"] = 0.2
+        return run_bounded_process([sys.executable, "-c", "import time; time.sleep(10)"], **kwargs)
 
     executor = VpmPackageInstallExecutor(
         VpmPackageInstallExecutionPorts(
@@ -776,15 +855,18 @@ def test_timeout_after_child_start_is_unknown_and_recoverable(tmp_path: Path) ->
     result = executor.execute(prepared)
 
     assert result["ok"] is False
+    assert "timed out" in result["error"]
+    assert result["processStarted"] is True
+    assert result["mutationStarted"] is result["mutationApplied"] is None
     assert result["recovery"] == {
         "checkpointMustBeRestoredOnlyIfUserChooses": True,
-        "committed": True,
+        "committed": None,
         "commitState": "unknown",
     }
 
 
 @pytest.mark.parametrize("readback_version", [None, "9.9.9", "1.2.3"])
-def test_missing_or_wrong_readback_after_success_is_unknown_and_recoverable(
+def test_missing_or_wrong_readback_after_success_preserves_observed_partial_change(
     tmp_path: Path,
     readback_version: str | None,
 ) -> None:
@@ -828,10 +910,15 @@ def test_missing_or_wrong_readback_after_success_is_unknown_and_recoverable(
     result = executor.execute(prepared)
 
     assert result["ok"] is False
+    assert result["exitCode"] == 0
+    assert result["verified"] is False
+    changed_lock = readback_version is not None
+    assert result["mutationStarted"] is (True if changed_lock else None)
+    assert result["readback"]["changed"] == (["lockedVersion"] if changed_lock else [])
     assert result["recovery"] == {
         "checkpointMustBeRestoredOnlyIfUserChooses": True,
-        "committed": True,
-        "commitState": "unknown",
+        "committed": True if changed_lock else None,
+        "commitState": "partial" if changed_lock else "unknown",
     }
 
 

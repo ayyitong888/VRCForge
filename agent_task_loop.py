@@ -24,6 +24,7 @@ from agent_tool_result_contract import (
     runtime_observation_receipt,
 )
 from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
+from external_tool_result_contract import INCOMPLETE_OPERATION_STATES, OPERATION_PROGRESS_FIELDS
 from agent_action_targets import action_target
 from background_goal_runtime import classify_runtime_step_failure
 from agent_runtime_turn_identity import MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, continuation_client_turn_id
@@ -437,6 +438,7 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
         ),
     }
     for key in (
+        *OPERATION_PROGRESS_FIELDS,
         "success",
         "ready",
         "blockingReasons",
@@ -456,13 +458,6 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
         "triggered",
         "dispatchState",
         "resultVerification",
-        "persistenceState",
-        "readbackState",
-        "targetEffectVerified",
-        "executionId",
-        "checkpointId",
-        "jobId",
-        "jobStatus",
         "committed",
         "commitState",
         "commitStateKnown",
@@ -1039,8 +1034,12 @@ def approval_completion(
         task_status = "completed"
     elif status == "pending" and (runtime_observation_receipt(raw_result) or pending_execution_receipt(raw_result)):
         task_status = "running"
+    elif status == "pending":
+        task_status = status
     elif status == "failed":
         task_status = "failed"
+    elif status in INCOMPLETE_OPERATION_STATES:
+        task_status = status
     else:
         task_status = "needs_user_action"
     return {
@@ -1896,10 +1895,14 @@ class AgentTaskLoop:
             running_state = "polling"
         if outcome_status == "failed":
             lifecycle = "failed"
+        elif outcome_status in INCOMPLETE_OPERATION_STATES:
+            lifecycle = outcome_status
         elif outcome_status == "needs_user_action":
             lifecycle = "needs_user_action"
         elif running_state:
             lifecycle = "running"
+        elif outcome_status == "pending":
+            lifecycle = "pending"
         else:
             lifecycle = "completed"
         previous = self._actions.get(action_id)
@@ -1973,7 +1976,7 @@ class AgentTaskLoop:
                                                         "summary": f"The target follow-up is {status}."}
         if job and not observation:
             job_id = job.get("jobId", job.get("job_id"))
-            if _status(job.get("status")) in TERMINAL_JOB_STATUSES and outcome_status in {"ok", "failed"}:
+            if _status(job.get("status")) in TERMINAL_JOB_STATUSES and outcome_status in {"ok", "failed"} | INCOMPLETE_OPERATION_STATES:
                 for prior in self._actions.values():
                     if (isinstance(prior.get("outcome"), Mapping)
                             and prior["outcome"].get("jobId") == job_id and prior.get("status") == "running"):

@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Any, Callable, Mapping, Protocol
 
 from agent_gateway import AgentGatewayError
@@ -59,6 +60,7 @@ class RunBoundedProcessPort(Protocol):
         timeout_seconds: int,
         max_output_bytes: int,
         creationflags: int,
+        started: Event | None = None,
     ) -> BoundedProcessResult: ...
 
 
@@ -1209,6 +1211,7 @@ def _run_vpm_process(
     *,
     cwd: str,
     timeout_seconds: int,
+    started: Event | None = None,
 ) -> BoundedProcessResult:
     """Run one explicitly owned child with fixed handles, limits and auth scope."""
 
@@ -1219,6 +1222,7 @@ def _run_vpm_process(
         timeout_seconds=timeout_seconds,
         max_output_bytes=_VPM_PROCESS_MAX_OUTPUT_BYTES,
         creationflags=creationflags,
+        **({"started": started} if started is not None else {}),
     )
 
 
@@ -1345,47 +1349,56 @@ def _read_vpm_install_readback(
     project_path: Path,
     package_id: str,
     expected_version: str,
+    packages_identity: dict[str, Any],
 ) -> dict[str, Any]:
-    vpm_manifest_path = project_path / "Packages" / "vpm-manifest.json"
-    manifest = _read_bounded_vpm_json(
-        vpm_manifest_path,
-        "VPM manifest readback",
-    )
-    locked_entry = _ensure_dict(manifest.get("locked")).get(package_id)
-    locked_version = _package_entry_version(locked_entry)
-    if locked_version != expected_version:
-        raise RuntimeError(
-            "VPM manifest locked readback does not prove the exact approved package "
-            "version."
-        )
-    embedded_root = project_path / "Packages" / package_id
-    embedded_identity = capture_directory(
-        embedded_root,
-        label="Installed embedded VPM package",
-    )
-    embedded_manifest = _read_bounded_vpm_json(
-        embedded_root / "package.json",
-        "Embedded VPM package readback",
-    )
-    if (
-        str(embedded_manifest.get("name") or "") != package_id
-        or str(embedded_manifest.get("version") or "") != expected_version
-    ):
-        raise RuntimeError(
-            "Embedded VPM package readback does not match the exact approved "
-            "package/version."
-        )
-    embedded_readback = {
-        "directory": embedded_identity,
-        "name": package_id,
-        "version": expected_version,
+    # Observe each side independently: a changed lock with no embedded package
+    # is real evidence even though the install target has not been reached.
+    packages = project_path / "Packages"
+    observed: dict[str, Any] = {}
+    errors = []
+    try:
+        verify_directory(packages_identity, label="Unity Packages")
+    except (OSError, ValueError) as exc:
+        return {"targetSatisfied": None, "error": str(exc)}
+    paths = {
+        "lockedVersion": packages / "vpm-manifest.json",
+        "embeddedPackage": packages / package_id / "package.json",
     }
-    return {
-        "packageId": package_id,
-        "version": expected_version,
-        "source": "vpm-manifest.locked",
-        "embeddedPackage": embedded_readback,
-    }
+    for field, path in paths.items():
+        try:
+            directory = None
+            if field == "embeddedPackage":
+                path.parent.lstat()
+                directory = capture_directory(path.parent, label="Installed embedded VPM package")
+            path.lstat()
+            data = _read_bounded_vpm_json(path, "VPM package readback")
+            if field == "lockedVersion":
+                locked_entry = _ensure_dict(data.get("locked")).get(package_id)
+                observed[field] = _package_entry_version(locked_entry) or None
+            else:
+                observed[field] = {
+                    "directory": directory, "name": data.get("name"), "version": data.get("version"),
+                }
+        except FileNotFoundError:
+            observed[field] = None
+        except (OSError, ValueError, RuntimeError) as exc:
+            errors.append(str(exc))
+
+    embedded = _ensure_dict(observed.get("embeddedPackage"))
+    mismatch = (
+        "lockedVersion" in observed and observed["lockedVersion"] != expected_version
+        or "embeddedPackage" in observed
+        and (embedded.get("name") != package_id or embedded.get("version") != expected_version)
+    )
+    if mismatch:
+        observed["targetSatisfied"] = False
+    elif errors:
+        observed["targetSatisfied"] = None
+    else:
+        observed["targetSatisfied"] = True
+    if errors:
+        observed["error"] = "; ".join(errors)
+    return observed
 
 
 class VpmPackageInstallPreparer:
@@ -1613,8 +1626,10 @@ class VpmPackageInstallExecutor:
         self._ports = ports
 
     def execute(self, params: dict[str, Any]) -> dict[str, Any]:
-        process_started = False
+        child_started = Event()
         preservation = None
+        result: dict[str, Any] = {"schema": "vrcforge.vpm_package_install.v1"}
+
         try:
             evidence = prepared_evidence(params)
             if not isinstance(evidence, dict):
@@ -1700,7 +1715,13 @@ class VpmPackageInstallExecutor:
                     )
                     if not preservation.get("ok") or preservation.get("treeDigest") != legacy_baseline.get("treeDigest"):
                         raise RuntimeError("Legacy preservation snapshot differs from the approved tree.")
-            process_started = True
+            result.update(
+                projectPath=str(project_path), packageId=package_id,
+                packageVersion=package_version, command=argv,
+            )
+            before = _read_vpm_install_readback(
+                project_path, package_id, package_version, project_evidence["packages"],
+            )
             proc = _run_vpm_process(
                 self._ports.run_install_process,
                 self._ports.process_environment,
@@ -1708,64 +1729,77 @@ class VpmPackageInstallExecutor:
                 argv,
                 cwd=str(project_path),
                 timeout_seconds=_VPM_INSTALL_TIMEOUT_SECONDS,
+                started=child_started,
             )
-            result = {
-                "ok": proc.returncode == 0,
+            child_started.set()  # An exit status also proves that the runner spawned the child.
+            result.update({
                 "exitCode": proc.returncode,
                 "stdoutSummary": (proc.stdout or "")[-1500:],
                 "stderrSummary": (proc.stderr or "")[-1500:],
                 "stdoutTruncated": proc.stdout_truncated,
                 "stderrTruncated": proc.stderr_truncated,
-                "projectPath": str(project_path),
-                "packageId": package_id,
-                "packageVersion": package_version,
-                "command": argv,
-                "legacyPreservation": preservation,
-                "unityRefreshRequired": True,
-                "recovery": {
-                    "checkpointMustBeRestoredOnlyIfUserChooses": proc.returncode != 0,
-                    "committed": True,
-                    "commitState": (
-                        "committed" if proc.returncode == 0 else "unknown"
-                    ),
-                },
-            }
+            })
             if proc.returncode != 0:
-                return result
-            readback = _read_vpm_install_readback(
-                project_path,
-                package_id,
-                package_version,
+                result["error"] = f"VPM install process exited with code {proc.returncode}."
+        except (subprocess.TimeoutExpired, RuntimeError, OSError, ValueError) as exc:
+            result["error"] = str(exc)
+
+        process_started = child_started.is_set()
+        changed = []
+        satisfied = None
+        if process_started:
+            after = _read_vpm_install_readback(
+                project_path, package_id, package_version, project_evidence["packages"],
             )
-            return {
-                **result,
-                "schema": "vrcforge.vpm_package_install.v1",
-                "mutationStarted": True,
-                "mutationApplied": True,
-                "committed": True,
-                "verified": True,
-                "readback": {"verified": True, "scope": "package_manager_files", **readback},
-                "vpmManifestReadback": readback,
+            satisfied = after["targetSatisfied"]
+            changed = [key for key in ("lockedVersion", "embeddedPackage")
+                       if key in before and key in after and before[key] != after[key]]
+            readback = {
+                "verified": satisfied is True, "scope": "package_manager_files",
+                "before": before, "after": after, "changed": changed,
             }
-        except (
-            RuntimeError,
-            OSError,
-            subprocess.TimeoutExpired,
-            json.JSONDecodeError,
-            ValueError,
-        ) as exc:
-            return {
-                "ok": False,
-                "error": str(exc),
-                "legacyPreservation": preservation,
-                "mutationStarted": process_started,
-                "mutationApplied": None if process_started else False,
-                "committed": process_started,
-                "commitState": "unknown" if process_started else "not_started",
-                "unityRefreshRequired": True,
-                "recovery": {
-                    "checkpointMustBeRestoredOnlyIfUserChooses": process_started,
-                    "committed": process_started,
-                    "commitState": "unknown" if process_started else "not_started",
-                },
-            }
+            result["readback"] = readback
+            if satisfied is not True:
+                readback["error"] = after.get("error") or (
+                    "VPM lock and embedded package do not both match the approved package/version."
+                )
+                result.setdefault("error", readback["error"])
+                result["nextAction"] = {
+                    "tool": "vrcforge_package_install_plan",
+                    "arguments": {
+                        "projectPath": str(project_path), "packageId": package_id,
+                        "packageVersion": package_version,
+                    },
+                }
+            else:
+                exact = {
+                    "packageId": package_id, "version": package_version,
+                    "source": "vpm-manifest.locked", "embeddedPackage": after["embeddedPackage"],
+                }
+                readback.update(exact)
+                result["vpmManifestReadback"] = exact
+
+        if changed:
+            commit_state, committed = "committed" if satisfied else "partial", True
+        elif process_started:
+            commit_state, committed = "unknown", None
+        else:
+            commit_state, committed = "not_started", False
+        return {
+            **result,
+            "ok": satisfied is True and "error" not in result,
+            "legacyPreservation": preservation,
+            "processStarted": process_started,
+            "mutationStarted": committed,
+            "mutationApplied": committed,
+            "committed": committed,
+            "commitState": commit_state,
+            "targetSatisfied": satisfied,
+            "verified": satisfied is True,
+            "unityRefreshRequired": committed,
+            "recovery": {
+                "checkpointMustBeRestoredOnlyIfUserChooses": process_started and "error" in result,
+                "committed": committed,
+                "commitState": commit_state,
+            },
+        }

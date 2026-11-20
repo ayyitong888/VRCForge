@@ -5036,6 +5036,8 @@ class AgentGateway:
         status = str(applied.get("status") or outcome_status)
         if outcome_status == "failed":
             status = "failed"
+        elif status in {"applied", "executed", "ok", "success"} and outcome_status not in {"ok", "needs_user_action"}:
+            status = outcome_status
         elif status == "applied":
             status = "executed"
         payload: dict[str, Any] = {
@@ -5127,6 +5129,9 @@ class AgentGateway:
             )
         if isinstance(payload.get("outcome"), Mapping):
             outcome_projection = dict(payload["outcome"])
+            for key in ("operationStatus", "completionKnown", "jobId", "jobStatus"):
+                if key in outcome_projection:
+                    payload[key] = outcome_projection[key]
             retryable = outcome_projection.get("safeToRetry")
             if isinstance(retryable, bool):
                 retry_fields = {"retryable": retryable, "safeToRetry": retryable}

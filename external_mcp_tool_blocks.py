@@ -120,6 +120,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
     "assets": frozenset(
         {
             "vrcforge_get_unitypackage_import_status",
+            "vrcforge_get_refresh_asset_database_status",
             "vrcforge_inspect_outfit_package",
             "vrcforge_plan_outfit_import",
             "vrcforge_preview_add_outfit",

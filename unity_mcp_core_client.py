@@ -42,6 +42,7 @@ from unity_mcp_tool_contract import (
 APP_SETUP_OUTFIT_POLL_LANE = "app_setup_outfit_poll"
 APP_UNITYPACKAGE_IMPORT_POLL_LANE = "app_unitypackage_import_poll"
 APP_BUILD_TEST_POLL_LANE = "app_build_test_poll"
+APP_AVATAR_UPLOAD_POLL_LANE = "app_avatar_upload_poll"
 SIBLING_ORDER_MINIMUM_CORE_CONTRACT_VERSION = 175
 SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION,)
 MAX_FRAME_BYTES = 1024 * 1024
@@ -425,6 +426,9 @@ class UnityMcpCoreClient:
         if isinstance(execution_context, dict) and execution_context.get("lane") == APP_BUILD_TEST_POLL_LANE:
             if name != "vrc_build_test_avatar" or not _is_strict_build_test_job_poll(arguments):
                 raise ValueError("Build & Test job polling requires exact jobId arguments.")
+        if isinstance(execution_context, dict) and execution_context.get("lane") == APP_AVATAR_UPLOAD_POLL_LANE:
+            if not is_readonly_job_poll(name, arguments, execution_context):
+                raise ValueError("Avatar upload job polling requires exact jobId arguments.")
         call_arguments = arguments or {}
         if name == "vrc_add_modular_avatar_component" and call_arguments.get("action") == "update":
             contract = self._connection.tool_contract_version
@@ -806,6 +810,7 @@ def is_readonly_job_poll(name: str, arguments: Any, execution_context: Any) -> b
         APP_SETUP_OUTFIT_POLL_LANE: "vrc_setup_outfit",
         APP_UNITYPACKAGE_IMPORT_POLL_LANE: "vrc_import_unitypackage",
         APP_BUILD_TEST_POLL_LANE: "vrc_build_test_avatar",
+        APP_AVATAR_UPLOAD_POLL_LANE: "vrc_build_and_upload_avatar",
     }.get(execution_context.get("lane"))
     return tool is not None and name == tool and _is_strict_setup_outfit_job_poll(arguments)
 

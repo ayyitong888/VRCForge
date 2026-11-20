@@ -985,6 +985,7 @@ class PreparedOutfitImportApprovedWriteService:
                         "kind": kind,
                         "copiedFiles": loose_copied.get("copiedFiles") or [],
                         "assetDatabaseRefresh": refresh,
+                        "nextAction": refresh.get("nextAction"),
                         "error": refresh.get("error")
                         or "Asset refresh failed after loose outfit import.",
                     }
@@ -1312,6 +1313,7 @@ class PreparedOutfitImportApprovedWriteService:
                     "unityImports": imports,
                     "assetDatabaseRefresh": refresh,
                     "temporaryCleanupError": cleanup_error or None,
+                    "nextAction": refresh.get("nextAction"),
                     "error": refresh.get("error")
                     or "Asset refresh failed after UnityPackage import.",
                 }

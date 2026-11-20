@@ -1368,6 +1368,31 @@ def test_loose_texture_import_completed_refresh_without_compilation_is_not_faile
     assert (project / "Assets/VRCForge/ImportedOutfits/Body.png").read_bytes() == b"isolated texture fixture"
 
 
+def test_completed_import_forwards_the_distinct_refresh_resume_call(tmp_path, monkeypatch):
+    project, package = _project(tmp_path), tmp_path / "Dress.unitypackage"
+    package.write_bytes(b"package")
+    prepared, _ = _prepare(tmp_path, _plan(project, package),
+                           {"packagePath": str(package), "projectPath": str(project)})
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings",
+                        lambda _: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    refresh_id = "c" * 32
+    next_action = {"tool": "vrcforge_get_refresh_asset_database_status",
+                   "arguments": {"jobId": refresh_id, "projectPath": str(project)}}
+
+    def invoke(_settings, tool, arguments, **_kwargs):
+        if tool == "vrc_import_unitypackage":
+            return _completed_import(arguments)
+        assert tool == "vrc_refresh_asset_database"
+        return dashboard_server.McpResult(0, "", "", {"ok": False, "status": "pending",
+                            "job_id": refresh_id, "nextAction": next_action})
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    result = _approved().execute(prepared)
+    assert result["completedImportJobIds"] == [JOB_ID]
+    assert result["commitState"] == "partial"
+    assert result["nextAction"] == next_action
+
+
 @pytest.mark.parametrize("outcome", ["verified", "missing_readback", "old_core"])
 def test_new_avatar_texture_import_requires_streaming_readback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str

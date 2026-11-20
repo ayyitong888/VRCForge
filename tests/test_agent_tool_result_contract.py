@@ -728,3 +728,39 @@ def test_root_correction_actions_are_available_in_standard_error_projection() ->
     assert outcome["nextAction"] == raw["nextActions"]
     assert outcome["error"]["nextActions"] == raw["nextActions"]
     assert outcome["diagnostics"] == raw["diagnostics"]
+
+
+def test_same_factual_receipt_survives_model_public_and_history_boundaries():
+    from agent_handoff_sources import _tool_states
+    from operation_context import public_tool_receipt
+
+    for phase in ("partial", "cancelled", "interrupted", "rolled_back", "unknown"):
+        raw = {"ok": True, "status": phase, "executionId": "original-execution",
+               "jobId": "original-job", "nextAction": {"tool": "inspect_result"},
+               "completionKnown": phase != "unknown"}
+        for envelope in (raw, {"ok": True, "status": "executed", "result": raw}):
+            internal = normalize_agent_tool_result(envelope, write=True, fallback_summary="Finished.")
+            public = public_tool_receipt(envelope, write=True, tool="check")
+            bounded = _bounded_outcome(internal)
+            assert internal["status"] == internal["operationStatus"] == phase
+            assert public["operationStatus"] == public["outcome"]["operationStatus"] == phase
+            assert bounded["targetEffectVerified"] is False and bounded["success"] is False
+            assert bounded["jobId"] == raw["jobId"] and bounded["executionId"] == raw["executionId"]
+            assert bounded["nextAction"] == raw["nextAction"]
+            assert bounded["completionKnown"] == raw["completionKnown"]
+            graph_state, _ = _tool_states({"state": "done", "operationKind": "write", "operationStatus": phase})
+            assert graph_state == (phase if phase in {"partial", "unknown"} else "interrupted")
+
+
+def test_acknowledgement_and_failed_write_keep_the_extent_of_the_effect():
+    from operation_context import public_tool_receipt
+
+    ack = public_tool_receipt({"ok": True}, write=True, tool="change")
+    assert ack["operationStatus"] == "unknown" and ack["outcome"]["targetEffectVerified"] is False
+    assert public_tool_receipt({}, write=True, tool="change")["operationStatus"] == "unknown"
+    failed = public_tool_receipt({"ok": False, "status": "failed", "commitState": "partial",
+                                  "executionId": "write-id", "error": "Second write failed."},
+                                 write=True, tool="change")
+    assert failed["operationStatus"] == failed["outcome"]["status"] == "failed"
+    assert failed["outcome"]["commitState"] == "partial"
+    assert failed["outcome"]["summary"] == "Second write failed."

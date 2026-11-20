@@ -103,7 +103,8 @@ def test_refresh_keeps_response_release_order_and_completes_from_fresh_readback(
     assert runner.index("UnityAsyncJobRegistry.MarkRunning(requestId);") < runner.index(
         "AssetDatabase.Refresh();"
     )
-    assert "UnityAsyncJobRegistry.Complete(jobId, () => ReadSnapshot(reimportAssets));" in refresh
+    assert "UnityAsyncJobRegistry.Complete(jobId, () =>" in refresh
+    assert "var snapshot = ReadSnapshot(reimportAssets);" in refresh
     assert "AssetDatabase.GetAllAssetPaths()" in refresh
     assert "asset_path_digest" in refresh
 
@@ -272,8 +273,10 @@ def test_dashboard_refresh_does_not_retry_non_reload_poll_error(monkeypatch, cau
     assert result["commitState"] == "unknown"
     assert result["safeToRetry"] is False
     assert "already submitted" in result["error"]["message"]
-    assert job_id in result["nextAction"]
-    assert "vrcforge_core_upgrade_status" in result["nextAction"]
+    assert result["nextAction"] == {
+        "tool": "vrcforge_get_refresh_asset_database_status",
+        "arguments": {"projectPath": "D:/isolated", "jobId": job_id},
+    }
     assert calls == ["vrc_refresh_asset_database", "vrc_poll_job"]
     from agent_tool_result_contract import normalize_agent_tool_result
     from agent_gateway import AgentGateway
@@ -327,6 +330,61 @@ def test_unified_poll_bounded_wait_keeps_running_job_unknown(monkeypatch):
     assert result["safeToRetry"] is False
 
 
+@pytest.mark.parametrize("foreign", [{"job_id": "b" * 32}, {}, {"job_id": "a" * 32, "tool": "vrc_set_property"}])
+def test_refresh_resumes_original_job_after_mismatched_or_unidentified_receipt(monkeypatch, foreign):
+    from types import SimpleNamespace
+    import dashboard_server as ds
+
+    path = "D:/isolated"
+    job_id = "a" * 32
+    requested = []
+    snapshots = iter([
+        {"status": "done", **foreign},
+        {"job_id": job_id, "tool": "vrc_refresh_asset_database", "status": "running"},
+        {"job_id": job_id, "tool": "vrc_refresh_asset_database", "status": "done",
+         "after": {"compile": {"captureComplete": True, "isCompiling": False, "errorCount": 0}}},
+    ])
+    settings = SimpleNamespace(unity_project_path=path, unity_mcp_timeout_seconds=30)
+    monkeypatch.setattr(ds, "load_dashboard_settings", lambda _: settings)
+
+    def invoke(_settings, name, arguments, **kwargs):
+        requested.append((name, arguments))
+        if name == "vrc_refresh_asset_database":
+            return ds.McpResult(0, "", "", {"status": "queued", "job_id": job_id})
+        assert name == "vrc_poll_job" and arguments == {"job_id": job_id}
+        return ds.McpResult(0, "", "", next(snapshots))
+
+    monkeypatch.setattr(ds, "invoke_unity_mcp", invoke)
+    pending = ds.refresh_asset_database_sync({"projectPath": path})
+    assert pending["status"] == "pending" and pending["job_id"] == job_id
+    assert pending["error"]["code"] == ("async_job_tool_mismatch" if "tool" in foreign else "async_job_identity_mismatch")
+    next_action = pending["nextAction"]
+    assert next_action["arguments"] == {"projectPath": path, "jobId": job_id}
+    tool = ds.AGENT_GATEWAY._tools[next_action["tool"]]
+    assert tool.polling and not tool.write
+    still_running = tool.handler(next_action["arguments"])
+    assert still_running["status"] == "pending" and still_running["nextAction"] == next_action
+    done = tool.handler(still_running["nextAction"]["arguments"])
+    assert done["ok"] is True and done["job_id"] == job_id and done["status"] == "done"
+    assert [name for name, _ in requested] == ["vrc_refresh_asset_database"] + ["vrc_poll_job"] * 3
+
+
+@pytest.mark.parametrize("tool", ["vrcforge_get_unitypackage_import_status", "vrcforge_get_setup_outfit_status",
+                                  "vrcforge_get_build_test_status", "vrcforge_get_avatar_upload_status"])
+@pytest.mark.parametrize("reply", [{"jobId": "b" * 32}, {}])
+def test_status_queries_reject_foreign_or_missing_identity_before_adopting_terminal_result(monkeypatch, tool, reply):
+    import dashboard_server as ds
+
+    monkeypatch.setattr(ds, "load_dashboard_settings", lambda _: object())
+    monkeypatch.setattr("execution_target.validate_runtime_execution_target", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ds, "invoke_unity_mcp", lambda *args, **kwargs:
+                        ds.McpResult(0, "", "", {"ok": True, "status": "completed", **reply}))
+    with pytest.raises(ds.UnityMcpError) as exc:
+        ds.AGENT_GATEWAY._tools[tool].handler({"jobId": "a" * 32, "projectPath": "D:/isolated",
+                                              "executionTarget": {"scope": "project"}})
+    assert exc.value.cause_code == "async_job_identity_mismatch"
+
+
 def test_retryable_poll_connection_failure_still_respects_deadline(monkeypatch):
     import dashboard_server
 
@@ -361,7 +419,8 @@ def test_retryable_poll_connection_failure_still_respects_deadline(monkeypatch):
     [
         (None, "done", "unknown"),
         ({"isCompiling": True, "captureComplete": True, "errorCount": 0}, "pending", "pending"),
-        ({"isCompiling": False, "captureComplete": True, "errorCount": 1, "errors": [{"message": "CS1002"}]}, "failed", "failed"),
+        ({"isCompiling": False, "captureComplete": True, "source": "compilation_pipeline",
+          "capturedAt": "2026-10-13T00:59:37Z", "errorCount": 1, "errors": [{"message": "CS1002"}]}, "failed", "failed"),
     ],
 )
 def test_dashboard_refresh_fallback_preserves_incomplete_and_failed_compile_states(
@@ -385,7 +444,8 @@ def test_dashboard_refresh_fallback_preserves_incomplete_and_failed_compile_stat
             return dashboard_server.McpResult(0, "", "", {"job_id": job_id, "status": "queued"})
         if tool_name == "vrc_poll_job":
             return dashboard_server.McpResult(
-                0, "", "", {"job_id": job_id, "status": "done", "after": {"compile": {"isCompiling": False, "captureComplete": False, "errorCount": 0}}}
+                0, "", "", {"job_id": job_id, "status": "done", "before": {"observedAtUtc": "2026-10-13T00:59:31Z"},
+                            "after": {"compile": {"isCompiling": False, "captureComplete": False, "errorCount": 0}}}
             )
         return dashboard_server.McpResult(
             0,

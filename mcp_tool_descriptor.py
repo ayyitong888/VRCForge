@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 from execution_target import future_provenance_metadata, standard_identity_metadata
+from external_tool_result_contract import OPERATION_STATUSES
 from external_mcp_result_projection import operation_result_required_fields
 
 
@@ -218,7 +219,7 @@ def _result_schema(write: bool) -> dict[str, Any]:
         "properties": {
             "operationId": {"type": "string"},
             "status": {"type": "string", "description": "Stable existing domain status; use operationStatus for cross-tool terminal semantics."},
-            "operationStatus": {"type": "string", "enum": ["success", "no_change", "pending", "failed", "unknown", "user_confirmation_required", "preview", "applied"]},
+            "operationStatus": {"type": "string", "enum": list(OPERATION_STATUSES)},
             "commitState": {"type": "string"},
             "mutationStarted": {"type": ["boolean", "null"]},
             "mutationApplied": {"type": ["boolean", "null"]},

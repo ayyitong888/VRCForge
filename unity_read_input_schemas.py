@@ -165,6 +165,16 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "vrcforge_get_refresh_asset_database_status": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "jobId"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "jobId": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$",
+                      "description": "Exact job ID from the original AssetDatabase refresh receipt."},
+        },
+    },
     "vrcforge_get_setup_outfit_status": {
         "type": "object",
         "additionalProperties": False,

@@ -9,6 +9,7 @@ import re
 
 from context_compaction import NATIVE_TRANSACTION_PREFIX
 from agent_tool_result_contract import job_receipt
+from external_tool_result_contract import INCOMPLETE_OPERATION_STATES
 from agent_tool_result_reader import INPUT_SCHEMA, PAGE_SCHEMA, TOOL_NAME
 from credential_redaction import redact_credential_text
 from outfit_package_inspector import ARCHIVE_CURSOR_PATTERN, INSPECTION_SCHEMA
@@ -276,6 +277,9 @@ def _state(observation, fields, awaiting_consumer):
         status == "needs_user_action" and fields.get("approvalId")
     ):
         return "awaiting_approval"
+    operation = outcome.get("operationStatus")
+    if operation in INCOMPLETE_OPERATION_STATES:
+        return operation
     if (readback in {"pending", "not_started"} or fields.get("commitState") == "pending"
             or (fields.get("jobId") and readback == "unknown")):
         return "readback_pending"
@@ -355,6 +359,7 @@ def native_handoff_operations(snapshot):
                                           "checkpointId": fields.get("checkpointId"),
                                           "executionId": fields.get("executionId"),
                                           "outcomeStatus": outcome.get("status"),
+                                          "operationStatus": outcome.get("operationStatus"),
                                           "resultStatus": result_page.get("status") or fields.get("resultStatus"),
                                           "failureReason": observation.get("admissionError") or fields.get("errorCode"),
                                           "resultRef": result_page.get("replacementRef") or result_page.get("resultRef")

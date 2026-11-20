@@ -55,6 +55,11 @@ def _tool_states(row):
     outcome = row.get("outcomeStatus")
     if row.get("settlementCallId"):
         return "verified", "interrupted" if row.get("interrupted") else "readback_pending"
+    operation = row.get("operationStatus")
+    if operation in {"partial", "unknown"}:
+        return operation, operation
+    if operation in {"cancelled", "interrupted", "rolled_back"}:
+        return "interrupted", "interrupted"
     if row.get("interrupted") or state == "interrupted" or outcome in {"interrupted", "cancelled", "canceled"}:
         return "interrupted", "interrupted"
     if state == "awaiting_approval":
@@ -91,7 +96,7 @@ def _tool_fields(row):
     return {key: row[key] for key in (
         "callId", "actionId", "tool", "scopeId", "selectors", "sourceRead", "operationKind",
         "resultRef", "commitState", "readbackState", "settlementCallId", "failureReason",
-        "executionId", "checkpointId", "jobId", "targetEffectVerified",
+        "executionId", "checkpointId", "jobId", "targetEffectVerified", "operationStatus",
     ) if row.get(key) or key == "targetEffectVerified" and type(row.get(key)) is bool}
 
 

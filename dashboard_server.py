@@ -720,6 +720,7 @@ from vrchat_blendshape_agent import (
     resolve_avatar_selection,
 )
 from unity_mcp_core_client import (
+    APP_AVATAR_UPLOAD_POLL_LANE,
     APP_UNITYPACKAGE_IMPORT_POLL_LANE,
     UnityMcpCoreClient,
     UnityMcpCoreError,
@@ -21650,6 +21651,14 @@ def read_agent_ndmf_errors(params: dict[str, Any]) -> dict[str, Any]:
     return ensure_dict_payload(extract_tool_result_payload(result), "NDMF diagnostics")
 
 
+def _require_unity_job_identity(snapshot: dict[str, Any], job_id: str, core_tool: str, key: str = "jobId") -> None:
+    if str(snapshot.get(key) or "").strip().lower() != job_id:
+        raise UnityMcpError(
+            f"{core_tool} returned no matching receipt for job {job_id}.",
+            cause_code="async_job_identity_mismatch", core_tool=core_tool,
+        )
+
+
 def get_unitypackage_import_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     job_id = str(params.get("jobId") or params.get("job_id") or "").strip().lower()
@@ -21672,6 +21681,7 @@ def get_unitypackage_import_status_sync(params: dict[str, Any]) -> dict[str, Any
         ),
         "UnityPackage import status",
     )
+    _require_unity_job_identity(payload, job_id, "vrc_import_unitypackage")
     payload.setdefault("ok", True)
     reconciled = AGENT_GATEWAY.approval_transactions.reconcile_unitypackage_import_recovery(params, payload)
     if reconciled:
@@ -21706,8 +21716,8 @@ def get_setup_outfit_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         ),
         "Setup Outfit job status",
     )
+    _require_unity_job_identity(payload, job_id, "vrc_setup_outfit")
     payload.setdefault("ok", True)
-    payload.setdefault("jobId", job_id)
     return payload
 
 
@@ -21757,7 +21767,7 @@ def get_build_test_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     if len(job_id) != 32 or any(character not in "0123456789abcdef" for character in job_id):
         raise RuntimeError("jobId must be exactly 32 hexadecimal characters.")
     settings = load_dashboard_settings(build_agent_connection_request(params))
-    return ensure_dict_payload(
+    payload = ensure_dict_payload(
         extract_tool_result_payload(
             invoke_unity_mcp(
                 settings,
@@ -21768,6 +21778,8 @@ def get_build_test_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         ),
         "local Build & Test status",
     )
+    _require_unity_job_identity(payload, job_id, "vrc_build_test_avatar")
+    return payload
 
 
 def avatar_upload_readiness_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -21950,17 +21962,19 @@ def get_avatar_upload_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     if len(job_id) != 32 or any(character not in "0123456789abcdef" for character in job_id):
         raise RuntimeError("jobId must be exactly 32 lowercase hexadecimal characters.")
     settings = load_dashboard_settings(build_agent_connection_request(params or {}))
-    return ensure_dict_payload(
+    payload = ensure_dict_payload(
         extract_tool_result_payload(
             invoke_unity_mcp(
                 settings,
                 "vrc_build_and_upload_avatar",
                 {"jobId": job_id},
-                execution_context={"lane": "app_avatar_upload_poll"},
+                execution_context={"lane": APP_AVATAR_UPLOAD_POLL_LANE},
             )
         ),
         "VRChat avatar upload status",
     )
+    _require_unity_job_identity(payload, job_id, "vrc_build_and_upload_avatar")
+    return payload
 
 
 def _avatar_upload_core_request(params: dict[str, Any]) -> dict[str, Any]:
@@ -27857,6 +27871,43 @@ def build_refresh_asset_database_execution_plan(
 UNITY_ASYNC_JOB_POLL_SECONDS = 0.25
 
 
+def _read_unity_refresh_job(settings: Settings, job_id: str, *, issued_here: bool) -> dict[str, Any]:
+    snapshot = ensure_dict_payload(
+        extract_tool_result_payload(invoke_unity_mcp(
+            settings, "vrc_poll_job", {"job_id": job_id}, preserve_tool_error=True,
+        )),
+        "refresh asset database job status",
+    )
+    _require_unity_job_identity(snapshot, job_id, "vrc_poll_job", key="job_id")
+    tool = snapshot.get("tool")
+    error = snapshot.get("error")
+    missing = isinstance(error, dict) and error.get("code") == "job_not_found"
+    # Older Cores returned the typed before-snapshot without the tool name.
+    before = snapshot.get("before")
+    legacy_refresh = isinstance(before, dict) and isinstance(before.get("asset_path_count"), int) and bool(
+        re.fullmatch(r"[0-9a-f]{64}", str(before.get("asset_path_digest") or ""))
+    )
+    if tool != "vrc_refresh_asset_database" and not (not tool and (issued_here or missing or legacy_refresh)):
+        raise UnityMcpError("This job does not belong to the requested AssetDatabase refresh.",
+                            cause_code="async_job_tool_mismatch", core_tool="vrc_poll_job")
+    return snapshot
+
+
+def _refresh_job_next_action(project_path: str, job_id: str) -> dict[str, Any]:
+    return {"tool": "vrcforge_get_refresh_asset_database_status",
+            "arguments": {"projectPath": project_path, "jobId": job_id}}
+
+
+def get_refresh_asset_database_status_sync(params: dict[str, Any]) -> dict[str, Any]:
+    project_path = str(params.get("projectPath") or "").strip()
+    job_id = str(params.get("jobId") or "").strip().lower()
+    if not project_path or not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise AgentGatewayError("The original projectPath and a 32-character hexadecimal jobId are required.", status_code=400)
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    snapshot = _read_unity_refresh_job(settings, job_id, issued_here=False)
+    return _verified_refresh_job_outcome(settings, snapshot)
+
+
 def poll_unity_async_job_sync(
     settings: Settings,
     initial: dict[str, Any],
@@ -27886,17 +27937,7 @@ def poll_unity_async_job_sync(
     observation_error: dict[str, Any] | None = None
     while time.monotonic() <= deadline:
         try:
-            polled = ensure_dict_payload(
-                extract_tool_result_payload(
-                    invoke_unity_mcp(
-                        settings,
-                        "vrc_poll_job",
-                        {"job_id": job_id},
-                        preserve_tool_error=True,
-                    )
-                ),
-                f"{label} async job poll",
-            )
+            polled = _read_unity_refresh_job(settings, job_id, issued_here=True)
         except UnityMcpError as exc:
             cause_code = str(getattr(exc, "cause_code", "") or "").strip()
             observation_error = {
@@ -27943,12 +27984,7 @@ def poll_unity_async_job_sync(
             "message": f"The {label} job {job_id} was already submitted; its final result is not known. "
                 + observation_error["message"],
         },
-        "nextAction": (
-            f"Do not resubmit the write. Retain job_id={job_id}. "
-            "Read vrcforge_core_upgrade_status and vrcforge_get_compile_errors for the same project "
-            "to inspect the loaded Core and current compilation. Those diagnostic reads alone do not "
-            "prove this job completed; reconcile the existing job's result before any new write."
-        ),
+        "nextAction": _refresh_job_next_action(str(getattr(settings, "unity_project_path", "")), job_id),
     }
 
 
@@ -27978,6 +28014,23 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
         )
         return normalized
 
+    error = normalized.get("error")
+    resolve_unverified = isinstance(error, dict) and error.get("code") == "package_resolution_unverified"
+    if raw_status == "done" or resolve_unverified:
+        package_resolve = after.get("packageResolve") or normalized.get("packageResolve")
+        if isinstance(package_resolve, dict) and package_resolve.get("requested") is True:
+            normalized["packageResolve"] = package_resolve
+            if package_resolve.get("completed") is not True:
+                # Older Cores have no further resolver readback once this job
+                # ends. Polling that terminal job cannot provide new evidence.
+                normalized.update(
+                    ok=False, status="unknown", operationStatus="unknown",
+                    readbackState="unknown", completionKnown=False, safeToRetry=False,
+                    retryable=False, verification={"state": "unknown", "packageResolve": package_resolve},
+                    error={"code": "package_resolution_unverified", "message":
+                           "Asset refresh finished. Package dependency registration remains unverified. Inspect the project's registered packages and Editor log before any further write."},
+                )
+                return normalized
     if raw_status == "done":
         error_count = None
         if compile_snapshot is not None:
@@ -28008,7 +28061,14 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
                 }
             )
             return normalized
-        if error_count is not None and error_count > 0:
+        before = normalized.get("before") if isinstance(normalized.get("before"), dict) else {}
+        before_compile = before.get("compile") if isinstance(before.get("compile"), dict) else {}
+        baseline = parse_log_timestamp(before.get("observedAtUtc")) or parse_log_timestamp(before_compile.get("capturedAt"))
+        capture = parse_log_timestamp(compile_snapshot.get("capturedAt"))
+        fresh_compile = (compile_snapshot.get("source") == "compilation_pipeline"
+                         and baseline is not None and capture is not None and capture > baseline
+                         and capture_complete is True and not stale and staleness not in {"stale", "unknown", "pending"})
+        if fresh_compile and error_count is not None and error_count > 0:
             normalized.update(
                 {
                     "ok": False,
@@ -28021,7 +28081,7 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
                 }
             )
             return normalized
-        if error_count is None or capture_complete is not True or stale or staleness in {"stale", "unknown", "pending"}:
+        if error_count is None or not fresh_compile:
             # A completed asset refresh need not run C# compilation. The Core
             # job is authoritative for execution; the existing Console verifier
             # checks current diagnostics without inventing a compilation pass.
@@ -28033,7 +28093,7 @@ def normalize_refresh_asset_database_outcome(result: dict[str, Any]) -> dict[str
                     "readbackState": "complete",
                     "completionKnown": True,
                     "verification": {"state": "unknown", "tool": "vrc_get_compile_errors", "compile": compile_snapshot},
-                    "verificationWarning": "Asset refresh completed; a complete compilation snapshot is unavailable. This is not proof of compilation success.",
+                    "verificationWarning": "Asset refresh completed. No fresh, complete compilation snapshot was observed for this operation.",
                 }
             )
             return normalized
@@ -28094,6 +28154,10 @@ def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
         label="refresh asset database",
         timeout_seconds=300.0,
     )
+    return _verified_refresh_job_outcome(settings, result)
+
+
+def _verified_refresh_job_outcome(settings: Settings, result: dict[str, Any]) -> dict[str, Any]:
     # AssetDatabase refreshes do not necessarily trigger a C# compilation pass
     # (for example, a shader include import).  The Core job snapshot therefore
     # may be terminal while its compilation-pipeline capture is incomplete.
@@ -28117,7 +28181,10 @@ def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
             refreshed_after = dict(after)
             refreshed_after["compile"] = compile_result
             result = {**result, "after": refreshed_after}
-    return normalize_refresh_asset_database_outcome(result)
+    outcome = normalize_refresh_asset_database_outcome(result)
+    if outcome.get("status") == "pending" and outcome.get("job_id"):
+        outcome["nextAction"] = _refresh_job_next_action(str(settings.unity_project_path), outcome["job_id"])
+    return outcome
 
 
 def _resolve_unity_project_root_for_import(params: dict[str, Any], plan_payload: dict[str, Any]) -> Path:
@@ -29213,6 +29280,13 @@ def register_agent_gateway_tools() -> None:
         "When to use: check the compiled Unity Core identity and compilation evidence after installation. Use the projectPath and installedAt from the installation receipt. The built-in runtime waits for a running Editor to finish reloading or compiling. Only ready=true confirms readiness. Previous Console snapshots do not establish the outcome of this installation. When NOT to use: do not reinstall or restart the Editor solely because a reload is pending. Do not call this for ordinary edits after Core is ready.",
         "read/debug",
         core_upgrade_status_sync,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_get_refresh_asset_database_status",
+        "When to use: read an existing AssetDatabase refresh after a wait or reconnect using its original projectPath and jobId. When NOT to use: do not start or retry a refresh, or poll a different kind of job. Negative example: do not query a UnityPackage import ID with this tool.",
+        "read/debug",
+        get_refresh_asset_database_status_sync,
+        polling=True,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_get_unitypackage_import_status",
@@ -30760,7 +30834,8 @@ PREPARED_OUTFIT_IMPORT_APPROVED_WRITE = PreparedOutfitImportApprovedWriteService
             "prepared unitypackage import job",
         ),
         refresh_assets=lambda settings, arguments: ensure_dict_payload(
-            normalize_refresh_asset_database_outcome(
+            _verified_refresh_job_outcome(
+                settings,
                 poll_unity_async_job_sync(
                     settings,
                     ensure_dict_payload(

@@ -8,6 +8,7 @@ using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using VRCForge.Core.MCP;
+using UpmPackageInfo = UnityEditor.PackageManager.PackageInfo;
 
 namespace VRCForge.Editor
 {
@@ -781,6 +782,13 @@ namespace VRCForge.Editor
         private static bool refreshScheduled;
         private static double refreshNotBefore;
         private static string scheduledRequestId = string.Empty;
+        private const string ResolveStateKey = "VRCForge.Refresh.PackageResolve";
+        // Unity's Package Manager UI uses this native field for the manifest
+        // request, which can legitimately differ from the resolved version.
+        private static readonly System.Reflection.PropertyInfo ProjectDependencyEntry =
+            typeof(UpmPackageInfo).GetProperty("projectDependenciesEntry",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+        private static double nextPackageReadback;
 
         static AssetDatabaseRefreshTool()
         {
@@ -791,7 +799,9 @@ namespace VRCForge.Editor
             }
             var current = UnityAsyncJobRegistry.Poll(jobId);
             var status = current?.Value<string>("status") ?? string.Empty;
-            if (status == "queued")
+            var operation = UnityAsyncJobRegistry.ReadOperation(jobId);
+            if (status == "queued" || (status == "running" && operation?.Value<long?>("package_resolve_deadline") != null
+                && !SessionState.GetBool(ResolveStateKey + ".RefreshIssued", false)))
             {
                 refreshScheduled = true;
                 refreshNotBefore = EditorApplication.timeSinceStartup + RefreshResponseGraceSeconds;
@@ -809,7 +819,7 @@ namespace VRCForge.Editor
         public class Parameters
         {
             [VRCForgeInput("Optional exact active Unity project root.", IsRequired = false)] public string projectPath { get; set; } = "";
-            [VRCForgeInput("Resolve pending Package Manager dependencies before refresh.", IsRequired = false)] public bool? resolvePackages { get; set; } = false;
+            [VRCForgeInput("Request Package Manager resolution and verify the resolved dependency graph against packages registered in the Editor.", IsRequired = false)] public bool? resolvePackages { get; set; } = false;
             [VRCForgeInput("Bounded Package Manager resolve timeout in seconds.", IsRequired = false)] public int? packageResolveTimeoutSeconds { get; set; } = 120;
             [VRCForgeInput("Optional 1..16 exact existing Assets files or embedded package C# scripts to force reimport. Requires source hash, GUID, and matching importer, except explicitly verified null-reference restoration. Cannot combine with resolvePackages.", IsRequired = false)]
             public ReimportAsset[] reimportAssets { get; set; }
@@ -1206,22 +1216,6 @@ namespace VRCForge.Editor
                 var packageResolveTimeoutSeconds = Math.Max(
                     5,
                     Math.Min(@params?["packageResolveTimeoutSeconds"]?.Value<int?>() ?? 120, 300));
-                object packageResolve = new { requested = false };
-                if (resolvePackages)
-                {
-                    var startedAt = DateTime.UtcNow;
-                    Client.Resolve();
-                    packageResolve = new
-                    {
-                        requested = true,
-                        completed = false,
-                        status = "started",
-                        error = "",
-                        startedAt = startedAt.ToString("O"),
-                        timeoutSeconds = packageResolveTimeoutSeconds
-                    };
-                }
-
                 var existingJobId = UnityAsyncJobRegistry.GetActive(ToolName);
                 if (!string.IsNullOrEmpty(existingJobId))
                 {
@@ -1234,14 +1228,17 @@ namespace VRCForge.Editor
                         new { job_id = existingJobId });
                 }
 
+                var refreshBefore = ReadSnapshot();
+                refreshBefore["observedAtUtc"] = DateTime.UtcNow.ToString("O");
                 var job = UnityAsyncJobRegistry.Create(
                     ToolName,
                     CheckpointPrepareTool.ProjectRoot(),
-                    ReadSnapshot(),
+                    refreshBefore,
                     new JObject
                     {
                         ["resolve_packages"] = resolvePackages,
                         ["package_resolve_timeout_seconds"] = packageResolveTimeoutSeconds,
+                        ["package_resolve_deadline"] = resolvePackages ? DateTime.UtcNow.AddSeconds(packageResolveTimeoutSeconds).Ticks : (long?)null,
                         ["reimport_assets"] = reimportAssets,
                         ["avatar_texture_assets"] = avatarTextureAssets,
                         ["reference_rollback"] = CaptureReferenceRollback(reimportAssets),
@@ -1249,6 +1246,12 @@ namespace VRCForge.Editor
                     TimeSpan.FromSeconds(300));
                 var jobId = job.Value<string>("job_id");
                 UnityAsyncJobRegistry.SetActive(ToolName, jobId);
+                if (resolvePackages)
+                {
+                    nextPackageReadback = 0;
+                    SessionState.EraseString(ResolveStateKey);
+                    SessionState.SetBool(ResolveStateKey + ".RefreshIssued", false);
+                }
                 refreshScheduled = true;
                 refreshNotBefore = EditorApplication.timeSinceStartup + RefreshResponseGraceSeconds;
                 scheduledRequestId = jobId;
@@ -1263,7 +1266,7 @@ namespace VRCForge.Editor
                 };
                 job["requestId"] = jobId;
                 job["projectPath"] = CheckpointPrepareTool.ProjectRoot();
-                job["packageResolve"] = JToken.FromObject(packageResolve);
+                job["packageResolve"] = new JObject { ["requested"] = resolvePackages, ["completed"] = false, ["status"] = resolvePackages ? "queued" : "not_requested" };
                 job["scheduledStatus"] = scheduled.status;
                 job["completionKnown"] = scheduled.completionKnown;
                 job["verificationTool"] = scheduled.verificationTool;
@@ -1297,6 +1300,17 @@ namespace VRCForge.Editor
                 // therefore run only after the MCP response has been released;
                 // otherwise the caller and Unity can wait on each other forever.
                 var operation = UnityAsyncJobRegistry.ReadOperation(requestId);
+                if (operation?.Value<bool>("resolve_packages") == true)
+                {
+                    if (SessionState.GetString(ResolveStateKey, "") != requestId)
+                    {
+                        var manifestPath = Path.Combine(CheckpointPrepareTool.ProjectRoot(), "Packages", "manifest.json");
+                        SessionState.SetString(ResolveStateKey + ".Manifest", SourceSha256(manifestPath));
+                        SessionState.SetString(ResolveStateKey, requestId);
+                        Client.Resolve();
+                    }
+                    SessionState.SetBool(ResolveStateKey + ".RefreshIssued", true);
+                }
                 var reimportAssets = operation?["reimport_assets"] as JArray;
                 if (reimportAssets != null)
                 {
@@ -1309,7 +1323,7 @@ namespace VRCForge.Editor
                 {
                     AssetDatabase.Refresh();
                 }
-                UnityEngine.Debug.Log($"[VRCForge] Scheduled AssetDatabase refresh completed ({requestId}).");
+                UnityEngine.Debug.Log($"[VRCForge] AssetDatabase refresh returned; checking Editor state ({requestId}).");
                 EditorApplication.update -= TryCompleteScheduledRefresh;
                 EditorApplication.update += TryCompleteScheduledRefresh;
             }
@@ -1320,6 +1334,91 @@ namespace VRCForge.Editor
                     $"[VRCForge] Scheduled AssetDatabase refresh failed ({requestId}): "
                     + $"{ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        // Resolve() has no handle, and Unity emits no registration event for
+        // a no-op. Read the currently registered graph after submission,
+        // without issuing a second, potentially overlapping Client operation.
+        private static JObject ReadPackageResolution(string jobId)
+        {
+            var readback = new JObject
+            {
+                ["requested"] = true, ["completed"] = false, ["status"] = "awaiting_registration",
+                ["verificationBasis"] = "manifest_and_registered_dependency_graph", ["nativeRequestCompletionKnown"] = false,
+            };
+            if (SessionState.GetString(ResolveStateKey, "") != jobId)
+            {
+                readback["status"] = "unverified";
+                return readback;
+            }
+            try
+            {
+                var packageRoot = Path.Combine(CheckpointPrepareTool.ProjectRoot(), "Packages");
+                var manifestBytes = File.ReadAllBytes(Path.Combine(packageRoot, "manifest.json"));
+                var manifest = JObject.Parse(Encoding.UTF8.GetString(manifestBytes).TrimStart('\uFEFF'));
+                var dependencies = manifest["dependencies"] as JObject ?? new JObject();
+                var packages = UpmPackageInfo.GetAllRegisteredPackages();
+                if (packages == null) throw new InvalidOperationException("UPM did not return its registered package graph.");
+                var registered = packages.ToDictionary(p => p.name, StringComparer.Ordinal);
+                var mismatched = new JArray();
+                foreach (var dependency in dependencies.Properties())
+                {
+                    registered.TryGetValue(dependency.Name, out var package);
+                    if (package?.source == PackageSource.Embedded) continue;
+                    var entry = package == null ? null : ProjectDependencyEntry?.GetValue(package) as string;
+                    var request = dependency.Value.Value<string>();
+                    var matches = string.IsNullOrEmpty(entry) ? package?.packageId == dependency.Name + "@" + request : entry == request;
+                    if (package == null || !package.isDirectDependency || !matches) mismatched.Add(dependency.Name);
+                }
+                foreach (var package in packages)
+                    if (package.isDirectDependency && package.source != PackageSource.Embedded && dependencies.Property(package.name) == null)
+                        mismatched.Add(package.name);
+
+                var expected = new HashSet<string>(StringComparer.Ordinal);
+                var pending = new Stack<string>(dependencies.Properties().Select(p => p.Name)
+                    .Concat(packages.Where(p => p.source == PackageSource.Embedded).Select(p => p.name)));
+                var errors = new JArray();
+                while (pending.Count > 0)
+                {
+                    var name = pending.Pop();
+                    if (!expected.Add(name) || !registered.TryGetValue(name, out var package)) continue;
+                    foreach (var error in package.errors ?? Array.Empty<Error>()) errors.Add(name + ": " + error.message);
+                    foreach (var dependency in package.resolvedDependencies)
+                    {
+                        pending.Push(dependency.name);
+                        if (registered.TryGetValue(dependency.name, out var target) && target.version != dependency.version)
+                            errors.Add(name + ": registered version differs from UPM's resolved dependency " + dependency.name);
+                    }
+                    if (package.source == PackageSource.Local || package.source == PackageSource.Embedded)
+                    {
+                        var disk = JObject.Parse(File.ReadAllText(Path.Combine(package.resolvedPath, "package.json")));
+                        var declared = new JObject(package.dependencies.Select(d => new JProperty(d.name, d.version)));
+                        if (!JToken.DeepEquals(disk["dependencies"] ?? new JObject(), declared))
+                            errors.Add(name + ": local package dependencies differ from UPM's declaration");
+                    }
+                }
+                var missing = new JArray(expected.Except(registered.Keys).OrderBy(id => id, StringComparer.Ordinal));
+                var extra = new JArray(registered.Keys.Except(expected).OrderBy(id => id, StringComparer.Ordinal));
+                var manifestUnchanged = SessionState.GetString(ResolveStateKey + ".Manifest", "") == BytesSha256(manifestBytes);
+                readback["manifestUnchanged"] = manifestUnchanged;
+                readback["manifestDependencyCount"] = dependencies.Count;
+                readback["mismatchedManifestDependencies"] = mismatched;
+                readback["expectedCount"] = expected.Count;
+                readback["registeredCount"] = registered.Count;
+                readback["missing"] = missing;
+                readback["extra"] = extra;
+                readback["errors"] = errors;
+                if (manifestUnchanged && mismatched.Count == 0 && missing.Count == 0 && extra.Count == 0 && errors.Count == 0)
+                {
+                    readback["status"] = "verified";
+                    readback["completed"] = true;
+                }
+            }
+            catch (Exception exception)
+            {
+                readback["graphError"] = exception.Message;
+            }
+            return readback;
         }
 
         private static void TryCompleteScheduledRefresh()
@@ -1348,7 +1447,37 @@ namespace VRCForge.Editor
             {
                 if (avatarTextureAssets == null)
                 {
-                    UnityAsyncJobRegistry.Complete(jobId, () => ReadSnapshot(reimportAssets));
+                    var resolveRequested = operation?.Value<bool>("resolve_packages") == true;
+                    if (resolveRequested && EditorApplication.timeSinceStartup < nextPackageReadback)
+                    {
+                        EditorApplication.update += TryCompleteScheduledRefresh;
+                        return;
+                    }
+                    var resolve = resolveRequested ? ReadPackageResolution(jobId) : null;
+                    if (resolve != null && !resolve.Value<bool>("completed"))
+                    {
+                        if (resolve.Value<string>("status") == "awaiting_registration" &&
+                            DateTime.UtcNow.Ticks < operation.Value<long?>("package_resolve_deadline"))
+                        {
+                            nextPackageReadback = EditorApplication.timeSinceStartup + 0.5;
+                            EditorApplication.update += TryCompleteScheduledRefresh;
+                            return;
+                        }
+                        UnityAsyncJobRegistry.Fail(jobId, "package_resolution_unverified",
+                            "Refresh returned, but the resolved package graph could not be confirmed in the Editor. See the package readback.", false, () =>
+                            {
+                                var snapshot = ReadSnapshot();
+                                snapshot["packageResolve"] = resolve;
+                                return snapshot;
+                            });
+                        return;
+                    }
+                    UnityAsyncJobRegistry.Complete(jobId, () =>
+                    {
+                        var snapshot = ReadSnapshot(reimportAssets);
+                        if (resolve != null) snapshot["packageResolve"] = resolve;
+                        return snapshot;
+                    });
                 }
                 else
                 {

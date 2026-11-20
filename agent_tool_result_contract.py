@@ -13,9 +13,11 @@ import re
 from typing import Any
 
 from external_tool_result_contract import (
+    INCOMPLETE_OPERATION_STATES,
     canonical_result_facts,
     is_gesture_manager_entry_pending,
     prioritize_result_sources,
+    receipt_operation_status,
 )
 
 
@@ -44,6 +46,7 @@ _SUCCESSFUL_EXECUTION_STATUSES = frozenset(
 )
 TERMINAL_JOB_STATUSES = _FAILED_STATUSES | _SUCCESSFUL_EXECUTION_STATUSES | {
     "done", "cancelled", "canceled", "expired", "interrupted", "not_found", "no_change", "not_started",
+    "partial", "incomplete", "rolled_back",
 }
 _KNOWN_NESTED_KEYS = (
     "structuredContent",
@@ -89,6 +92,23 @@ def _first_text(views: list[Mapping[str, Any]], keys: tuple[str, ...]) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()[:600]
     return ""
+
+
+def _operation_owner(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Unwrap result carriers only; diagnostics and verification describe other scopes."""
+    current = receipt
+    for _ in range(4):
+        if (current.get("operationStatus") or current.get("toolExecutionStatus")
+                or "completionKnown" in current or current.get("partial") is True
+                or current.get("commitState") in ("partial", "rolled_back")
+                or _status(current.get("status")) in INCOMPLETE_OPERATION_STATES):
+            return current
+        child = next((current[k] for k in ("structuredContent", "result", "rawResult", "toolResult", "entrypoint")
+                      if isinstance(current.get(k), Mapping)), None)
+        if child is None:
+            break
+        current = child
+    return receipt
 
 
 def runtime_observation_receipt(value: Any) -> Mapping[str, Any] | None:
@@ -271,6 +291,8 @@ def _verification(
         state = "needs_user_action"
     elif explicit_state in {"ok", "passed", "verified"} or checks:
         state = "passed"
+    elif explicit_state:
+        state = explicit_state
     else:
         state = "not_required"
     return {"state": state, "checks": checks}, needs_user_action
@@ -453,6 +475,15 @@ def normalize_agent_tool_result(
         for view in views
     )
     pending_execution = pending_execution_receipt(value)
+    receipt = views[0] if views else {}
+    if not views and not write and value is not None:
+        receipt = {"ok": True}
+    owner = _operation_owner(receipt)
+    operation = receipt_operation_status(owner, write=write)
+    reported_incomplete = operation in INCOMPLETE_OPERATION_STATES and (
+        operation != "unknown" or not owner or owner.get("completionKnown") is False
+        or _status(owner.get("status")) == "unknown" or _status(owner.get("operationStatus")) == "unknown"
+    )
     dispatch = pending_execution if pending_execution and pending_execution.get("triggered") is True else None
     running_write_without_job = (
         write
@@ -473,7 +504,9 @@ def normalize_agent_tool_result(
     needs_action = (verification_needs_action and not gm_entry_pending) or bool(
         views
         and top_level_execution_status not in _SUCCESSFUL_EXECUTION_STATUSES
-        and _status(views[0].get("status")) in _TOP_LEVEL_PENDING_STATUSES
+        and (_status(receipt.get("status")) in {"approval_pending", "queued_for_approval"}
+             or (_status(receipt.get("status")) == "pending" and
+                 (receipt.get("approval") or receipt.get("approvalId") or receipt.get("questionId"))))
         and not gm_entry_pending
     )
     for view in views:
@@ -501,6 +534,10 @@ def normalize_agent_tool_result(
             break
         if status in _NEEDS_ACTION_STATUSES:
             needs_action = True
+            continue
+        if ((view is owner or (view is receipt and view.get("result") is owner))
+                and owner.get("completionKnown") is False
+                and operation in {"unknown", "pending"}):
             continue
         if view.get("ok") is False or view.get("success") is False:
             failed_view = view
@@ -538,7 +575,11 @@ def normalize_agent_tool_result(
             ),
             **_structured_error_route_fields(projected_error),
         }
-    elif verification_needs_action and not write and not any(
+    elif reported_incomplete:
+        status = operation
+        summary = _first_text(views, ("reason", "error", "summary", "message")) or f"Operation status: {operation}."
+        error = None
+    elif verification_needs_action and not write and not pending_execution and not any(
         _status(view.get("status")) in _NEEDS_ACTION_STATUSES | _TOP_LEVEL_PENDING_STATUSES
         or _status(view.get("toolExecutionStatus")) in _NEEDS_ACTION_STATUSES | _TOP_LEVEL_PENDING_STATUSES
         or (
@@ -569,6 +610,7 @@ def normalize_agent_tool_result(
         error = None
     elif running_write_without_job:
         status = "failed"
+        operation = "unknown"
         summary = "The write is still reported as running but has no job handle; completion is unknown."
         error = {
             "type": "execution",
@@ -611,10 +653,17 @@ def normalize_agent_tool_result(
             ),
             **_structured_error_route_fields(projected_error),
         }
+    elif operation == "pending" and not owner.get("toolExecutionStatus"):
+        status = "pending"
+        summary = _first_text([owner], ("summary", "message")) or "Operation is pending; no final result has been observed."
+        error = None
     else:
         status = "ok"
         summary = _first_text(views, ("summary", "message"))
-        summary = summary or str(fallback_summary or "Tool execution completed.").strip()
+        if write and operation == "unknown":
+            summary = summary or "Handler returned. The resulting change is unconfirmed."
+        else:
+            summary = summary or str(fallback_summary or "Tool execution completed.").strip()
         error = None
 
     data: dict[str, Any] = {}
@@ -651,15 +700,29 @@ def normalize_agent_tool_result(
         causal_views = [gateway_outcome, *causal_views]
     canonical_facts = canonical_result_facts(
         causal_views,
-        success=None if execution_pending else status == "ok",
-        status=None if execution_pending else "ok" if status == "ok" else "failed",
+        success=status == "ok" if status in {"failed", "ok"} else None,
+        status=status,
         write=write,
     )
-    canonical_status = canonical_facts.pop("status", None)
+    canonical_facts.pop("status", None)
     result.update(canonical_facts)
+    if status == "pending":
+        operation = "pending"
+    elif status == "failed" and operation in {"success", "applied", "no_change"}:
+        operation = "failed"
+    elif status == "needs_user_action" and needs_action and not verification_needs_action:
+        operation = "user_confirmation_required"
+    result["operationStatus"] = operation
+    for key in ("completionKnown", "lastKnownStatus", "hasMore", "nextCursor", "remainingCount", "nextRequest"):
+        if key in owner:
+            result[key] = _bounded_value(owner[key])
+    if job := job_receipt(value):
+        result["jobId"] = job.get("jobId") or job.get("job_id")
+        result["jobStatus"] = job.get("lastKnownStatus") or job.get("status")
     if write:
         result["targetEffectVerified"] = bool(
-            status == "ok" and result.get("readbackState") == "verified"
+            status == "ok" and operation not in INCOMPLETE_OPERATION_STATES | {"pending", "preview"}
+            and result.get("readbackState") == "verified"
             and result.get("commitState") in {"complete", "no_change"}
             and result.get("committed") is True
             and not any(
@@ -673,12 +736,16 @@ def normalize_agent_tool_result(
             identity = _first_text(causal_views, (key,))
             if identity:
                 result[key] = identity
+    if (execution_pending or reported_incomplete) and isinstance(owner.get("error"), Mapping):
+        observation_error = _structured_error([owner])
+        result["summary"] = observation_error["summary"] or result["summary"]
+        result["error"] = error = observation_error
     if error is not None and isinstance(result.get("safeToRetry"), bool):
         error["retryable"] = result["safeToRetry"]
     if execution_pending:
         result.update({
-            "persistenceState": "pending",
-            "readbackState": "pending",
+            "persistenceState": owner.get("persistenceState") or "pending",
+            "readbackState": owner.get("readbackState") or "pending",
         })
     if execution_pending and dispatch:
         result.update({
@@ -693,8 +760,9 @@ def normalize_agent_tool_result(
         job_id = pending_execution.get("jobId", pending_execution.get("job_id"))
         result.update({
             "jobId": job_id,
-            "jobStatus": pending_execution.get("status"),
-            "nextAction": f"Poll the existing job {job_id} until it reaches a terminal state. Do not start it again.",
+            "jobStatus": pending_execution.get("lastKnownStatus") or pending_execution.get("status"),
+            "nextAction": pending_execution.get("nextAction") or
+                f"Poll the existing job {job_id} until it reaches a terminal state. Do not start it again.",
         })
     # These are deliberately shared diagnostic facts, not transport-only
     # decorations.  Keep them in the normalized outcome so the internal loop
@@ -705,10 +773,6 @@ def normalize_agent_tool_result(
             if key in view and view[key] not in (None, ""):
                 result[key] = _bounded_value(view[key])
                 break
-    # Preserve the historical needs_user_action status while exposing the
-    # shared binary execution status for cross-surface consumers.
-    if status not in {"ok", "failed"} and canonical_status:
-        result["canonicalStatus"] = canonical_status
     cause = _canonical_cause(causal_views) if status == "failed" else None
     if cause is not None:
         for key in ("mutationStarted", "committed", "commitState"):
