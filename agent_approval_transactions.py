@@ -814,6 +814,7 @@ class ApprovalTransactionPorts:
     roslyn_available: Callable[[AgentGatewayConfig | None], bool]
     save_config: Callable[[AgentGatewayConfig], None]
     resolve_execution_target_reference: Callable[..., dict[str, Any]]
+    resolve_outfit_import_target: Callable[..., tuple[dict[str, str], dict[str, Any]]]
     invalidate_scan_results: Callable[[str, str], Any] = _noop_scan_invalidation
     complete_scan_mutation: Callable[[str, str, Any, Any], None] = _noop_scan_completion
     freeze_native_history: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None
@@ -1523,6 +1524,8 @@ class AgentApprovalTransactionService:
             )
         user_constraints = self._ports.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
+        if internal_runtime and target_tool == "vrcforge_import_outfit_package" and "executionTarget" not in arguments:
+            _, arguments["executionTarget"] = self._ports.resolve_outfit_import_target(arguments)
         execution_target = arguments.get("executionTarget")
         if is_execution_target_reference(execution_target):
             project_root = str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()

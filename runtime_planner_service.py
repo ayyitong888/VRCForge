@@ -78,6 +78,8 @@ RUNTIME_TASK_WORKFLOW_INSTRUCTION = (
     "Resolve factual uncertainty with tools. "
     "Treat follow-ups as updates to the current task unless the user replaces or stops it. "
     "For multi-stage work or a requested TODO list, call progress_replace before starting substantive work. "
+    "Cover each explicit user requirement with an actionable task. Keep the requested target and direction of change in that task. "
+    "When making or revising the plan, list any requirements still lacking such a task separately in the progress update. "
     "For a simple task, work directly. Use progress_update as items change; if IDs are missing, read it with progress_list. "
     "Use completionChecks only for known tools and exact target arguments or result fields. Reuse matching receipts. "
     "Name the tool's exact acceptance checks when they become known. Only matching receipts complete an item. "
@@ -112,7 +114,10 @@ RUNTIME_AUTHORITY_INSTRUCTION = (
     "Follow the tool receipt for actual approval and execution status. "
 )
 RUNTIME_CONTEXT_INSTRUCTION = (
-    "压缩后先读 TODO。 Read the injected activeTodo directly, then the handoff graph's readyTaskIds. "
+    "压缩后先读 TODO。 Read activeTodo and the handoff graph's uncoveredRequirementIds alongside readyTaskIds. "
+    "When planning, link the implementing TODO to the requirement using requirementIds in the progress tool. "
+    "Surface any remaining gaps under 'Uncovered requirements' in the user's language "
+    "(Chinese: 未落地的要求). If requirementCoverageKnown is false, check the original user messages against the tasks. "
     "An injected TODO is the current snapshot; use progress_list only when no current snapshot was supplied and a list is needed. "
     "On resumption, live pendingApprovals take precedence over the historical graph. When the user just asks to continue, "
     "reply with the outstanding approval and wait. Only a separate user objective starts independent work. "
@@ -5718,7 +5723,9 @@ class RuntimePlannerService:
             stable_position = len(projected_messages) - 1
         if "activeTodo" in observe:
             active_todo = ensure_list(observe["activeTodo"])
-            if active_todo or last_slot_context("activeTodo"):
+            if active_todo or last_slot_context("activeTodo") or any(
+                model_handoff_payload(row) is not None for row in projected_messages
+            ):
                 turn_context["activeTodo"] = active_todo
         turn_context_message = (
             marker + json.dumps(turn_context, ensure_ascii=False, separators=(",", ":"))

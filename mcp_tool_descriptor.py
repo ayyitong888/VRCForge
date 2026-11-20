@@ -329,6 +329,9 @@ def execution_target_scope_guidance(name: str, *, write: bool, required: bool,
         return prefix + "handler-managed preparation or receipt; no runtime executionTarget binding is required."
     if not write and not required:
         return prefix + "optional read reference; if supplied, it is validated at its own bound scope, not required to reach the tool's scope."
+    if write and not required and name == "vrcforge_import_outfit_package":
+        return (prefix + "project or more specific. For this import the Gateway can supply a unique live binding "
+                "from the same session or its exact matching bound preflight. Otherwise supply the intended bound reference.")
     if policy.get("actionAwareScope"):
         action = policy["actionAwareScope"]
         condition = action["when"]

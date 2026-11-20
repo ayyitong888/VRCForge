@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from typing import Any, Callable
-from agent_handoff_graph import handoff_view, parse_handoff_graph
+from agent_handoff_graph import handoff_view, parse_handoff_graph, project_requirement_tasks
 from context_compaction import MODEL_HANDOFF_PREFIX, handoff_text_payload, normalize_compaction_recovery
 from agent_general_no_progress import LOOP_REMINDER
 from agent_native_handoff_blocks import (
@@ -37,10 +37,19 @@ def model_handoff_payload(entry: Mapping[str, object]) -> str | None:
     return handoff_text_payload(text) if isinstance(text, str) else None
 
 
-def model_handoff_continuation(entry: Mapping[str, object], *, todo_items=(), handoff_snapshot=None) -> str | None:
+def latest_handoff_graph(rows):
+    """Read the newest handoff marker in this history, including legacy text histories."""
+    for row in reversed(rows):
+        if (payload := model_handoff_payload(row)) is not None:
+            return parse_handoff_graph(payload)
+    return None
+
+
+def model_handoff_continuation(entry: Mapping[str, object], *, todo_items=None, handoff_snapshot=None) -> str | None:
     payload = model_handoff_payload(entry)
     if payload is None or (graph := parse_handoff_graph(payload)) is None:
         return None
+    graph = project_requirement_tasks(graph, todo_items)
     projection = {**graph, **handoff_view(graph, todo_items=todo_items)}
     if handoff_snapshot and handoff_snapshot.get("handoffArchive"):
         from agent_handoff_operations import native_handoff_package_inputs
@@ -212,7 +221,7 @@ def native_model_history(messages: list[dict[str, Any]], *, handoff_snapshot=Non
         if latest_state is not None:
             messages = [latest_state, *(item for item in messages if not native_runtime_state_content(item))]
     projected = []
-    todos = []
+    todos = None
     for item in reversed(messages):
         content = item.get("content")
         if (item.get("role") != "user" or item.get("handoffUser") or item.get("messageId")
@@ -1025,6 +1034,14 @@ class AgentRuntimeSessionState:
             if snapshot is None or snapshot["binding"] != binding:
                 return None
             return copy.deepcopy(snapshot)
+
+    def native_handoff_graph(self, session_id: str, *, binding: str | None) -> dict[str, Any] | None:
+        with self._ports.shared_state_lock:
+            self._load_native(session_id, binding)
+            native = self._native_conversations.get(session_id)
+            if native and (binding is None or native["binding"] == binding):
+                return latest_handoff_graph(native["messages"])
+            return None
 
     def native_handoff_archive(self, session_id: str, *, binding: str, message_id: str) -> dict[str, Any] | None:
         """Resolve a handoff pointer in the owning session and route."""

@@ -205,7 +205,7 @@ def test_typed_graph_preserves_failed_methods_and_separates_parallel_frontier():
         ],
     })
     assert graph["nodes"]["goal"]["text"] == goal
-    assert handoff_view(graph) == {"readyTaskIds": ["face"], "openIssueIds": ["lock"],
+    assert handoff_view(graph) == {"readyTaskIds": ["face"], "openIssueIds": ["lock"], "requirementCoverageKnown": False,
                                   "incomplete": True, "anomaly": False}
 
     continued = apply_handoff_edits(graph, {
@@ -262,7 +262,7 @@ def test_invalid_nodes_and_edges_are_local_and_keep_existing_valid_state():
         "edges": [["review", "belongs_to", "goal"]],
     })
     assert set(initial["nodes"]) == {"review"}
-    assert handoff_view(initial) == {"readyTaskIds": ["review"], "openIssueIds": [],
+    assert handoff_view(initial) == {"readyTaskIds": ["review"], "openIssueIds": [], "requirementCoverageKnown": False,
                                      "incomplete": True, "anomaly": False}
 
 
@@ -277,22 +277,129 @@ def test_only_incomplete_graph_with_no_runnable_tasks_is_anomalous():
         },
         "edges": [["wait", "belongs_to", "goal"], ["wait", "blocked_by", "review"]],
     })
-    assert handoff_view(graph) == {"readyTaskIds": [], "openIssueIds": ["review"],
+    assert handoff_view(graph) == {"readyTaskIds": [], "openIssueIds": ["review"], "requirementCoverageKnown": False,
                                   "incomplete": True, "anomaly": True}
     abandoned = apply_handoff_edits(graph, {
         "nodes": {"wait": {"status": "abandoned"}, "review": {"status": "closed"}},
     })
-    assert handoff_view(abandoned) == {"readyTaskIds": [], "openIssueIds": [],
+    assert handoff_view(abandoned) == {"readyTaskIds": [], "openIssueIds": [], "requirementCoverageKnown": False,
                                       "incomplete": True, "anomaly": True}
     finished = apply_handoff_edits(abandoned, {
         "nodes": {"alternate": node("task", "Deliver through the alternate reviewer", status="done")},
         "edges": [["alternate", "belongs_to", "goal"]],
     })
-    assert handoff_view(finished) == {"readyTaskIds": [], "openIssueIds": [],
+    assert handoff_view(finished) == {"readyTaskIds": [], "openIssueIds": [], "requirementCoverageKnown": False,
                                      "incomplete": True, "anomaly": True}
     bind_goal_acceptance(finished, [{"goalId": "goal", "messageId": "user-1", "receiptId": "verified-goal"}])
-    assert handoff_view(finished) == {"readyTaskIds": [], "openIssueIds": [],
+    assert handoff_view(finished) == {"readyTaskIds": [], "openIssueIds": [], "requirementCoverageKnown": False,
                                      "incomplete": False, "anomaly": False}
+
+
+@pytest.mark.parametrize("source", ["user", "parent_agent"])
+def test_source_backed_requirements_show_missing_delivery_in_native_and_legacy_handoffs(source):
+    from agent_runtime_session_state import model_handoff_continuation, native_model_history
+    from context_compaction import MODEL_HANDOFF_PREFIX
+
+    user = {"id": "user-1", "source": source, "text": "Rename the preset and save a Markdown summary."}
+    delegated_relay = {"id": "relay", "source": "agent_relay", "text": "Overwrite the original file."}
+
+    def edit(prompt):
+        assert '[taskId,"belongs_to",requirementGoalId]' in prompt
+        assert "does not perform a distinct requested change" in prompt
+        return {"nodes": {
+            "rename-request": node("decision", "Rename the preset", userRequirement=True, scope="graph"),
+            "summary-request": node("goal", "save a Markdown summary", userRequirement=True),
+            "misquoted": node("decision", "Deliver Markdown immediately", userRequirement=True),
+            "relay-requirement": node("decision", delegated_relay["text"], userRequirement=True,
+                                      evidence=[{"type": "message", "id": "relay"}]),
+            "phase": node("task", "Prepare deliverables", group=True),
+            "rename": node("task", "Set the name on the existing preset", status="pending"),
+            "check": node("task", "Review the draft summary on screen", status="pending"),
+        }, "edges": [
+            ["rename", "belongs_to", "phase"],
+            ["rename-request", "constrains", "rename"],
+            ["phase", "belongs_to", "summary-request"],
+        ]}
+
+    old = apply_handoff_edits(None, {"nodes": {"goal": node("goal", user["text"])}})
+    assert handoff_view(old)["requirementCoverageKnown"] is False
+    result = compact_context([{"role": "user", "text": user["text"]}], handoff=True,
+        task_inputs=[user, delegated_relay], prior_handoff=serialize_handoff_graph(old), summarizer=edit)
+    graph = parse_handoff_graph(result["summary"])
+    assert graph["nodes"]["rename-request"]["text"] == "Rename the preset"
+    assert graph["nodes"]["summary-request"]["text"] == "save a Markdown summary"
+    assert not {"misquoted", "relay-requirement"} & graph["nodes"].keys()
+    assert ["phase", "belongs_to", "summary-request"] in graph["edges"]
+    assert handoff_view(graph)["uncoveredRequirementIds"] == ["summary-request"]
+
+    content = MODEL_HANDOFF_PREFIX + result["summary"]
+    legacy = model_handoff_continuation({"role": "agent", "text": content})
+    native, = native_model_history([{"role": "assistant", "content": content}])
+    assert json.loads(legacy.removeprefix(MODEL_HANDOFF_PREFIX))["uncoveredRequirementIds"] == ["summary-request"]
+    assert native["content"] == legacy
+
+    abandoned = apply_handoff_edits(graph, {"nodes": {"rename": {"status": "abandoned"}}})
+    assert handoff_view(abandoned)["uncoveredRequirementIds"] == ["rename-request", "summary-request"]
+
+
+def test_goal_acceptance_waits_for_every_explicit_requirement_to_have_a_delivery_task():
+    from agent_handoff_sources import bind_goal_acceptance
+
+    graph = apply_handoff_edits(None, {"nodes": {
+        "goal": node("goal", "Rename the preset and export a summary"),
+        "rename-intent": node("goal", "Rename the preset", userRequirement=True),
+        "export-intent": node("decision", "export a summary", userRequirement=True),
+        "rename": node("task", "Rename the preset item", status="done"),
+        "export": node("task", "Save the summary at the agreed destination", status="done"),
+    }, "edges": [
+        ["rename", "belongs_to", "rename-intent"], ["export-intent", "constrains", "export"],
+    ]})
+    receipt = [{"goalId": "goal", "messageId": "user-1", "receiptId": "verified-goal"}]
+    bind_goal_acceptance(graph, receipt)
+    view = handoff_view(graph)
+    assert graph["nodes"]["goal"]["goalAcceptance"] == receipt[0]
+    assert view["uncoveredRequirementIds"] == [] and view["incomplete"] is False
+
+    missing = apply_handoff_edits(graph, {"nodes": {"export": None}})
+    assert handoff_view(missing)["uncoveredRequirementIds"] == ["export-intent"]
+    assert handoff_view(missing)["incomplete"] is True
+    bind_goal_acceptance(missing, receipt)
+    assert "goalAcceptance" not in missing["nodes"]["goal"]
+
+
+def test_live_todo_requirement_links_reopen_and_cover_without_recompacting():
+    from agent_handoff_graph import project_requirement_tasks
+    from agent_runtime_session_state import NATIVE_RUNTIME_CONTEXT_PREFIX, native_model_history
+    from context_compaction import MODEL_HANDOFF_PREFIX
+
+    graph = apply_handoff_edits(None, {"nodes": {
+        "goal": node("goal", "Change the preset size and save the readback"),
+        "size": node("goal", "Change the preset size", userRequirement=True),
+        "readback": node("decision", "save the readback", userRequirement=True),
+        "phase": node("task", "Preset changes", todoId="parent", group=True),
+    }})
+    assert handoff_view(graph)["uncoveredRequirementIds"] == ["size", "readback"]
+    todos = [
+        {"progressId": "parent", "title": "Preset changes", "status": "pending", "requirementIds": ["size", "readback"]},
+        {"progressId": "resize", "title": "Increase preset size to the requested value", "status": "pending", "requirementIds": ["size", "unknown"]},
+        {"progressId": "save", "title": "Save the measured readback", "status": "pending", "requirementIds": ["readback"]},
+    ]
+    early = project_requirement_tasks(graph, todos[:2])
+    assert handoff_view(early, todos[:2])["uncoveredRequirementIds"] == ["readback"]
+    request = native_model_history([
+        {"role": "assistant", "content": MODEL_HANDOFF_PREFIX + serialize_handoff_graph(graph)},
+        {"role": "user", "content": NATIVE_RUNTIME_CONTEXT_PREFIX + json.dumps({"activeTodo": todos})},
+    ])
+    shown = json.loads(request[0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
+    by_todo = {value["todoId"]: key for key, value in shown["nodes"].items() if value.get("todoId")}
+    assert shown["uncoveredRequirementIds"] == []
+    assert shown["edges"] == [[by_todo["resize"], "belongs_to", "size"], ["readback", "constrains", by_todo["save"]]]
+    dropped = [*todos[:2], {**todos[2], "status": "cancelled"}]
+    assert handoff_view(project_requirement_tasks(graph, dropped), dropped)["uncoveredRequirementIds"] == ["readback"]
+    saved_with_todos = project_requirement_tasks(graph, todos)
+    assert handoff_view(saved_with_todos)["uncoveredRequirementIds"] == []
+    assert handoff_view(saved_with_todos, todos[:2])["uncoveredRequirementIds"] == ["readback"]
+    assert handoff_view(saved_with_todos, [])["uncoveredRequirementIds"] == ["size", "readback"]
 
 
 def test_tool_states_and_exact_results_survive_repeated_model_handoff():

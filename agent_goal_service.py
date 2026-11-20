@@ -35,6 +35,7 @@ class GoalStorePorts:
     read_events: Callable[[Path], list[dict[str, Any]]]
     shared_state_lock: GoalStateLockPort
     normalize_path: Callable[[str], str]
+    uncovered_requirements: Callable[[dict[str, Any]], Sequence[str]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +54,36 @@ class GoalEventPorts:
     redact: Callable[[Any], Any]
     redact_persistence: Callable[[Any], Any]
     summarize: Callable[[str, int], str]
+
+
+def scoped_goal_requirement_gaps(
+    goal: Mapping[str, Any],
+    *,
+    current_graph: Callable[[str, str], dict[str, Any] | None],
+    saved_graph: Callable[[str], dict[str, Any] | None],
+    scoped_todos: Callable[[str, str], Sequence[dict[str, Any]]],
+) -> Sequence[str]:
+    """Inspect only the associated owner's graph and current TODO records."""
+    from agent_handoff_graph import handoff_view, project_requirement_tasks
+
+    session_id = goal.get("sessionId")
+    source_id = goal.get("sourceMessageId")
+    if not session_id or not source_id:
+        return ()
+    project_root = goal.get("projectRoot") or ""
+
+    def owns_goal(graph: dict[str, Any]) -> bool:
+        node = graph["nodes"].get(goal["goalId"], {})
+        return (node.get("kind") == "goal" and node.get("goalSourceId") == source_id
+                and {"type": "message", "id": source_id} in node.get("evidence", ()))
+
+    graph = saved_graph(session_id)
+    if graph is None or not owns_goal(graph):
+        graph = current_graph(session_id, project_root)
+        if graph is None or not owns_goal(graph):
+            return ()
+    todos = scoped_todos(session_id, project_root)
+    return handoff_view(project_requirement_tasks(graph, todos), todos).get("uncoveredRequirementIds", [])
 
 
 class AgentGoalService:
@@ -78,6 +109,7 @@ class AgentGoalService:
             lock=store_ports.shared_state_lock,  # type: ignore[arg-type]
             normalize_path=store_ports.normalize_path,
             runner_instance_id=runner_instance_id,
+            uncovered_requirements=store_ports.uncovered_requirements,
         )
 
     @property

@@ -21,7 +21,7 @@ from agent_handoff_sources import (
     HOST_NODE_FIELDS, HOST_NODE_OWNERSHIP, bind_goal_acceptance, index_todos, package_preflight_edits, registered_goal_nodes,
     source_attempt_edits, source_nodes, todo_completion_verified,
 )
-from agent_runtime_input import classify_history
+from agent_runtime_input import RuntimeInputSource, classify_history
 
 
 COMPACTION_SCHEMA = "vrcforge.context_compaction.v1"
@@ -668,7 +668,9 @@ def _handoff_edit_sources(payload: Any, prior: dict[str, Any] | None,
     edits = {**payload, "nodes": {}}
     owned_attempts = {node_id for node_id, node in (prior or {}).get("nodes", {}).items()
                       if node.get("attemptReceiptId")}
-    model_fields = {"kind", "text", "status", "scope", "reason", "facts", "evidence", "group", "order", "todoId"}
+    model_fields = {"kind", "text", "status", "scope", "reason", "facts", "evidence", "group", "order", "todoId", "userRequirement"}
+    requirement_sources = {row["id"]: row.get("sourceText", row["text"]) for row in task_inputs
+                           if row.get("source") in {RuntimeInputSource.USER, RuntimeInputSource.PARENT_AGENT}}
     if isinstance(payload.get("removeEdges"), list):
         edits["removeEdges"] = [edge for edge in payload["removeEdges"]
                                 if not isinstance(edge, list) or not edge or not isinstance(edge[0], str)
@@ -729,7 +731,17 @@ def _handoff_edit_sources(payload: Any, prior: dict[str, Any] | None,
                     candidate["status"] = old.get("status", "unknown")
         if isinstance(candidate, dict) and isinstance(candidate.get("evidence"), list):
             candidate = {**candidate, "evidence": source_pointers(candidate["evidence"])}
-        if (isinstance(candidate, dict) and candidate.get("kind", old.get("kind")) == "goal"
+        if isinstance(candidate, dict) and (candidate.get("userRequirement") or old.get("userRequirement")):
+            text = candidate.get("text", old.get("text"))
+            evidence = candidate.get("evidence", old.get("evidence", ()))
+            if (candidate.get("kind", old.get("kind")) not in {"goal", "decision"} or not isinstance(text, str) or not text.strip()
+                    or not isinstance(evidence, (list, tuple))):
+                continue
+            exact_sources = [ref for ref in evidence if ref["type"] == "message" and text in requirement_sources.get(ref["id"], "")]
+            if not exact_sources:
+                continue
+            candidate = {**candidate, "userRequirement": True, "evidence": exact_sources}
+        if (isinstance(candidate, dict) and not candidate.get("userRequirement") and candidate.get("kind", old.get("kind")) == "goal"
                 and isinstance(candidate.get("text"), str)):
             candidate = {**candidate, "kind": "goal"}
             goal_edits["nodes"][node_id] = candidate
@@ -750,7 +762,8 @@ def _handoff_edit_sources(payload: Any, prior: dict[str, Any] | None,
         edits["edges"] = [[aliases.get(edge[0], edge[0]), edge[1], aliases.get(edge[2], edge[2]), *edge[3:]]
                           if isinstance(edge, list) and len(edge) >= 3
                           and isinstance(edge[0], str) and isinstance(edge[2], str) else edge for edge in edits["edges"]]
-    if not (goal_edits["nodes"] or any(node["kind"] == "goal" for node in (prior or {}).get("nodes", {}).values())):
+    if not (goal_edits["nodes"] or any(node["kind"] == "goal" and not node.get("userRequirement")
+                                      for node in (prior or {}).get("nodes", {}).values())):
         source = next((row for row in task_inputs if row["goalSource"]), None)
         if source:
             goal_id = "original-objective"
@@ -809,8 +822,14 @@ def _build_prompt(
             "Replace old source-less prerequisite edges with evidenced ones only where the records establish a dependency. Decisions already "
             "seeded from LEGACY_HANDOFF_TEXT retain their IDs. They describe historical "
             "plans and confer no approval or completion. Keep the relevant assistant's recorded plan next to its tool receipt. "
-            "Bind explicit user requirements to their original messages, including later corrections. An implementation choice "
-            "made by the assistant belongs to its action or receipt, even when it satisfies a user requirement. "
+            "Identify every separate result or action explicitly requested in the human messages or in this child's parent delegation. "
+            "Keep each in a separate source-linked userRequirement goal or decision, including later corrections. In older graphs, split a combined "
+            "decision into individually tracked requirements and reuse existing specific delivery tasks when they qualify. "
+            "For each requirement include a concrete task that delivers it, even if an inspection or approval must happen first. "
+            "For a requested change, link the task that performs the change. A broad phase or TODO title, requirement quote, inspection, "
+            "selection, preview, or final check alone does not perform a distinct requested change. If the executable work cannot yet be "
+            "identified, retain the requirement without a fulfillment edge. An implementation choice made by the assistant belongs to "
+            "its action or receipt. "
             "Current user decisions can revise the route. Material availability, a side observation or a tool suggestion alone cannot "
             "change it. Keep "
             "distinct tasks for locating, importing, mounting and checking appearance when they have different success criteria. "
@@ -838,7 +857,8 @@ def _build_prompt(
                "Checking installed objects requires their import first. A nonblocking warning alone adds no prerequisite. "
                if any(row.get("packagePreflight") for row in retained_evidence) else "")
             + ("Use an exact TODO_SOURCE ID in todoId whenever a task corresponds to that TODO item. "
-               "Record the dependencies and blockers in the graph and use the source's status. Do not create new TODOs. "
+               "Carry the requirement links recorded as requirementIds on concrete TODO items. Use the source's status. "
+               "Record dependencies and blockers in the graph. Do not create new TODOs. "
                if has_todo or todo_source else "")
             + (f"Correct your previous response using the same graph and same records. Schema feedback: {handoff_schema_feedback} "
                if handoff_schema_feedback else "")
@@ -1112,7 +1132,7 @@ def compact_context(
     handoff_archive_indices: Sequence[int] | None = None,
     retained_evidence: Sequence[Mapping[str, Any]] = (),
     task_inputs: Sequence[Mapping[str, Any]] = (),
-    todo_items: Sequence[Mapping[str, Any]] = (),
+    todo_items: Sequence[Mapping[str, Any]] | None = None,
     outstanding_operations: Sequence[Mapping[str, Any]] | None = None,
     goal_bindings: Sequence[Mapping[str, Any]] = (),
     goal_acceptances: Sequence[Mapping[str, Any]] = (),
@@ -1186,9 +1206,10 @@ def compact_context(
     safe_task_inputs = [{**redactor.redact_json(dict(row)), "goalSource": row["id"] in goal_sources}
                         for row in task_inputs] if handoff else []
     todo_source = [redactor.redact_json({"id": todo_id, "title": item.get("title") or item.get("text"),
+                                        **({"requirementIds": item["requirementIds"]} if isinstance(item.get("requirementIds"), list) else {}),
                                         "status": "pending" if item.get("status") == "completed"
                                         and not todo_completion_verified(item) else item.get("status")})
-                   for todo_id, item in index_todos(todo_items).items()] if handoff else []
+                   for todo_id, item in index_todos(todo_items or ()).items()] if handoff else []
     safe_evidence = [redactor.redact_json(dict(row)) for row in retained_evidence] if handoff else []
     safe_acceptances = [redactor.redact_json(dict(row)) for row in goal_acceptances] if handoff else []
     if handoff:
@@ -1208,7 +1229,7 @@ def compact_context(
         if handoff_graph:
             handoff_graph = apply_handoff_edits(handoff_graph,
                                                 source_attempt_edits(handoff_graph["nodes"], safe_operations), fold=False)
-            handoff_graph = bind_goal_acceptance(handoff_graph, safe_acceptances)
+            handoff_graph = bind_goal_acceptance(handoff_graph, safe_acceptances, todo_items=todo_items)
             handoff_text = serialize_handoff_graph(handoff_graph)
     prompt_options = dict(
         language=normalized_language,
@@ -1393,7 +1414,7 @@ def compact_context(
                                       if edge[1] not in {"depends_on", "blocked_by"} or len(edge) == 4]}
                                      if handoff_graph else None)
                     candidate_graph = apply_handoff_edits(sourced_prior, payload, fold=False)
-                    candidate_graph = bind_goal_acceptance(candidate_graph, safe_acceptances)
+                    candidate_graph = bind_goal_acceptance(candidate_graph, safe_acceptances, todo_items=todo_items)
                     candidate_graph = map_handoff_graph_text(candidate_graph, output_scanner.redact,
                                                             transform_properties=output_scanner.redact_json)
                     candidate = serialize_handoff_graph(candidate_graph)

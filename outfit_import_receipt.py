@@ -2,9 +2,24 @@
 
 import hashlib
 import ntpath
+from collections.abc import Mapping
 from typing import Any
 
 from outfit_package_inspector import INSPECTION_SCHEMA
+
+
+OUTFIT_IMPORT_TOOL = "vrcforge_import_outfit_package"
+OUTFIT_IMPORT_PLAN_TOOL = "vrcforge_plan_outfit_import"
+
+
+def outfit_import_preflight_key(arguments: Mapping[str, Any]) -> tuple:
+    """Match the exact same package selection and loose-file destination."""
+    return (
+        str(arguments.get("packagePath") or ""), str(arguments.get("selectedUnityPackage") or ""),
+        str(arguments.get("selectedPrefab") or ""), str(arguments.get("baseAvatarName") or ""),
+        str(arguments.get("dependencyMode") or "auto"), str(arguments.get("targetFolder") or ""),
+        str(arguments.get("avatarTexturePaths") or ""),
+    )
 
 
 def package_preview_receipt(result: dict[str, Any]) -> dict[str, Any]:

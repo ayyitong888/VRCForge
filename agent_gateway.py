@@ -87,6 +87,7 @@ from agent_goal_service import (
     GoalApprovalStatePorts,
     GoalEventPorts,
     GoalStorePorts,
+    scoped_goal_requirement_gaps,
 )
 from agent_question_service import (
     AgentQuestionPersistence,
@@ -104,7 +105,7 @@ from optimization_service import (
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
 from path_to_skill_controller import PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA, PATH_TO_SKILL_WRITE_INPUT_SCHEMA
-from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts, model_handoff_payload
+from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts, latest_handoff_graph, model_handoff_payload
 from agent_runtime_input import classify_history, classify_steer, resolve_turn_source
 from agent_runtime_turn_identity import (
     MAX_RUNTIME_CLIENT_TURN_ID_LENGTH, MAX_RUNTIME_SESSION_ID_LENGTH, continuation_client_turn_id, continuation_identity,
@@ -196,6 +197,9 @@ from execution_target import (
     is_execution_target_reference,
     validate_execution_target,
     validate_runtime_execution_target,
+)
+from outfit_import_receipt import (
+    OUTFIT_IMPORT_PLAN_TOOL, OUTFIT_IMPORT_TOOL, outfit_import_preflight_key, package_preview_receipt,
 )
 from mcp_tool_descriptor import (
     canonical_mcp_tool_name,
@@ -888,6 +892,9 @@ class AgentGateway:
         self._runtime_skill_scope: contextvars.ContextVar[AgentTaskLoop | None] = contextvars.ContextVar(
             "vrcforge_runtime_skill_scope", default=None,
         )
+        self._runtime_legacy_progress_graph: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+            "vrcforge_runtime_legacy_progress_graph", default=None,
+        )
         self._runtime_subagent_read_scope: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
             "vrcforge_runtime_subagent_read_scope", default=(),
         )
@@ -943,6 +950,14 @@ class AgentGateway:
                 read_events=lambda path: self._read_jsonl(path, limit=0),
                 shared_state_lock=self._lock,
                 normalize_path=command_safety.normalize_filesystem_path,
+                uncovered_requirements=lambda goal: scoped_goal_requirement_gaps(
+                    goal,
+                    current_graph=lambda session_id, project_root: self._current_requirement_graph(
+                        session_id, project_root,
+                    ) if self._runtime_skill_scope.get() is not None else None,
+                    saved_graph=lambda session_id: self.runtime_sessions.native_handoff_graph(session_id, binding=None),
+                    scoped_todos=self._scoped_runtime_todos,
+                ),
             ),
             GoalApprovalStatePorts(
                 get=lambda approval_id: self._approvals.get(approval_id),
@@ -1152,6 +1167,7 @@ class AgentGateway:
                 roslyn_available=self.roslyn_available,
                 save_config=self.save_config,
                 resolve_execution_target_reference=self.resolve_execution_target_reference,
+                resolve_outfit_import_target=self._resolve_outfit_import_target,
                 resource_context_for_approval=self._approved_resource_context,
                 invalidate_scan_results=self._invalidate_scan_results,
                 complete_scan_mutation=self._scan_results.end_mutation,
@@ -1481,6 +1497,8 @@ class AgentGateway:
             try:
                 result = tool.handler(params_for_handler)
                 if resolved_target is not None:
+                    if tool.name == OUTFIT_IMPORT_PLAN_TOOL:
+                        self._record_bound_outfit_preflight(public_reference, resolved_target, tool_params, result)
                     return self._replace_execution_target_with_reference(
                         result,
                         execution_target_digest(resolved_target),
@@ -1560,12 +1578,15 @@ class AgentGateway:
     @contextmanager
     def _bind_runtime_skill_scope(
         self, loop: AgentTaskLoop, *, subagent_read_roots: tuple[str, ...] = (),
+        legacy_progress_graph: dict[str, Any] | None = None,
     ) -> Iterator[None]:
         token = self._runtime_skill_scope.set(loop)
         scope_token = self._runtime_subagent_read_scope.set(subagent_read_roots)
+        graph_token = self._runtime_legacy_progress_graph.set(legacy_progress_graph)
         try:
             yield
         finally:
+            self._runtime_legacy_progress_graph.reset(graph_token)
             self._runtime_subagent_read_scope.reset(scope_token)
             self._runtime_skill_scope.reset(token)
 
@@ -2273,7 +2294,8 @@ class AgentGateway:
             return None
         if state.session_busy(session_id):
             raise AgentGatewayError("Wait for the active model or tool to finish before compacting this session.", status_code=409)
-        todo = self.list_agent_progress(limit=AGENT_GOAL_MAX_ITEMS, session_id=session_id, project_root=project_root)["items"]
+        todo = self.list_agent_progress(limit=AGENT_GOAL_MAX_ITEMS, session_id=session_id,
+                                        project_root=project_root, exact_scope=True)["items"]
         observe = {"activeTodo": todo, "internalToolSelections": state.internal_tool_selections(session_id)}
         turn = NativeRuntimeTurn(
             state, planner, session_id, snapshot["turnId"], binding, "", [], None, None, None,
@@ -4122,6 +4144,45 @@ class AgentGateway:
             session_context=self.execution_target_session_context(),
         )
 
+    def _record_bound_outfit_preflight(self, reference, target, arguments, result) -> None:
+        if (isinstance(result, dict) and result.get("ok") is True and result.get("preview") is True
+                and package_preview_receipt(result).get("nextTool") == OUTFIT_IMPORT_TOOL):
+            self._execution_target_bindings.record_outfit_import_preflight(
+                reference, target_digest=execution_target_digest(target),
+                session_context=self.execution_target_session_context(),
+                project_root=arguments.get("projectPath") or arguments["projectRoot"],
+                preflight_key=outfit_import_preflight_key(arguments),
+            )
+
+    def _resolve_outfit_import_target(self, arguments: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
+        project_root = str(arguments.get("projectPath") or arguments.get("projectRoot") or "").strip()
+        session = self._mcp_resource_context.get()
+        candidates = self._execution_target_bindings.outfit_import_candidates(
+            project_root=project_root, session_context=session,
+            required_scope=identity_scope(OUTFIT_IMPORT_TOOL, write=True, arguments=arguments),
+            preflight_key=outfit_import_preflight_key(arguments),
+        ) if session and project_root else []
+        if len(candidates) == 1:
+            return candidates[0]
+        required_argument = "executionTarget" if project_root else "projectPath"
+        options = [{"executionTarget": reference, "scope": target["scope"]} for reference, target in candidates]
+        if options:
+            message = "The import has multiple compatible bound targets. Supply executionTarget for the intended binding."
+            next_action = "Select the intended bound reference from options, then submit the same import with that executionTarget for approval."
+        elif project_root:
+            message = "The import requires executionTarget. This session has no compatible live binding for the exact project."
+            next_action = "Call vrcforge_bind_execution_target with this projectPath and scope=project, then submit the same import with the returned executionTarget for approval."
+        else:
+            message = "The import requires the exact projectPath and a bound executionTarget."
+            next_action = "Supply projectPath, then bind the intended project's target before submitting the import for approval."
+        raise AgentGatewayError(
+            message, status_code=409, cause_code="execution_target_ambiguous" if options else "execution_target_missing",
+            failure_layer="execution_target", failure_phase="before_unity_core_call", operation_kind="write",
+            tool=OUTFIT_IMPORT_TOOL, tool_routing_started=False, mutation_started=False, committed=False,
+            commit_state="not_started", retryable=True,
+            details={"requiredArgument": required_argument, "options": options, "nextAction": next_action},
+        )
+
     def refresh_execution_target(
         self,
         reference: Mapping[str, Any],
@@ -4283,6 +4344,8 @@ class AgentGateway:
             if verified_target is not None:
                 verified_digest = execution_target_digest(verified_target)
                 if is_execution_target_reference(public_reference):
+                    if name == OUTFIT_IMPORT_PLAN_TOOL:
+                        self._record_bound_outfit_preflight(public_reference, verified_target, arguments, result.get("result"))
                     result = self._replace_execution_target_with_reference(
                         result,
                         verified_digest,
@@ -4309,11 +4372,13 @@ class AgentGateway:
 
         try:
             public_reference = arguments.get("executionTarget")
-            execution_target = self._validate_external_mcp_execution_target(
-                name,
-                arguments,
-                write_handler=write_handler,
-            )
+            if name == OUTFIT_IMPORT_TOOL and "executionTarget" not in arguments:
+                public_reference, execution_target = self._resolve_outfit_import_target(arguments)
+                arguments["executionTarget"] = public_reference
+            else:
+                execution_target = self._validate_external_mcp_execution_target(
+                    name, arguments, write_handler=write_handler,
+                )
         except AgentGatewayError as exc:
             return self._external_mcp_no_write_error(
                 name,
@@ -6724,11 +6789,38 @@ class AgentGateway:
             if continuation.get("source") == "question_answered" else []
         )
         def assess_task_terminal(plan: Mapping[str, Any]) -> dict[str, Any]:
-            return task_loop.gate_terminal(plan, require_completion_claim=bool(
+            gated = task_loop.gate_terminal(plan, require_completion_claim=bool(
                 prior_question_answers and any(
                     step.get("actionId") and not step.get("historical") for step in steps
                 )
             ))
+            if (plan.get("nextStep") != "done" or plan.get("planner") != "llm"
+                    or ensure_dict(plan.get("completionClaim")).get("satisfied") is not True
+                    or gated.get("nextStep") not in {"done", "completion_unverified"}):
+                return gated
+
+            graph = (self.runtime_sessions.native_handoff_graph(session_id, binding=native_binding)
+                     if native_binding else latest_handoff_graph(history))
+            if graph is None:
+                return gated
+            from agent_handoff_graph import handoff_view, project_requirement_tasks
+
+            todos = self._scoped_runtime_todos(session_id, project_root)
+            uncovered = handoff_view(project_requirement_tasks(graph, todos), todos).get("uncoveredRequirementIds", [])
+            if not uncovered:
+                return gated
+            requirements = [{"requirementId": node_id, "userQuote": graph["nodes"][node_id]["text"]}
+                            for node_id in uncovered]
+            reply = "The task still lacks actionable work for " + ", ".join(
+                f'“{requirement["userQuote"]}”' for requirement in requirements
+            ) + "."
+            gated.pop("taskCompletion", None)
+            return {
+                **gated, "summary": reply, "reply": reply, "continueLoop": False,
+                "nextStep": "completion_unverified", "task": task_loop.snapshot("completion_unverified"),
+                "completionGate": {"status": "failed", "reason": "uncovered_user_requirements",
+                                   "uncoveredRequirementIds": uncovered, "uncoveredRequirements": requirements},
+            }
 
         if native_binding and question_reply_turn and continuation_observation:
             self._runtime_session_state.append_native_user(
@@ -7748,7 +7840,7 @@ class AgentGateway:
                                       and isinstance(text := ensure_dict(event.get("payload")).get("summary"), str)), None,
                                  ),
                                  "activeTodo": self.list_agent_progress(limit=AGENT_GOAL_MAX_ITEMS,
-                                     session_id=session_id, project_root=project_root)["items"]},
+                                     session_id=session_id, project_root=project_root, exact_scope=True)["items"]},
                         history=history,
                         loop_state=loop_state[runtime_compacted_loop_steps:],
                         context_usage=context_usage,
@@ -7852,7 +7944,7 @@ class AgentGateway:
                 )
             if session_id and not queued_native_action:
                 planner_observe["activeTodo"] = self.list_agent_progress(
-                    limit=AGENT_GOAL_MAX_ITEMS, session_id=session_id, project_root=project_root,
+                    limit=AGENT_GOAL_MAX_ITEMS, session_id=session_id, project_root=project_root, exact_scope=True,
                 )["items"]
             if pending_legacy_steer_ids:
                 consumed_steer_input_ids.extend(pending_legacy_steer_ids)
@@ -8073,10 +8165,11 @@ class AgentGateway:
             )
             completion_gate = ensure_dict(assess_task_terminal(plan).get("completionGate")) if final_candidate else {}
             poll_target = completion_gate.get("pollTarget") if completion_gate.get("reason") == "tool_poll_required" else None
+            uncovered_requirements = completion_gate.get("uncoveredRequirementIds")
             needs_completion_claim_correction = bool(
                 final_candidate
                 and not completion_claim_correction_attempted
-                and (poll_target or (
+                and (poll_target or uncovered_requirements or (
                     not (ensure_dict(plan.get("completionClaim")).get("satisfied") is False and planner_reply)
                     and task_loop.completed_action_ids() and completion_gate.get("reason") in {
                     "completion_claim_unbound",
@@ -8094,7 +8187,9 @@ class AgentGateway:
                     "assistant", label="Assistant", summary=public_message["text"],
                     status=("progress" if message_phase == "commentary" else
                             "failed" if message_phase == "final_answer" and honest_failed_final else
-                            "completion_unverified" if message_phase == "final_answer" and (needs_completion_claim_correction or poll_target) else "done"),
+                            "completion_unverified" if message_phase == "final_answer" and (
+                                needs_completion_claim_correction or poll_target or uncovered_requirements
+                            ) else "done"),
                     phase=message_phase, message_id=public_message["id"],
                 )
             if not public_messages and planner_reply and any(
@@ -8201,6 +8296,15 @@ class AgentGateway:
                         "Poll the existing operation with its status tool. Do not restart it. Target: "
                         + json.dumps(poll_target, ensure_ascii=False)
                     )
+                elif uncovered_requirements:
+                    correction_summary = (
+                        "The whole task cannot be marked complete. Add an actionable TODO with requirementIds "
+                        "for each uncovered user requirement, carry out the authorized work and verify its result, "
+                        "or report the concrete blocker. " + json.dumps({
+                            "uncoveredRequirementIds": uncovered_requirements,
+                            "uncoveredRequirements": completion_gate["uncoveredRequirements"],
+                        }, ensure_ascii=False)
+                    )
                 loop_state.append(
                     {
                         "tool": "runtime_completion_gate",
@@ -8212,6 +8316,9 @@ class AgentGateway:
                             "nextAction": {"kind": "poll", "target": poll_target} if poll_target else {
                                 "kind": "reply_completion_claim",
                                 "requiredEvidenceActionIds": completed_action_ids,
+                                **({"uncoveredRequirementIds": uncovered_requirements,
+                                    "uncoveredRequirements": completion_gate["uncoveredRequirements"]}
+                                   if uncovered_requirements else {}),
                             },
                             "verification": {
                                 "state": "not_required",
@@ -8828,6 +8935,8 @@ class AgentGateway:
                     step_params["projectRoot"] = project_root
                     step_params["turnId"] = turn_id
                 if step_tool.startswith("vrcforge_progress_"):
+                    step_params.pop("project_root", None)
+                    step_params.pop("projectPath", None)
                     step_params["sessionId"] = session_id
                     step_params["projectRoot"] = project_root
                 if step_tool == "vrcforge_agent_desktop_action":
@@ -8866,9 +8975,13 @@ class AgentGateway:
                     from sub_agent_delegate import child_outfit_read_scope
 
                     read_scope = child_outfit_read_scope(project_root, tuple(general_allowed_roots))
+                legacy_progress_graph = None
+                if not native_binding and (step_tool.startswith("vrcforge_progress_") or step_tool == "vrcforge_update_goal"):
+                    legacy_progress_graph = latest_handoff_graph(history)
                 try:
                     with self._bind_runtime_skill_scope(
                         task_loop, subagent_read_roots=scoped_general_roots if step_tool in SUB_AGENT_TASK_TOOLS else (),
+                        legacy_progress_graph=legacy_progress_graph,
                     ), (bind_memory_tool_context(project_root, memory_request_text, tuple(memory_user_texts)) if step_tool in MEMORY_TOOL_NAMES else nullcontext()), (
                         bind_tool_result_context(session_id, turn_id, project_root, [*model_context_steps, *steps],
                                                  snapshot_lookup=self._scan_results.lookup if project_root else None,
@@ -9824,8 +9937,10 @@ class AgentGateway:
         final_reply = str(top_plan.get("reply") or "").strip()
         final_reply_status = (
             "failed"
-            if ensure_dict(top_plan.get("completionClaim")).get("satisfied") is False
-            and ensure_dict(top_plan.get("completionGate")).get("status") == "failed"
+            if ensure_dict(top_plan.get("completionGate")).get("status") == "failed" and (
+                ensure_dict(top_plan.get("completionClaim")).get("satisfied") is False
+                or ensure_dict(top_plan.get("completionGate")).get("reason") == "uncovered_user_requirements"
+            )
             else str(top_plan.get("nextStep") or "done")
         )
         public_final_already_emitted = any(
@@ -10695,6 +10810,7 @@ class AgentGateway:
             item["progressId"]: item for item in self._scoped_runtime_todos(session_id, project_root)
         }
         normalized_items: list[dict[str, Any]] = []
+        requested_requirements: dict[str, set[str]] = {}
         for index, item in enumerate(raw_items):
             if not isinstance(item, dict):
                 continue
@@ -10714,9 +10830,12 @@ class AgentGateway:
             }
             previous = existing.get(entry["progressId"], {})
             self._bind_todo_completion(entry, item, previous)
+            if links := self._bind_todo_requirements(entry, item, previous):
+                requested_requirements[entry["progressId"]] = links
             normalized_items.append(entry)
         if raw_items and not normalized_items:
             raise AgentGatewayError("Nonempty progress replacement must contain at least one titled item; use [] to clear explicitly.", status_code=400)
+        self._validate_todo_requirements(requested_requirements, session_id, project_root)
         event = {
             "event": "progress_replaced",
             "projectRoot": project_root,
@@ -10725,12 +10844,13 @@ class AgentGateway:
         }
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
         projected = list(self._project_agent_progress(include_replacement_tombstones=True).values())
-        active = [row for row in projected if row.get("status") != "deleted"]
+        scoped = self._scoped_runtime_todos(session_id, project_root, projected=projected)
+        active = [row for row in scoped if row.get("status") != "deleted"]
         snapshot = self._agent_progress_page(active, limit=50, project_root=project_root, session_id=session_id)
         expected = {row["progressId"]: redact_sensitive(row) for row in normalized_items}
         observed = {
             row["progressId"]: redact_sensitive(row)
-            for row in self._scoped_runtime_todos(session_id, project_root, projected=projected)
+            for row in scoped
         }
         if (len(expected) == len(normalized_items)
                 and observed.keys() == expected.keys()
@@ -10740,6 +10860,10 @@ class AgentGateway:
         return snapshot
 
     def create_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            return self._create_agent_progress_locked(params)
+
+    def _create_agent_progress_locked(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         title = summarize_text(str(params.get("title") or params.get("step") or params.get("content") or "").strip(), 240)
         if not title:
@@ -10757,9 +10881,13 @@ class AgentGateway:
             "order": int(params.get("order")) if isinstance(params.get("order"), int) else 0,
         }
         self._bind_todo_completion(event, params, {})
+        requested_requirements = self._bind_todo_requirements(event, params, {})
+        if requested_requirements:
+            self._validate_todo_requirements({progress_id: requested_requirements}, event["sessionId"], event["projectRoot"])
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
         progress = self._find_agent_progress(progress_id, event)
-        return {"ok": True, "progress": progress, "readbackVerified": True}
+        return {"ok": True, "progress": progress,
+                "readbackVerified": all(progress.get(key) == value for key, value in event.items())}
 
     @staticmethod
     def _require_agent_item_scope(existing: dict[str, Any], params: dict[str, Any], *, label: str) -> None:
@@ -10800,10 +10928,68 @@ class AgentGateway:
             "order": int(params.get("order")) if isinstance(params.get("order"), int) else int(existing.get("order") or 0),
         }
         self._bind_todo_completion(event, params, existing)
+        requested_requirements = self._bind_todo_requirements(event, params, existing)
+        if requested_requirements:
+            self._validate_todo_requirements({progress_id: requested_requirements}, event["sessionId"], event["projectRoot"])
         self._append_jsonl(self.agent_progress_log_path, "vrcforge.agent_progress.v1", event)
         progress = self._find_agent_progress(progress_id, event)
         return {"ok": True, "progress": progress,
                 "readbackVerified": all(progress.get(key) == value for key, value in event.items())}
+
+    @staticmethod
+    def _bind_todo_requirements(entry: dict[str, Any], values: dict[str, Any], previous: dict[str, Any]) -> set[str]:
+        if "requirementIds" not in values:
+            if previous and entry["title"] != previous.get("title"):
+                # An explicit empty list also drops links from the older graph.
+                entry["requirementIds"] = []
+            elif isinstance(previous.get("requirementIds"), list):
+                entry["requirementIds"] = list(previous["requirementIds"])
+            return set()
+        links = values["requirementIds"]
+        if (not isinstance(links, list) or any(not isinstance(node_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", node_id) for node_id in links)
+                or len(links) != len(set(links))):
+            raise AgentGatewayError("requirementIds must be an array of unique handoff graph node IDs.", status_code=400)
+        entry["requirementIds"] = list(links)
+        return set(links)
+
+    def _current_requirement_graph(self, session_id: str, project_root: str) -> dict[str, Any] | None:
+        if not session_id:
+            return None
+
+        def native_graph() -> dict[str, Any] | None:
+            binding = self.runtime_planner.native_conversation_binding(project_root)
+            return self.runtime_sessions.native_handoff_graph(session_id, binding=binding) if binding else None
+
+        scope = self._runtime_skill_scope.get()
+        if scope is not None:
+            if bool(project_root) != bool(scope.project_root):
+                raise AgentGatewayError("Requirement graph does not belong to this project.", status_code=404)
+            self._require_agent_item_scope(
+                {"sessionId": scope.session_id, "projectRoot": scope.project_root},
+                {"sessionId": session_id, "projectRoot": project_root},
+                label="Requirement graph",
+            )
+            return native_graph() or self._runtime_legacy_progress_graph.get()
+        with self.runtime_planner.bind_turn({"sessionId": session_id, "projectRoot": project_root}):
+            return native_graph()
+
+    def _validate_todo_requirements(self, requested: dict[str, set[str]], session_id: str, project_root: str) -> None:
+        if not requested:
+            return
+        if not session_id:
+            raise AgentGatewayError("requirementIds requires a conversation sessionId.", status_code=400)
+        graph = self._current_requirement_graph(session_id, project_root) or {}
+        nodes = graph.get("nodes", {})
+        allowed = {node_id for node_id, node in nodes.items()
+                   if node.get("userRequirement") is True and node.get("kind") in {"goal", "decision"}}
+        if set().union(*requested.values()) - allowed:
+            raise AgentGatewayError("requirementIds must name explicit user requirements in this session and project's current handoff graph.",
+                                    status_code=400)
+        parents = {edge[2] for edge in graph.get("edges", ()) if edge[1] == "belongs_to"}
+        if any(node.get("todoId") in requested and (node_id in parents or node.get("group"))
+               for node_id, node in nodes.items()):
+            raise AgentGatewayError("Link requirements to a concrete TODO item, not a group of tasks.", status_code=400)
 
     @staticmethod
     def _bind_todo_completion(entry: dict[str, Any], values: dict[str, Any], previous: dict[str, Any]) -> None:
@@ -10877,7 +11063,8 @@ class AgentGateway:
                 publish = True
         if publish:
             try:
-                self._runtime_progress_changed(self.list_agent_progress(session_id=session_id, project_root=project_root))
+                self._runtime_progress_changed(self.list_agent_progress(session_id=session_id, project_root=project_root,
+                                                                        exact_scope=True))
             except Exception:
                 # The existing progress endpoint can recover the durable update.
                 pass
@@ -10914,12 +11101,13 @@ class AgentGateway:
         requested_project = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
         if requested_session:
             matches = [item for item in matches if str(item.get("sessionId") or "") == requested_session]
-        if requested_project:
-            normalized_project = command_safety.normalize_filesystem_path(requested_project)
+        explicit_project = self._runtime_skill_scope.get() is not None and "projectRoot" in params
+        if requested_project or explicit_project:
+            normalized_project = command_safety.normalize_filesystem_path(requested_project) if requested_project else ""
             matches = [
                 item
                 for item in matches
-                if command_safety.normalize_filesystem_path(str(item.get("projectRoot") or ""))
+                if (command_safety.normalize_filesystem_path(str(item["projectRoot"])) if item.get("projectRoot") else "")
                 == normalized_project
             ]
         if not matches:
@@ -10932,8 +11120,12 @@ class AgentGateway:
         params = params or {}
         return self.update_agent_progress(progress_id, {**params, "status": "deleted"})
 
-    def list_agent_progress(self, *, limit: int = 50, project_root: str = "", session_id: str = "") -> dict[str, Any]:
-        progress = list(self._project_agent_progress().values())
+    def list_agent_progress(self, *, limit: int = 50, project_root: str = "", session_id: str = "",
+                            exact_scope: bool = False) -> dict[str, Any]:
+        if exact_scope or self._runtime_skill_scope.get() is not None:
+            progress = self._scoped_runtime_todos(session_id, project_root)
+        else:
+            progress = list(self._project_agent_progress().values())
         return self._agent_progress_page(progress, limit=limit, project_root=project_root, session_id=session_id)
 
     @staticmethod

@@ -1050,6 +1050,7 @@ export type AgentProgress = {
   projectRoot?: string;
   sessionId?: string;
   owner?: string;
+  requirementIds?: string[];
   order?: number;
   createdAt?: string;
   updatedAt?: string;

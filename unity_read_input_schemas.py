@@ -1182,6 +1182,11 @@ _PROGRESS_ITEM_PROPERTIES = {
     "status": {"type": "string", "enum": ["pending", "in_progress", "running", "completed", "cancelled", "blocked", "deleted"]},
     "order": {"type": "integer", "description": "Display order of the item."},
     "owner": {"type": "string", "description": "Display owner label; does not grant authority."},
+    "requirementIds": {
+        "type": "array", "uniqueItems": True,
+        "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"},
+        "description": "Exact userRequirement node IDs from this conversation's current handoff graph that this concrete TODO implements. Omit to keep this item's existing links; use [] to clear them.",
+    },
     "completionChecks": {
         "type": "array", "minItems": 1, "maxItems": 16,
         "description": "All required acceptance receipts. The runtime completes the item once every check matches.",

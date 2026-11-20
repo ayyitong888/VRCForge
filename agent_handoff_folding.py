@@ -13,6 +13,10 @@ def fold_completed_subtrees(graph: dict, *, archive_message_id: str | None = Non
     parents = defaultdict(set)
     order_sources = {member for node in nodes.values() for order in [node.get("order")] if order
                      for phase in ("before", "after") for member in order[phase]}
+    delivery_tasks = {target for source, relation, target, *_ in edges
+                      if relation == "constrains" and nodes[source].get("userRequirement")}
+    delivery_tasks.update(source for source, relation, target, *_ in edges
+                          if relation == "belongs_to" and nodes[target].get("userRequirement"))
     for source, relation, target, *_ in edges:
         if relation == "belongs_to":
             children[target].add(source)
@@ -37,7 +41,7 @@ def fold_completed_subtrees(graph: dict, *, archive_message_id: str | None = Non
             if relation == "attempt_of" and target in branch:
                 details.add(source)
             elif (relation == "constrains" and target in branch and nodes[source].get("scope") != "graph"
-                  and not nodes[source].get("userReplyId")):
+                  and not nodes[source].get("userReplyId") and not nodes[source].get("userRequirement")):
                 details.add(source)
             elif relation == "blocked_by" and source in branch and nodes[target]["status"] == "closed":
                 details.add(target)
@@ -58,7 +62,8 @@ def fold_completed_subtrees(graph: dict, *, archive_message_id: str | None = Non
                 pending.append(neighbor)
 
         removed = (branch - {root}) | (details - shared)
-        if not removed or removed & order_sources or any(HOST_NODE_OWNERSHIP.intersection(nodes[node]) for node in removed):
+        if (not removed or removed & (order_sources | delivery_tasks)
+                or any(HOST_NODE_OWNERSHIP.intersection(nodes[node]) for node in removed)):
             continue
         pointers = []
         seen = set()

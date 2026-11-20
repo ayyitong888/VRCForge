@@ -130,15 +130,26 @@ def _tool_task_id(row):
     return _node_id("tool-task", row["scopeId"])
 
 
-def bind_goal_acceptance(graph, records):
+def bind_goal_acceptance(graph, records, *, todo_items=None):
     """Apply receipts already validated and scoped by the goal owner."""
+    from agent_handoff_graph import handoff_view, project_requirement_tasks
+
     acceptance = {row["goalId"]: dict(row) for row in records if isinstance(row.get("goalId"), str)
                   and isinstance(row.get("messageId"), str) and isinstance(row.get("receiptId"), str)}
-    for node_id, node in graph["nodes"].items():
+    nodes = graph["nodes"]
+    if any(node.get("userRequirement") for node in nodes.values()) and handoff_view(
+        project_requirement_tasks(graph, todo_items), todo_items,
+    ).get("uncoveredRequirementIds"):
+        for node_id, node in nodes.items():
+            if "goalAcceptance" in node:
+                nodes[node_id] = {key: value for key, value in node.items() if key != "goalAcceptance"}
+        return graph
+    for node_id, node in nodes.items():
         record = acceptance.get(node_id)
-        if node["kind"] != "goal" or not record or {"type": "message", "id": record["messageId"]} not in node.get("evidence", ()):
+        if (node["kind"] != "goal" or node.get("userRequirement") or not record
+                or {"type": "message", "id": record["messageId"]} not in node.get("evidence", ())):
             continue
-        graph["nodes"][node_id] = {**node, "goalAcceptance": record}
+        nodes[node_id] = {**node, "goalAcceptance": record}
     return graph
 
 

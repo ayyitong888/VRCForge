@@ -763,6 +763,7 @@ class AgentProgressItemRequest(BaseModel):
     status: str = "pending"
     order: int | None = None
     owner: str = "agent"
+    requirement_ids: list[str] = Field(default_factory=list, alias="requirementIds")
     session_id: str | None = Field(default=None, alias="sessionId")
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")

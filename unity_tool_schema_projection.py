@@ -8,6 +8,7 @@ import runtime_planner_service as planner_policy
 from mcp_tool_descriptor import (
     read_runtime_identity_required, write_runtime_identity_required, with_execution_target_scope_guidance,
 )
+from outfit_import_receipt import OUTFIT_IMPORT_PLAN_TOOL, OUTFIT_IMPORT_TOOL
 from unity_read_input_schemas import UNITY_READ_TOOL_INPUT_SCHEMAS
 from unity_write_input_schemas import EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS
 
@@ -130,7 +131,7 @@ def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
             _with_execution_target_schema(registered, required=True, name=name)
             if name in {"vrcforge_get_property"} or name.startswith("vrcforge_preview_")
             else _with_execution_target_schema(registered, required=False, name=name)
-            if _read_uses_runtime_identity(name)
+            if _read_uses_runtime_identity(name) or name == OUTFIT_IMPORT_PLAN_TOOL
             else with_execution_target_scope_guidance(registered, name=name, write=False)
         )
     if name.startswith("vrcforge_preview_"):
@@ -201,5 +202,6 @@ def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
     # decoration. Internal and external Agents must reason over the exact same
     # namespace lock contract even though their visible Tool projections differ.
     return _with_execution_target_schema(
-        schema, required=write_runtime_identity_required(name), name=name, write=True,
+        schema, required=write_runtime_identity_required(name) and name != OUTFIT_IMPORT_TOOL,
+        name=name, write=True,
     )

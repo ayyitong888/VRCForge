@@ -70,8 +70,9 @@ def test_replace_verifies_full_scoped_snapshot_beyond_the_response_page(tmp_path
     assert {item["progressId"] for item in saved} == {item["id"] for item in items}
     for other_scope in other_scopes:
         assert reopened._scoped_runtime_todos(other_scope["sessionId"], other_scope["projectRoot"])[0]["title"] == "Do not touch"
+    assert all(item["projectRoot"] == scope["projectRoot"] for item in result["items"])
     assert result["items"] == reopened.list_agent_progress(
-        limit=50, session_id=scope["sessionId"], project_root=scope["projectRoot"],
+        limit=50, session_id=scope["sessionId"], project_root=scope["projectRoot"], exact_scope=True,
     )["items"]
     assert [item["order"] for item in result["items"]] == sorted(item["order"] for item in result["items"])
     assert result.get("readbackVerified") is True

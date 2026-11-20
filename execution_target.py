@@ -577,6 +577,43 @@ class ExecutionTargetBindingRegistry:
             session_context=session_context,
         )
 
+    def record_outfit_import_preflight(
+        self, reference: Mapping[str, Any], *, target_digest: str,
+        session_context: str, project_root: str, preflight_key: tuple,
+    ) -> None:
+        """Keep the matching plan on the same process-owned target binding."""
+        with self._lock:
+            try:
+                prior = self._owned_binding(reference, session_context=session_context, project_root=project_root)
+            except ExecutionTargetError:
+                return  # The read completed after its binding was released.
+            if prior.get("digest") == target_digest:
+                self._bindings[reference["ref"]].setdefault("outfit_import_preflights", set()).add(preflight_key)
+
+    def outfit_import_candidates(
+        self, *, project_root: str, session_context: str, required_scope: str, preflight_key: tuple,
+    ) -> list[tuple[dict[str, str], dict[str, Any]]]:
+        root = os.path.normcase(normalize_project_root(project_root))
+        owner = self._normalized_session(session_context)
+        with self._lock:
+            owned = [
+                (self._reference(handle), preflight_key in record.get("outfit_import_preflights", ()))
+                for handle, record in self._bindings.items()
+                if record.get("sessionContext") == owner and os.path.normcase(record["projectRoot"]) == root
+            ]
+        # An exact preflight retains its target preference if that binding is
+        # no longer live. A different live binding does not revive its intent.
+        preferred = [reference for reference, matches in owned if matches]
+        candidates = []
+        for reference in preferred or [reference for reference, _ in owned]:
+            try:
+                target = self.resolve(reference, project_root=project_root,
+                                      session_context=owner, required_scope=required_scope)
+            except ExecutionTargetError:
+                continue
+            candidates.append((reference, target))
+        return candidates
+
     def refresh(
         self,
         reference: Mapping[str, Any],

@@ -9,7 +9,7 @@ import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from agent_progress_evidence import goal_acceptance_checks, goal_acceptance_receipt
 
@@ -211,6 +211,7 @@ class AgentGoalStore:
         normalize_path: Callable[[str], str],
         runner_instance_id: str | None = None,
         run_dir: Callable[[], Path] | None = None,
+        uncovered_requirements: Callable[[dict[str, Any]], Sequence[str]] | None = None,
     ) -> None:
         self._log_path = log_path
         self._result_dir = result_dir
@@ -218,6 +219,7 @@ class AgentGoalStore:
         self._read_events_callback = read_events
         self._lock = lock
         self._normalize_path = normalize_path
+        self._uncovered_requirements = uncovered_requirements
         self._runner_instance_id = str(runner_instance_id or _PROCESS_INSTANCE_ID)
         self._run_dir = run_dir or (lambda: self._result_dir().parent / "agent-goal-runs")
 
@@ -770,6 +772,9 @@ class AgentGoalStore:
             requested_revision = params.get("expectedRevision", params.get("expected_revision"))
             if requested_revision is not None and int(requested_revision) != int(current.get("revision") or 0):
                 raise AgentGoalStoreError("Goal revision changed; refresh before updating.", 409)
+            if status == "completed" and current_status != status and self._uncovered_requirements:
+                if gaps := self._uncovered_requirements(current):
+                    raise AgentGoalStoreError(f"The Goal has uncovered requirements ({', '.join(gaps)}).", 409)
             now = _utc_now()
             wake_fields = self.parse_wake_fields(params, now=now)
             scheduled = bool(str(wake_fields.get("wakeAt", current.get("wakeAt")) or "").strip() or int(wake_fields.get("wakeEveryMinutes", current.get("wakeEveryMinutes")) or 0))

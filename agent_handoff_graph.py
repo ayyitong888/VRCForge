@@ -50,6 +50,9 @@ HANDOFF_EDIT_CONTRACT = (
     'attempt attempt_of task; task blocked_by issue; decision constrains task. '
     'A direct depends_on or blocked_by edge has a fourth object {reason:"concrete prerequisite",evidence:[exact source pointers]}. '
     'Use constrains for decisions on how to act that do not affect the runnable frontier. '
+    'Use a separate goal or decision with userRequirement=true and a verbatim message excerpt for each explicit requested outcome. '
+    'Link its concrete delivery task with [taskId,"belongs_to",requirementGoalId] or [requirementDecisionId,"constrains",taskId]. '
+    'On a marked requirement decision, only constrain the leaf task that directly implements the requirement. '
     'Use [failed-attempt,"replaced_by",new-attempt,"why the approach changed"] for a replacement. '
     'Example: {"nodes":{"verify":{"kind":"goal","text":"Verify the export","evidence":[{"type":"message","id":"message-example"}]},'
     '"check-file":{"kind":"task","text":"Verify the exported file","status":"pending",'
@@ -120,6 +123,9 @@ def _valid_node(node: dict[str, Any]) -> bool:
     evidence = node.get("evidence", [])
     if not _valid_evidence(evidence):
         return False
+    if "userRequirement" in node and (node["userRequirement"] is not True or kind not in {"goal", "decision"}
+                                       or not any(pointer["type"] == "message" for pointer in evidence)):
+        return False
     if "order" in node:
         order = node["order"]
         if (kind != "decision" or not isinstance(order, dict) or not _is_text(order.get("reason"))
@@ -184,7 +190,12 @@ def _keep_edges(nodes: dict[str, Any], candidates: list[Any]) -> list[list[str]]
         if key is None or not valid(key):
             continue
         source, relation, target = key
-        if relation not in {"replaced_by", "depends_on", "blocked_by"} and len(edge) != 3:
+        if relation == "constrains" and len(edge) == 4:
+            if (not isinstance(edge[3], dict) or set(edge[3]) != {"fulfillsRequirement"}
+                    or edge[3]["fulfillsRequirement"] is not True or not nodes[source].get("userRequirement")
+                    or nodes[target].get("group")):
+                continue
+        elif relation not in {"replaced_by", "depends_on", "blocked_by"} and len(edge) != 3:
             continue
         if relation in {"depends_on", "blocked_by"} and len(edge) == 4:
             source_link = edge[3]
@@ -204,6 +215,8 @@ def _keep_edges(nodes: dict[str, Any], candidates: list[Any]) -> list[list[str]]
                 continue
             adjacency[source].add(target)
         previous = edges.get(key)
+        if relation == "constrains" and previous and len(previous) == 4 and len(edge) == 3:
+            continue
         if not previous or len(previous) != 4 or not isinstance(previous[3], dict) or "decisionId" not in previous[3]:
             edges[key] = list(edge)
     return [edge for edge in edges.values() if edge[1] != "replaced_by"
@@ -360,12 +373,48 @@ def parse_handoff_graph(value: str) -> dict[str, Any] | None:
     return None
 
 
-def handoff_view(graph: dict[str, Any], todo_items=()) -> dict[str, Any]:
-    """Derive the current task frontier and unresolved issues from typed edges."""
+def project_requirement_tasks(graph: dict[str, Any], todo_items=None) -> dict[str, Any]:
+    """Project requirement links explicitly recorded on the current owner's TODO rows."""
+    from agent_handoff_sources import _node_id, index_todos
+
+    nodes = graph["nodes"]
+    requirements = {node_id: node["kind"] for node_id, node in nodes.items() if node.get("userRequirement")}
+    if not requirements:
+        return graph
+    parents = {edge[2] for edge in graph["edges"] if edge[1] == "belongs_to"}
+    by_todo = {node["todoId"]: node_id for node_id, node in nodes.items() if node.get("todoId")}
+    node_edits, edge_edits, remove_edges = {}, [], []
+    for todo_id, todo in index_todos(todo_items or ()).items():
+        requested = todo.get("requirementIds")
+        if not isinstance(requested, list):
+            continue
+        linked = [req for req in requested if isinstance(req, str) and req in requirements]
+        task = by_todo.get(todo_id)
+        if task and (task in parents or nodes[task].get("group")):
+            continue
+        if not task:
+            title = todo.get("title") or todo.get("text")
+            if not linked or not _is_text(title):
+                continue
+            task = _node_id("todo-requirement", todo_id)
+            while task in nodes:
+                task += "_"
+            node_edits[task] = {"kind": "task", "text": title, "todoId": todo_id,
+                                "evidence": [{"type": "todo", "id": todo_id}]}
+        for req, kind in requirements.items():
+            edge = [task, "belongs_to", req] if kind == "goal" else [req, "constrains", task]
+            (edge_edits if req in linked else remove_edges).append(edge)
+    if not edge_edits and not remove_edges:
+        return graph
+    return apply_handoff_edits(graph, {"nodes": node_edits, "edges": edge_edits, "removeEdges": remove_edges}, fold=False)
+
+
+def handoff_view(graph: dict[str, Any], todo_items=None) -> dict[str, Any]:
+    """Derive runnable work, open issues and unmapped requirements from typed edges."""
     nodes = graph["nodes"]
     from agent_handoff_sources import index_todos, todo_completion_verified
 
-    todos = index_todos(todo_items)
+    todos = index_todos(todo_items or ())
     todo_status = {
         "pending": "pending", "in_progress": "in_progress", "running": "in_progress", "blocked": "blocked",
         "completed": "done", "cancelled": "abandoned", "deleted": "abandoned",
@@ -407,7 +456,7 @@ def handoff_view(graph: dict[str, Any], todo_items=()) -> dict[str, Any]:
             pending_groups.append(member)
     ready = []
     recoveries = []
-    goals = {node_id for node_id, node in nodes.items() if node["kind"] == "goal"}
+    goals = {node_id for node_id, node in nodes.items() if node["kind"] == "goal" and not node.get("userRequirement")}
     completed_goals = {
         node_id for node_id in goals if isinstance(proof := nodes[node_id].get("goalAcceptance"), dict)
         and proof.get("goalId") == node_id and _is_text(proof.get("receiptId"))
@@ -431,7 +480,19 @@ def handoff_view(graph: dict[str, Any], todo_items=()) -> dict[str, Any]:
         coverage = task.get("sourceRead") or {}
         if task_id not in waiting and task.get("state") == "partial" and coverage.get("nextRequest"):
             resume_reads[task_id] = coverage["nextRequest"]
-    incomplete = not goals or pending or bool(goals - completed_goals)
+    requirements = [node_id for node_id, node in nodes.items() if node.get("userRequirement")]
+    uncovered = set(requirements)
+    for source, relation, target, *_ in graph["edges"]:
+        if relation == "belongs_to" and target in uncovered:
+            requirement, task = target, source
+        elif relation == "constrains" and source in uncovered:
+            requirement, task = source, target
+        else:
+            continue
+        if (not nodes[task].get("group") and not members[task] and statuses[task] != "abandoned"
+                and (todo_items is None or statuses[task] != "unavailable")):
+            uncovered.discard(requirement)
+    incomplete = not goals or pending or bool(goals - completed_goals) or bool(uncovered)
     return {
         "readyTaskIds": ready,
         **({"recoverTaskIds": recoveries} if recoveries else {}),
@@ -440,6 +501,8 @@ def handoff_view(graph: dict[str, Any], todo_items=()) -> dict[str, Any]:
                          if node["kind"] == "issue" and node["status"] == "open"],
         "incomplete": incomplete,
         "anomaly": incomplete and not ready,
+        **({"uncoveredRequirementIds": [node_id for node_id in requirements if node_id in uncovered]}
+           if requirements else {"requirementCoverageKnown": False}),
     }
 
 
