@@ -112,8 +112,12 @@ RUNTIME_AUTHORITY_INSTRUCTION = (
 )
 RUNTIME_CONTEXT_INSTRUCTION = (
     "压缩后先读 TODO。 Read the injected activeTodo directly, then the handoff graph's readyTaskIds. "
-    "An injected TODO is the current snapshot; use progress_list only when no current snapshot was supplied and a list is needed. For each recoverTaskId, "
-    "use vrcforge_read_tool_result with the exact executionId from its operationRef.id first. Check its receipt, "
+    "An injected TODO is the current snapshot; use progress_list only when no current snapshot was supplied and a list is needed. "
+    "On resumption, live pendingApprovals take precedence over the historical graph. When the user just asks to continue, "
+    "reply with the outstanding approval and wait. Only a separate user objective starts independent work. "
+    "When continuing the current work, use resumeReadCalls first for any still-applicable partial reads. "
+    "Execute the listed loadCall when present, then use call_tool with the stated tool and exact arguments. "
+    "For the remaining recoverTaskIds, use vrcforge_read_tool_result with the exact executionId from operationRef.id. Check its receipt, "
     "then perform the indicated readback before any further write. Resume an existing pending operation by its ID. "
     "Follow task dependencies, graph-wide decisions and "
     "evidence to recover the exact target and prior outcomes. Use openIssueIds to find impediments. If anomaly is true, "
@@ -121,6 +125,8 @@ RUNTIME_CONTEXT_INSTRUCTION = (
     "current user decisions, the active TODO and newer receipts for the exact same operation. Keep the established order when "
     "a newer receipt only suggests another action, previews a change, or confirms different work. Treat locating, importing, "
     "mounting and checking appearance as distinct observations when the task requires them. "
+    "For an import linked to a completed preflight, use its exact packageInputsByPreflightNode values when projected. "
+    "If that preflight lacks projected inputs, read its receipt for the package path before proposing the import. A package name is not a path. "
     "Use toolTask and toolAttempt for exact recorded outcomes. A verified tool task covers its own selectors. "
     "Continue a partial sourceRead from its nextRequest when supplied. Use the original recovery coordinates for interrupted work. "
     "For explicit remember or forget requests, use remember_memory or delete_memory in execution; list_memory is read-only. "
@@ -811,6 +817,57 @@ def resolve_catalog_tool(tools: tuple[PlannerTool, ...] | list[PlannerTool], nam
     # One implementation may have distinct capability projections (e.g. Shell).
     # An ambiguous runtime name must never pick one of those capabilities.
     return next(iter(aliases.values())) if len(aliases) == 1 else None
+
+
+def project_native_resume_reads(messages, read_catalog: Callable[[], PlannerCatalogSnapshot], selected: list[PlannerTool]) -> None:
+    """Bind the latest graph's source cursors to the current read-only tool exposure."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        content = message.get("content")
+        if message.get("role") == "assistant" and isinstance(content, str) and content.startswith(MODEL_HANDOFF_PREFIX):
+            try:
+                graph = json.loads(content[len(MODEL_HANDOFF_PREFIX):])
+            except ValueError:
+                return
+            break
+    else:
+        return
+    resume_reads = ensure_dict(ensure_dict(graph).get("resumeReads"))
+    if not resume_reads:
+        return
+    from agent_handoff_operations import native_archive_read_successors
+
+    successors = native_archive_read_successors(messages[index + 1:])
+    catalog = read_catalog()
+    calls = {}
+    selected_names = {tool.name for tool in selected}
+    for task_id, source in resume_reads.items():
+        request = ensure_dict(source)
+        seen = set()
+        while (
+            isinstance(name := request.get("tool"), str)
+            and isinstance(cursor := ensure_dict(request.get("arguments")).get("archiveCursor"), str)
+            and (key := (name, cursor)) in successors
+        ):
+            if key in seen:
+                request = {}
+                break
+            seen.add(key)
+            request = ensure_dict(successors[key])
+        name = request.get("tool")
+        if not isinstance(name, str):
+            continue
+        tool = resolve_catalog_tool((*catalog.visible_tools, *catalog.routable_tools), name)
+        if tool is None or tool.write or tool.requires_user_activation:
+            continue
+        call = {"tool": tool.name, "arguments": ensure_dict(request.get("arguments"))}
+        if tool.name not in selected_names:
+            call["loadCall"] = {"skill_tool": "load_internal_tool_block",
+                                "skill_params": {"block": tool.block, "tools": [tool.name]}}
+        calls[task_id] = call
+    if calls:
+        message["content"] = MODEL_HANDOFF_PREFIX + json.dumps(
+            {**graph, "resumeReadCalls": calls}, ensure_ascii=False, separators=(",", ":"))
 
 
 def shell_poll_correction(arguments, visible_tools, catalog_tools, *, native):
@@ -3175,11 +3232,12 @@ class RuntimePlannerService:
                         native_request = _bind_steer_attachments(native_request, native_turn.steer_attachments)
                         if tool_image_content:
                             native_request = bind_tool_images(native_request, tool_image_content, active_turn_start=active_turn_start)
-                        native_guard = self.native_context_guard(native_request, context_usage=context_usage)
                     state_message = native_request["messages"][-1]
-                    native_request = copy_native_request(native_request, {
-                        "messages": native_model_history(native_request["messages"]),
-                    })
+                    provider_messages = native_model_history(native_request["messages"], handoff_snapshot=native_turn.snapshot())
+                    project_native_resume_reads(provider_messages,
+                        lambda: self._read_catalog(exposure_layer, project_context_active=project_context_active), native_tools)
+                    native_request = copy_native_request(native_request, {"messages": provider_messages})
+                    native_guard = self.native_context_guard(native_request, context_usage=context_usage)
                     # Refresh only the private diagnostic provenance after
                     # recovery/compaction/image projection.  The provider sees
                     # instructions/messages/tools only; the sidecar is removed

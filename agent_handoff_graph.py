@@ -37,12 +37,16 @@ HANDOFF_EDIT_CONTRACT = (
     'A task without a matching TODO has status pending, in_progress, or abandoned. '
     'Attempt status: success or failure, with reason explaining the method and outcome. '
     'Issue status: open or closed, with facts explaining the obstacle. Decisions with scope "graph" apply to the full graph. '
-    'To represent a phase, create a task with group=true and use belongs_to for its member tasks. Its completion comes from its members. '
+    'To represent a phase, create a task with group=true, omit status, and use belongs_to for its member tasks. Its completion comes from its members. '
     'For an agreed order, update the source-linked decision with order={before:[task or group IDs],after:[task or group IDs],reason:"reason the named phases must be ordered"}. '
+    'Name every task subject to the order. Use an ordered group only when all its members belong on that same side of the order. '
+    'Keep an operation in the correct ordered group even when it works on the same resource as an earlier operation, or list the affected leaf tasks explicitly. '
     'Every new node needs a nonempty evidence array, for example "evidence":[{"type":"receipt","id":"opaque source ID"}]. '
     'Use exact available message, receipt, or scan IDs. Preserve earlier evidence and failed attempts. '
+    'Ground pending actions in the current request or established plan. Preserve the latest specific plan for a target. '
+    'A completed receipt for one action supports that outcome and its scope. It does not establish an unrelated follow-on action for the same target. '
     'Use distinct task IDs for distinct targets and acceptance criteria. A confirmed success finishes only its own task. '
-    'Edges are [from,relation,to]. Use task belongs_to goal or parent task; task depends_on prerequisite task; '
+    'Edges are [from,relation,to]. Use task belongs_to goal or parent task; the consuming task depends_on the task that produces its prerequisite; '
     'attempt attempt_of task; task blocked_by issue; decision constrains task. '
     'A direct depends_on or blocked_by edge has a fourth object {reason:"concrete prerequisite",evidence:[exact source pointers]}. '
     'Use constrains for decisions on how to act that do not affect the runnable frontier. '
@@ -421,10 +425,17 @@ def handoff_view(graph: dict[str, Any], todo_items=()) -> dict[str, Any]:
             elif status in _PENDING_STATES and node_id not in waiting and not node.get("group"):
                 ready.append(node_id)
     ready = recoveries + ready
+    resume_reads = {}
+    for task_id in ready:
+        task = nodes[task_id].get("toolTask") or {}
+        coverage = task.get("sourceRead") or {}
+        if task_id not in waiting and task.get("state") == "partial" and coverage.get("nextRequest"):
+            resume_reads[task_id] = coverage["nextRequest"]
     incomplete = not goals or pending or bool(goals - completed_goals)
     return {
         "readyTaskIds": ready,
         **({"recoverTaskIds": recoveries} if recoveries else {}),
+        **({"resumeReads": resume_reads} if resume_reads else {}),
         "openIssueIds": [node_id for node_id, node in nodes.items()
                          if node["kind"] == "issue" and node["status"] == "open"],
         "incomplete": incomplete,

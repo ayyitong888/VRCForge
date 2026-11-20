@@ -881,7 +881,7 @@ def _build_prompt(
     )
 
 
-def _extract_provider_payload(raw: Any) -> tuple[str, Any]:
+def _extract_provider_payload(raw: Any, *, handoff: bool = False) -> tuple[str, Any]:
     if isinstance(raw, Mapping):
         return "json", dict(raw)
     text = str(raw or "").strip()
@@ -893,7 +893,25 @@ def _extract_provider_payload(raw: Any) -> tuple[str, Any]:
         candidate = re.sub(r"\s*```$", "", candidate).strip()
     try:
         parsed = json.loads(candidate)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as parse_error:
+        if handoff and candidate.startswith("{") and candidate.endswith("}") and parse_error.pos == len(candidate) - 1:
+            # A final object close can omit the preceding array terminator. Keep
+            # every emitted token and require a full parse before graph validation.
+            try:
+                return "json", json.loads(candidate[:-1] + "]}")
+            except json.JSONDecodeError:
+                pass
+        if handoff and parse_error.msg == "Extra data" and candidate[parse_error.pos:].startswith(","):
+            # The provider closed the root before emitting its remaining members.
+            # Accept only two complete objects with distinct member names.
+            try:
+                head = json.loads(candidate[:parse_error.pos])
+                tail = json.loads("{" + candidate[parse_error.pos + 1:])
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(head, dict) and isinstance(tail, dict) and head.keys().isdisjoint(tail):
+                    return "json", {**head, **tail}
         start = candidate.find("{")
         end = candidate.rfind("}")
         if start >= 0 and end > start:
@@ -1357,13 +1375,13 @@ def compact_context(
                 sleep(0.05 * (2 ** (page_attempts - 1)))
                 continue
             try:
-                payload_kind, payload = _extract_provider_payload(raw)
+                payload_kind, payload = _extract_provider_payload(raw, handoff=handoff)
                 output_scanner = _Redactor()
                 if handoff:
                     # The planner may return its normal final-reply envelope even for a graph request.
                     if (isinstance(payload, Mapping) and payload.get("action") == "reply"
                             and isinstance(payload.get("reply"), str) and "nodes" not in payload):
-                        _, payload = _extract_provider_payload(payload["reply"])
+                        _, payload = _extract_provider_payload(payload["reply"], handoff=True)
                     payload = _handoff_edit_sources(payload, handoff_graph, safe_task_inputs, handoff_refs,
                                                     {row["id"] for row in todo_source}, summary_refs=summary_refs,
                                                     tool_authority=outstanding_operations is not None)

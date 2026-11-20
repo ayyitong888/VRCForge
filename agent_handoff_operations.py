@@ -243,6 +243,22 @@ def _receipt_fields(observation):
     return _object(observation.get("handoffReceipt")) or legacy_write_receipt_fields(observation)
 
 
+def native_archive_read_successors(messages):
+    """Index later successful pages by the exact cursor submitted by their owner."""
+    calls = _call_context(messages)
+    successors = {}
+    for call_id, observation in _receipts(messages):
+        if observation.get("runtimeTool") != _PACKAGE_INSPECT or _object(observation.get("outcome")).get("status") != "ok":
+            continue
+        cursor = calls.get(call_id, {}).get("archiveCursor")
+        coverage = _object(_receipt_fields(observation).get("sourceRead"))
+        if cursor and coverage.get("status") == "complete":
+            successors[_PACKAGE_INSPECT, cursor] = None
+        elif cursor and (request := _object(coverage.get("nextRequest"))) and coverage.get("status") == "partial":
+            successors[_PACKAGE_INSPECT, cursor] = request
+    return successors
+
+
 def _identity(call_id, observation, receipt):
     if receipt.get("executionId"):
         return "execution", receipt["executionId"]
@@ -468,6 +484,30 @@ def native_handoff_package_selector_archive(snapshot):
         archive[record_id] = {"id": record_id, "source": "tool",
                               "text": json.dumps(receipt, ensure_ascii=False, separators=(",", ":"))}
     return archive
+
+
+def native_handoff_package_inputs(snapshot, graph):
+    """Resolve each verified package preflight to its original owner arguments."""
+    inputs = {}
+    for node_id, node in graph["nodes"].items():
+        proof = _object(node.get("packagePreflight"))
+        receipt_id = proof.get("receiptId")
+        if (node.get("status") != "done" or proof.get("ready") is not True
+                or {"type": "receipt", "id": receipt_id} not in node.get("evidence", ())):
+            continue
+        receipt = _package_selector_receipt(snapshot, receipt_id)
+        if not receipt or _package_selector_tool(receipt["runtimeTool"]) != "plan_outfit_import":
+            continue
+        selector = receipt["sourceSelector"]
+        path = selector["packagePath"]
+        if (not isinstance(path, str) or ntpath.basename(path) != proof.get("packageName")
+                or any(selector[key] != proof.get(key)
+                       for key in ("selectedPrefab", "selectedUnityPackage", "dependencyMode") if key in selector)):
+            continue
+        inputs[node_id] = {"receiptId": receipt_id, "packagePath": path,
+                           **{key: proof[key] for key in ("selectedUnityPackage", "selectedPrefab", "dependencyMode",
+                                                         "baseAvatarName", "targetFolder") if key in proof}}
+    return inputs
 
 
 def _receipt_messages(snapshot):

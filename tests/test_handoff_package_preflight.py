@@ -111,7 +111,8 @@ def test_same_package_basename_and_different_destinations_do_not_share_scope():
     assert len({row["packagePreflight"]["scopeKey"] for row in proofs}) == 3
 
 
-@pytest.mark.parametrize("envelope_action", [None, "reply", "shell"], ids=["bare-graph", "reply-envelope", "other-action"])
+@pytest.mark.parametrize("envelope_action", [None, "reply", "shell", "missing-array-close", "early-object-close"],
+                         ids=["bare-graph", "reply-envelope", "other-action", "missing-array-close", "early-object-close"])
 def test_compaction_keeps_finished_preflight_and_the_exact_variant_while_import_remains_pending(envelope_action):
     from agent_handoff_graph import handoff_view, parse_handoff_graph
     from context_compaction import compact_context
@@ -127,6 +128,11 @@ def test_compaction_keeps_finished_preflight_and_the_exact_variant_while_import_
             "install": {"kind": "task", "status": "pending", "text": "Install the outfit", "evidence": [verified]},
         }, "edges": [["install", "depends_on", proof_id, {"reason": "Install the prepared selection",
                                                        "evidence": [verified]}]]}
+        if envelope_action == "missing-array-close":
+            # Preserve every emitted edge when only the array terminator is missing.
+            return json.dumps(edits)[:-2] + "}"
+        if envelope_action == "early-object-close":
+            return json.dumps({"nodes": edits["nodes"]}) + ", " + json.dumps({"edges": edits["edges"]})[1:]
         return edits if envelope_action is None else {"action": envelope_action, "reply": json.dumps(edits)}
 
     result = compact_context([{"role": "user", "text": user["text"]}], handoff=True,

@@ -13,6 +13,47 @@ from agent_runtime_session_state import (
 from context_compaction import MODEL_HANDOFF_PREFIX
 
 
+def test_native_handoff_projects_exact_owned_package_path_only_for_matching_preflight(tmp_path):
+    state = _state(NativeHistoryStore(tmp_path))
+    state.begin_native_turn("owner", binding="binding", turn_id="turn", input_id="request", message="Import the package")
+    path = "D:/staging/clothes.unitypackage"
+    selected = "Assets/Clothes/Style 18.prefab"
+    arguments = {"tool": "unity_plan_outfit_import", "arguments": {
+        "packagePath": path, "selectedPrefab": selected, "dependencyMode": "selected_only",
+    }}
+    state.append_native_assistant("owner", binding="binding", message={"role": "assistant", "tool_calls": [
+        _call("plan", "call_tool", json.dumps(arguments)),
+    ]})
+    receipt = {"observations": [{"runtimeTool": "vrcforge_plan_outfit_import", "outcome": {"status": "ok"}}]}
+    state.settle_native_call("owner", binding="binding", call_id="plan", content=json.dumps(receipt))
+    state.append_native_assistant("owner", binding="binding", message={"role": "assistant", "content": "Preview finished"})
+    state.append_native_user("owner", binding="binding", input_id="continue", message="Continue")
+    graph = {"schema": "vrcforge.agent_handoff_graph.v3", "edges": [], "nodes": {
+        "preflight": {"kind": "task", "status": "done", "text": "Selected package preflight",
+                      "evidence": [{"type": "receipt", "id": "plan"}], "packagePreflight": {
+            "ready": True, "receiptId": "plan", "packageName": "clothes.unitypackage",
+            "selectedPrefab": selected, "dependencyMode": "selected_only",
+        }},
+    }}
+    graph["nodes"]["other"] = {**graph["nodes"]["preflight"], "packagePreflight": {
+        **graph["nodes"]["preflight"]["packagePreflight"], "selectedPrefab": "Assets/Clothes/Style 1.prefab",
+    }}
+    summary = MODEL_HANDOFF_PREFIX + json.dumps(graph)
+    for _ in range(2):
+        before = state.native_conversation("owner", binding="binding")
+        _, blocks = state.native_handoff_projection(before, character_budget=10000, measure=len)
+        result = state.replace_native_compacted_history("owner", binding="binding", expected_snapshot=before,
+                                                        summary=summary, handoff_blocks=blocks)
+        [message] = [message for message in native_model_history(result["messages"], handoff_snapshot=result)
+                     if message.get("content", "").startswith(MODEL_HANDOFF_PREFIX)]
+        assert path not in summary
+        assert path not in json.dumps(result["messages"])
+        assert json.loads(message["content"][len(MODEL_HANDOFF_PREFIX):])["packageInputsByPreflightNode"] == {
+            "preflight": {"receiptId": "plan", "packagePath": path, "selectedPrefab": selected,
+                          "dependencyMode": "selected_only"},
+        }
+
+
 def _state(store):
     return AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(shared_state_lock=RLock(), native_history_store=store))
 

@@ -37,13 +37,17 @@ def model_handoff_payload(entry: Mapping[str, object]) -> str | None:
     return handoff_text_payload(text) if isinstance(text, str) else None
 
 
-def model_handoff_continuation(entry: Mapping[str, object], *, todo_items=()) -> str | None:
+def model_handoff_continuation(entry: Mapping[str, object], *, todo_items=(), handoff_snapshot=None) -> str | None:
     payload = model_handoff_payload(entry)
     if payload is None or (graph := parse_handoff_graph(payload)) is None:
         return None
-    return MODEL_HANDOFF_PREFIX + json.dumps(
-        {**graph, **handoff_view(graph, todo_items=todo_items)}, ensure_ascii=False, separators=(",", ":"),
-    )
+    projection = {**graph, **handoff_view(graph, todo_items=todo_items)}
+    if handoff_snapshot and handoff_snapshot.get("handoffArchive"):
+        from agent_handoff_operations import native_handoff_package_inputs
+
+        if package_inputs := native_handoff_package_inputs(handoff_snapshot, graph):
+            projection["packageInputsByPreflightNode"] = package_inputs
+    return MODEL_HANDOFF_PREFIX + json.dumps(projection, ensure_ascii=False, separators=(",", ":"))
 
 
 def native_handoff_message_sources(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -197,7 +201,7 @@ def project_native_runtime_state_history(messages: list[dict[str, Any]]) -> list
     return projected
 
 
-def native_model_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def native_model_history(messages: list[dict[str, Any]], *, handoff_snapshot=None) -> list[dict[str, Any]]:
     """Translate saved authorship at the shared provider boundary, including older hidden host notes."""
     if any(model_handoff_payload(item) is not None for item in messages):
         # A compacted transcript has one authoritative runtime snapshot.
@@ -232,7 +236,7 @@ def native_model_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
                 record["content"] = prefix + content
             elif isinstance(content, list):
                 record["content"] = [{"type": "text", "text": prefix}, *content]
-        if handoff := model_handoff_continuation(record, todo_items=todos):
+        if handoff := model_handoff_continuation(record, todo_items=todos, handoff_snapshot=handoff_snapshot):
             record["content"] = handoff
         if record.get("role") == "user" and record.get("hidden") is True and isinstance(content, str):
             if content in (LOOP_REMINDER, CONTINUE_MESSAGE):

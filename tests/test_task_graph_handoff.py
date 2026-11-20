@@ -14,6 +14,57 @@ from agent_handoff_graph import (
 from context_compaction import _Redactor, _redact_handoff_payload, compact_context
 
 
+def test_native_resume_reads_use_catalog_alias_and_existing_owner():
+    from context_compaction import MODEL_HANDOFF_PREFIX
+    from runtime_planner_service import PlannerCatalogSnapshot, PlannerTool, project_native_resume_reads
+
+    read = PlannerTool("inspect_source", "Read archive", "project",
+                       runtime_name="vrcforge_inspect_outfit_package", block="project/source")
+    write = PlannerTool("import_source", "Import archive", "project",
+                        runtime_name="vrcforge_import_source", write=True, block="project/source")
+    catalog = PlannerCatalogSnapshot(routable_tools=(read, write))
+    args = {"archiveCursor": "archive_abcdef0123456789abcdef0123456789_1"}
+    source_reads = {
+        "partial": {"tool": read.runtime_name, "arguments": args},
+        "bad": {"tool": write.runtime_name, "arguments": args},
+    }
+    content = MODEL_HANDOFF_PREFIX + json.dumps({"resumeReads": source_reads})
+
+    for visible in ([], [read]):
+        messages = [{"role": "assistant", "content": content}]
+        project_native_resume_reads(messages, lambda: catalog, visible)
+        output = json.loads(messages[0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
+        expected = {"tool": read.name, "arguments": args}
+        if not visible:
+            expected["loadCall"] = {"skill_tool": "load_internal_tool_block",
+                                    "skill_params": {"block": read.block, "tools": [read.name]}}
+        assert output["resumeReads"] == source_reads
+        assert output["resumeReadCalls"] == {"partial": expected}
+
+    next_args = {"archiveCursor": "archive_abcdef0123456789abcdef0123456789_2"}
+
+    def page(call_id, request_args, coverage, status="ok"):
+        return [
+            {"role": "assistant", "tool_calls": [{"id": call_id, "function": {
+                "name": "call_tool", "arguments": json.dumps({"tool": read.name, "arguments": request_args}),
+            }}]},
+            {"role": "tool", "tool_call_id": call_id, "content": json.dumps({"observations": [{
+                "runtimeTool": read.runtime_name, "outcome": {"status": status},
+                "handoffReceipt": {"sourceRead": coverage},
+            }]})},
+        ]
+
+    partial = page("partial", args, {"status": "partial", "nextRequest": {"tool": read.runtime_name, "arguments": next_args}})
+    complete = {"status": "complete", "processedCount": 121, "totalCount": 121, "remainingCount": 0}
+    messages = [{"role": "assistant", "content": content}, *partial, *page("failed", next_args, complete, "error")]
+    project_native_resume_reads(messages, lambda: catalog, [read])
+    output = json.loads(messages[0]["content"].removeprefix(MODEL_HANDOFF_PREFIX))
+    assert output["resumeReadCalls"] == {"partial": {"tool": read.name, "arguments": next_args}}
+    messages = [{"role": "assistant", "content": content}, *partial, *page("completed", next_args, complete)]
+    project_native_resume_reads(messages, lambda: catalog, [read])
+    assert messages[0]["content"] == content
+
+
 def test_handoff_binds_answer_operation_and_todo_to_their_own_sources():
     user = {"id": "user-1", "source": "user", "text": "Use the second option.",
             "references": [{"id": "assistant-1", "text": "Mount now, or import all packages first and mount after?"}]}
@@ -58,10 +109,10 @@ def test_handoff_binds_answer_operation_and_todo_to_their_own_sources():
 def test_source_order_expansion_and_phase_readiness_survive_round_trip():
     graph = apply_handoff_edits(None, {
         "nodes": {
-            "imports": node("task", "Import phase", group=True, todoId="phase-import"),
+            "imports": node("task", "Import phase", group=True, todoId="phase-import", status="done"),
             "primary": node("task", "Primary package", todoId="primary"),
             "secondary": node("task", "Secondary package", status="pending"),
-            "mounts": node("task", "Mount phase", group=True),
+            "mounts": node("task", "Mount phase", group=True, status="pending"),
             "mount": node("task", "Mount the primary outfit", status="pending"),
             "verify": node("task", "Verify in scene", status="pending"),
             "inspect": node("task", "Inspect appearance choices", status="pending"),
@@ -76,6 +127,7 @@ def test_source_order_expansion_and_phase_readiness_survive_round_trip():
     })
     restored = parse_handoff_graph(serialize_handoff_graph(graph))
     assert restored == graph
+    assert all("status" not in restored["nodes"][group] for group in ("imports", "mounts"))
     assert [edge for edge in restored["edges"] if edge[1] == "depends_on"] == [
         ["mounts", "depends_on", "imports", {"decisionId": "order"}],
         ["verify", "depends_on", "imports", {"decisionId": "order"}],
@@ -250,7 +302,7 @@ def test_tool_states_and_exact_results_survive_repeated_model_handoff():
     partial = {"id": "archive-receipt", "kind": "receipt", "callId": "archive-receipt", "tool": "inspect_archive",
                "operationKind": "read", "scopeId": "archive-scope", "state": "done", "outcomeStatus": "ok",
                "resultRef": source_ref, "sourceRead": {"status": "partial", "processedCount": 12,
-                            "totalCount": 24, "nextRequest": {"offset": 12}}}
+                            "totalCount": 24, "nextRequest": {"tool": "inspect_archive", "arguments": {"offset": 12}}}}
     preview = {"id": "import-preview", "kind": "preview", "callId": "preview-receipt", "tool": "preview_import",
                "operationKind": "preview", "scopeId": "preview-scope", "state": "done", "outcomeStatus": "ok"}
     interrupted = {"id": "exec-1", "kind": "execution", "callId": "import-receipt", "tool": "import",
@@ -267,6 +319,7 @@ def test_tool_states_and_exact_results_survive_repeated_model_handoff():
     attempt_ids = {task["attemptReceiptId"]: node_id for node_id, task in graph["nodes"].items() if "attemptReceiptId" in task}
     archive_id, preview_id, import_id = (task_ids[key] for key in ("archive-scope", "preview-scope", "import-scope"))
     assert graph["nodes"][archive_id]["toolTask"]["state"] == "partial"
+    assert handoff_view(graph)["resumeReads"] == {archive_id: partial["sourceRead"]["nextRequest"]}
     assert graph["nodes"][archive_id]["status"] == "pending"
     assert graph["nodes"][preview_id]["status"] == "done"
     assert graph["nodes"][import_id]["status"] == "pending"
@@ -300,6 +353,7 @@ def test_tool_states_and_exact_results_survive_repeated_model_handoff():
     assert negative["nodes"][import_id]["toolTask"]["state"] == "unverified"
     _, finished = compact([resumed, complete_read], summary)
     assert finished["nodes"][archive_id]["toolTask"]["sourceRead"] == complete_read["sourceRead"]
+    assert "resumeReads" not in handoff_view(finished)
     assert finished["nodes"][import_id]["status"] == "done"
     assert finished["nodes"][import_id]["toolTask"]["resultRef"] == import_ref
     assert finished["nodes"][attempt_ids["import-receipt"]]["status"] == "interrupted"
