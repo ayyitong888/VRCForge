@@ -32,10 +32,13 @@ export const requestChatTitle = async () => ({ title: "Fixture" });
 export const sendAgentMessage = (_endpoint, _message, session, _history, _agent, options) => {
   window.__providerRequests.push({ clientTurnId: options?.clientTurnId });
   if (window.__deferParent) return new Promise(resolve => { window.__releaseParent = resolve; });
+  const override = window.__nextResponse;
+  window.__nextResponse = undefined;
   return Promise.resolve({
     ok: true, status: "completed", sessionId: session, turnId: options?.clientTurnId, clientTurnId: options?.clientTurnId,
     plan: { reply: "fixture reply", summary: "fixture", nextStep: "done", planner: "fixture", shellNeeded: false },
     timeline: [],
+    ...override,
   });
 };
 export const recordAgentRunQueued = async () => ({ ok: true, accepted: true, mode: "followup", queueId: "queue-fixture", sequence: 1 });
@@ -48,13 +51,15 @@ const bundle = await build({
     contents: `
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useChatRunController } from "./src/hooks/use-chat-run-controller";
 import { useRuntimeTurnActivity } from "./src/hooks/use-runtime-turn-activity";
 import { useRuntimeTurnContinuationDelivery } from "./src/hooks/use-runtime-turn-continuation";
 import { mergeConversationTimelineItems, stripSupersededStreamingItems } from "./src/lib/chat-thread";
 import { projectProcessRounds } from "./src/lib/chat-process-rounds";
 import { ConversationCard } from "./src/components/chat/conversation-card";
+import { ComposerLinkInput } from "./src/components/chat/composer-link-input";
+import { chatInputPredictionOwner, useChatInputPrediction } from "./src/hooks/use-chat-input-prediction";
 
 const chat = { id: "chat-fixture", sessionId: "session-fixture", projectPath: "", items: [], title: "Existing chat" };
 let persistCalls = 0;
@@ -82,6 +87,16 @@ function Harness() {
   }, []);
   const appendToChat = React.useCallback((id, item) => updateChat(id, current => ({ ...current, items: [...current.items, item] })), [updateChat]);
   const chats = [{ ...chat }];
+  const inputRef = useRef(null);
+  const predictionOwner = chatInputPredictionOwner(location.origin, chat.id, chat.sessionId);
+  const prediction = useChatInputPrediction({
+    endpoint: location.origin, owner: predictionOwner, provider: "fixture", model: "fixture-model",
+    eligible: true, busy: false, hasDraft: false,
+  });
+  window.__predictReply = (reply, turnId) => prediction.offer({
+    owner: predictionOwner, turnId, context: { recent_user_messages: ["Apply the change"], assistant_tail: reply },
+  }, window.__predictionGeneration);
+  window.__dismissPrediction = () => { window.__predictionGeneration = prediction.dismiss(); };
   const deliver = useRuntimeTurnContinuationDelivery({ chats, appendToChat, updateChat });
   const delta = useRuntimeTurnActivity({ endpoint: "http://fixture", runtimeConnected: true,
     chats, runs: [], updateChat, deliver });
@@ -103,7 +118,9 @@ function Harness() {
   window.__switchToParent = (identity) => updateChat(chat.id, current => ({ ...current, sessionId: identity.sessionId, items: [] }));
   window.__appendLifecycle = (items) => updateChat(chat.id, current => ({ ...current, items: [...current.items, ...items] }));
   const projection = projectProcessRounds(mergeConversationTimelineItems(chat.items), chat.sessionId);
-  return <div id="hook-mounted">{window.__deferParent && projection.items.map(item => {
+  return <div id="hook-mounted">
+    <ComposerLinkInput inputRef={inputRef} value="" onChange={() => {}} suggestion={prediction.suggestion} />
+    {window.__deferParent && projection.items.map(item => {
     const round = projection.rounds.get(item);
     return <ConversationCard key={item.id} item={item} sharedProcess={round && {
       first: round.first === item, last: round.last === item, live: round.last.type === "streaming",
@@ -116,11 +133,18 @@ window.__errors = [];
 window.__storageErrors = [];
 window.__items = () => chat.items;
 window.__providerRequests = [];
+window.__completedReplies = [];
 window.__releasePersist = () => releasePersist?.();
 window.__failNextPersist = () => { failNextPersist = true; };
 window.__submit = (id, text) => window.__controller.submitTurn({
   id, text, attachments: [], provider: "fixture", providerLabel: "Fixture", model: "fixture-model",
   sessionId: chat.sessionId, planMode: false,
+  onCompletedReply: (reply, _sessionId, turnId) => {
+    window.__completedReplies.push(turnId);
+    if (turnId === "applied-auto-approval" || turnId === "waiting-for-approval") {
+      window.__predictReply(reply, turnId);
+    }
+  },
 });
 createRoot(document.getElementById("root")).render(<Harness />);
 `,
@@ -150,7 +174,16 @@ createRoot(document.getElementById("root")).render(<Harness />);
   }],
 });
 
-const server = createServer((_req, res) => {
+const predictionRequests = [];
+const server = createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === "/api/app/chat/input-prediction") {
+    let text = "";
+    for await (const chunk of req) text += chunk;
+    predictionRequests.push(JSON.parse(text));
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ suggestion: "Check the result" }));
+    return;
+  }
   res.setHeader("Content-Type", "text/html");
   res.end(`<div id="root"></div><script>${bundle.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script>`);
 });
@@ -182,6 +215,31 @@ try {
   assert.ok(await page.evaluate(() => window.__items().some(item => item.type === "user" && item.clientTurnId === "foreground-conflict")));
   assert.equal(await page.evaluate(() => window.__events.filter((event) => event === "persist_started").length), 2);
   await page.evaluate(() => window.__releasePersist());
+
+  for (const [turnId, status] of [["applied-auto-approval", "completed"], ["waiting-for-approval", "blocked"]]) {
+    assert.equal(await page.evaluate(async ({ turnId, status }) => {
+      window.__dismissPrediction();
+      window.__nextResponse = {
+        status: undefined, turnStatus: { status }, approvalId: "approval-fixture", approval_id: "approval-fixture",
+        write: { status: status === "completed" ? "executed" : "pending_approval", approvalId: "approval-fixture" },
+      };
+      return window.__submit(turnId, "Apply the change");
+    }, { turnId, status }), "started");
+    await page.waitForFunction(id => window.__items().some(item => item.type === "agent"
+      && item.response.clientTurnId === id), turnId);
+    const ghost = page.locator("[data-composer-input-suggestion]");
+    if (status === "completed") {
+      await ghost.waitFor({ state: "visible", timeout: 3000 });
+      assert.equal(await ghost.textContent(), "Check the result");
+    } else {
+      assert.equal(await ghost.count(), 0);
+    }
+  }
+  assert.equal(predictionRequests.length, 1);
+  assert.deepEqual(await page.evaluate(() => window.__completedReplies),
+    ["foreground-first", "foreground-conflict", "applied-auto-approval"],
+    "the prediction callback accepts completed auto-approved replies and still skips turns pending approval");
+
   const { parent: waiting, continuation, lifecycle, events, user, terminal } = subagentReplay;
   await page.evaluate(({ waiting, user }) => {
     window.__deferParent = true;

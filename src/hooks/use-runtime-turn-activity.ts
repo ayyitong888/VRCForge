@@ -213,7 +213,7 @@ export function runtimeEventFromExactResponse(state: AgentTurnResponseRecovery, 
   return {
     schema: "vrcforge.runtime_turn_event.v1", continuationSource: "foreground_completed",
     ...runtimeTurnLineage(identity), ...runtimeTurnLineage(response),
-    ok: response.ok, status: response.status, dispatchStopped: response.dispatchStopped,
+    ok: response.ok, status: response.turnStatus?.status || response.status, dispatchStopped: response.dispatchStopped,
     unityWriteMayHaveExecuted: response.unityWriteMayHaveExecuted,
     sessionId: identity.sessionId, clientTurnId: identity.clientTurnId, turnId,
     plan: response.plan, timeline: response.timeline, contextUsage: response.contextUsage,

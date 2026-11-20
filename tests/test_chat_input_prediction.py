@@ -62,9 +62,9 @@ def test_chatgpt_prediction_uses_lowest_advertised_effort_or_suppresses(monkeypa
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
-            async def predict():
+            async def predict(messages=None):
                 response = await client.post(START, json={
-                    "request_id": str(uuid4()), "recent_user_messages": ["继续"],
+                    "request_id": str(uuid4()), "recent_user_messages": ["继续"] if messages is None else messages,
                     "assistant_tail": "现已完成第一轮。",
                 })
                 return response.json()["suggestion"]
@@ -75,7 +75,8 @@ def test_chatgpt_prediction_uses_lowest_advertised_effort_or_suppresses(monkeypa
             assert await predict() == "继续"
             advertised[expected_model] = {"high", "none", "low"}
             assert await predict() == "继续"
-            assert calls == [(expected_model, "low"), (expected_model, "none")]
+            assert await predict([]) == "继续"
+            assert calls == [(expected_model, "low"), (expected_model, "none"), (expected_model, "none")]
 
     asyncio.run(run())
 

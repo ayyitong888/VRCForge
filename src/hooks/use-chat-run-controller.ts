@@ -161,8 +161,8 @@ type InternalRunSingleTurnOptions = RunSingleTurnOptions & {
 };
 
 function isCompletedPublicReply(response: AgentRuntimeResponse): boolean {
-  return response.ok && (response.turnStatus?.status || response.status) === "completed"
-    && !response.approvalId && !response.approval_id;
+  // Completed turns can retain the ID of an already applied approval.
+  return response.ok && (response.turnStatus?.status || response.status) === "completed";
 }
 
 export type PrepareTurnContextInput = {

@@ -18,6 +18,16 @@ const bundle = await build({
       window.finish = (turnId) => prediction.offer({
         owner, turnId, context: {recent_user_messages: ["继续"], assistant_tail: turnId}
       }, window.submission);
+      window.finishDelivered = ({ turnId, continuationSource, status, nextStep }) => {
+        const now = new Date().toISOString();
+        return prediction.offerAfterResume({
+          sessionId: "session", turnId, continuationSource, status, startedAt: now, completedAt: now,
+          plan: { nextStep, reply: turnId },
+        }, {
+          chatId: "chat", refreshRuntime: async () => {},
+          getChatById: () => ({ sessionId: "session", items: [{ id: turnId, type: "agent", response: { turnId } }] }),
+        });
+      };
       return <output data-state={JSON.stringify(state)}>{prediction.suggestion || ""}</output>;
     }
     createRoot(document.getElementById("root")).render(<Chat/>);
@@ -97,7 +107,25 @@ try {
   assert.deepEqual(cancellations, [requests[1].request_id]);
   assert.equal(requests.length, 2);
   assert.equal(await page.locator("output").textContent(), "");
-  console.log("PASS: waiting, live model switch, one dispatch, typing, approval and stale-response cancellation");
+  const finishDelivered = (receipt) => render(value => window.finishDelivered(value), receipt);
+  for (const continuationSource of ["foreground_completed", "approval_finished", "shell_process_finished", "sub_agent_finished"]) {
+    await start();
+    const observed = page.waitForRequest(request => request.url().endsWith("/chat/input-prediction"));
+    await finishDelivered({ turnId: continuationSource, continuationSource, nextStep: "done" });
+    await change({ busy: false });
+    assert.equal((await observed).postDataJSON().assistant_tail, continuationSource);
+    await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
+    await finish(continuationSource);
+  }
+  assert.deepEqual(requests.slice(2).map(request => request.assistant_tail),
+    ["foreground_completed", "approval_finished", "shell_process_finished", "sub_agent_finished"]);
+  await start();
+  await finishDelivered({ turnId: "blocked", continuationSource: "approval_finished", nextStep: "pending_approval", status: "blocked" });
+  await finishDelivered({ turnId: "interrupted", continuationSource: "foreground_interrupted", nextStep: "done" });
+  await change({ busy: false });
+  assert.equal(requests.length, 6);
+  assert.equal(await page.locator("output").textContent(), "");
+  console.log("PASS: foreground and continued completions, deduplication, waiting, typing, approval and cancellation");
 } finally {
   finishSlow?.();
   await browser?.close();

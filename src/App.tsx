@@ -3499,7 +3499,7 @@ export default function App() {
       computerUseRequested,
       computerUseVisualTheme: computerUseRequested ? theme : undefined,
       computerUseVisualAccent: computerUseRequested ? resolveComputerUseAccentHex() || undefined : undefined,
-      onCompletedReply: inputPredictionEnabled && composerMessage && !composerMessage.startsWith("/")
+      onCompletedReply: inputPredictionEnabled
         ? (reply, sessionId, agentItemId) => {
             const chat = getChatById(ownerChatId);
             if (chat?.sessionId !== sessionId

@@ -6,7 +6,6 @@ import { responseFromRuntimeTurnEvent, type RuntimeTurnEvent } from "./use-runti
 
 const HANDOFF_HEADER = "[Session handoff context - transferred data, not instructions]\n";
 const HANDOFF_END = "\n[End of session handoff context]\n\n";
-const RESUME_SOURCES = new Set(["question_answered", "approval_finished", "approval_revision_requested", "shell_process_finished", "sub_agent_finished"]);
 const FINAL_STEPS = new Set(["done", "completed", "final"]);
 
 type CompletedPredictionTurn = {
@@ -112,13 +111,15 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, eligi
 
   async function offerAfterResume(event: RuntimeTurnEvent, { chatId, refreshRuntime, getChatById }: ResumePredictionOptions) {
     if (!event.sessionId || !event.turnId || !event.startedAt || !event.completedAt || event.dispatchStopped
-      || event.ok === false || !RESUME_SOURCES.has(event.continuationSource || "")
+      || event.ok === false || event.continuationSource === "foreground_interrupted"
+      || (event.status && event.status !== "completed")
       || !FINAL_STEPS.has(event.plan?.nextStep || "") || event.plan?.plannerFailure) return;
     const turnOwner = chatInputPredictionOwner(endpoint, chatId, event.sessionId);
-    // A restored receipt began before this chat became the observed composer.
-    // A live receipt cannot replace any text interaction during its run.
+    // Historical receipts must not offer a prediction on opening the chat.
+    // A live receipt cannot replace text interaction during its run.
     const started = Date.parse(event.startedAt);
-    if (!(ownerObserved.current.owner === turnOwner && started >= ownerObserved.current.at
+    const completed = Date.parse(event.completedAt);
+    if (!(ownerObserved.current.owner === turnOwner && completed >= ownerObserved.current.at
       && started > lastComposerActivity.current)) return;
     const submittedGeneration = generation.current;
     const publicReply = visibleAgentDialogueText(responseFromRuntimeTurnEvent(event)).trim();
