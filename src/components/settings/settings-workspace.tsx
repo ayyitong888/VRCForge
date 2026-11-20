@@ -266,7 +266,7 @@ export function SettingsWorkspace({
   useEffect(() => setProviderPanel(null), [apiProvider]);
   const currentPermissionVisual = permissionVisualState(permission);
   const visionKeySaved = hasSavedProviderKey(visionProvider, visionConfig);
-  const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "general" : activeSection;
+  const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "about" : activeSection;
   useLayoutEffect(() => {
     if (!searchSelection || focusedSearchSelection.current === searchSelection) return;
     const { entry } = searchSelection;
@@ -284,7 +284,7 @@ export function SettingsWorkspace({
   const updateDeveloperOptions = async (enabled: boolean, developerChallengeId?: string) => {
     await onDeveloperOptionsChange(enabled, developerChallengeId);
     if (!enabled && visibleSection === "developer") {
-      onSectionChange("general");
+      onSectionChange("about");
     }
   };
 
@@ -360,6 +360,12 @@ export function SettingsWorkspace({
               </div>
             </section>
 
+          </>
+        ) : null}
+
+        {visibleSection === "chat" ? (
+          <>
+            <h1 className="text-xl font-semibold text-foreground">{t("settings.navChat")}</h1>
             <section className="mt-6" data-settings-panel="enter">
               <label className="mb-6 flex items-center justify-between gap-5">
                 <span className="min-w-0">
@@ -385,6 +391,12 @@ export function SettingsWorkspace({
               </select>
             </section>
 
+          </>
+        ) : null}
+
+        {visibleSection === "notifications" ? (
+          <>
+            <h1 className="text-xl font-semibold text-foreground">{t("settings.navNotifications")}</h1>
             <section className="mt-6" data-settings-panel="notifications">
               <BackgroundGoalSettings
                 enabled={backgroundGoalNotificationsEnabled}
@@ -398,20 +410,12 @@ export function SettingsWorkspace({
               <AgentQuestionNotificationSoundSettings />
             </section>
 
-            <section className="mt-6" data-settings-panel="diagnostics">
-                <DiagnosticsSettingsPanel
-                endpoint={endpoint}
-                developerOptionsEnabled={developerOptionsEnabled}
-                status={diagnosticsStatus}
-                message={diagnosticsMessage}
-                loading={loadingDiagnostics}
-                exportingSupportBundle={exportingSupportBundle}
-                onLogLevelChange={onSetLogLevel}
-                onOpenLogsFolder={onOpenLogsFolder}
-                onCreateSupportBundle={onCreateSupportBundle}
-              />
-            </section>
+          </>
+        ) : null}
 
+        {visibleSection === "about" ? (
+          <>
+            <h1 className="text-xl font-semibold text-foreground">{t("settings.navAbout")}</h1>
             <section className="mt-6" data-vrcforge-about data-settings-panel="about">
               <h2 className="text-base font-semibold">{t("settings.aboutTitle")}</h2>
               <div className="mt-4 rounded-xl border border-border bg-card p-4">
@@ -430,6 +434,20 @@ export function SettingsWorkspace({
                   </div>
                 </div>
               </div>
+            </section>
+
+            <section className="mt-6" data-settings-panel="diagnostics">
+              <DiagnosticsSettingsPanel
+                endpoint={endpoint}
+                developerOptionsEnabled={developerOptionsEnabled}
+                status={diagnosticsStatus}
+                message={diagnosticsMessage}
+                loading={loadingDiagnostics}
+                exportingSupportBundle={exportingSupportBundle}
+                onLogLevelChange={onSetLogLevel}
+                onOpenLogsFolder={onOpenLogsFolder}
+                onCreateSupportBundle={onCreateSupportBundle}
+              />
             </section>
 
             <section className="mt-6 pb-6" data-settings-panel="developer-toggle">

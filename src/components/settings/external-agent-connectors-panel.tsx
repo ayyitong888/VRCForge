@@ -207,10 +207,10 @@ export function ExternalAgentConnectorsPanel({
         <section className="grid gap-2 border-t border-border pt-4">
           <h3 className="text-sm font-semibold">2. {t("connector.stepConfigureClient")}</h3>
           <p className="text-xs text-muted-foreground">{t("connector.stepInstall")}</p>
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-            <label className="grid gap-1 text-xs font-medium text-muted-foreground" htmlFor="connector-setup-client">
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="grid min-w-0 flex-[1_1_14rem] gap-1 text-xs font-medium text-muted-foreground" htmlFor="connector-setup-client">
               {t("connector.chooseHost")}
-              <select id="connector-setup-client" value={setupClient} onChange={(event) => setSetupClient(event.target.value as ExternalAgentConnectorClient)} disabled={loading} className="h-9 min-w-0 rounded-md border border-border bg-card px-2 text-sm text-foreground">
+              <select id="connector-setup-client" value={setupClient} onChange={(event) => setSetupClient(event.target.value as ExternalAgentConnectorClient)} disabled={loading} className="h-10 min-w-0 rounded-md border border-border bg-card px-2 text-sm text-foreground">
                 {(["deepseekHarness", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"] as const).map((client) => (
                   <option key={client} value={client}>{t(`connector.hosts.${client}`)}</option>
                 ))}
@@ -253,8 +253,8 @@ export function ExternalAgentConnectorsPanel({
       <section className="mt-4 grid gap-3 rounded-lg border border-border bg-background/40 p-3" data-connector-agent-instructions>
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h3 className="min-w-0 flex-1 text-sm font-semibold">{t("connector.agentSetupTitle")}</h3>
-          <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={!setupPrompt} onClick={() => onCopy(setupPrompt, t("connector.agentSetupTitle"))}>
-            <Copy className="h-3.5 w-3.5" />
+          <Button type="button" variant="outline" className="h-auto min-h-8 max-w-full px-3 py-1.5 text-xs" disabled={!setupPrompt} onClick={() => onCopy(setupPrompt, t("connector.agentSetupTitle"))}>
+            <Copy className="h-3.5 w-3.5 shrink-0" />
             {t("connector.copyAgentSetup")}
           </Button>
         </div>

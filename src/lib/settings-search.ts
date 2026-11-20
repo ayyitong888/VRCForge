@@ -12,7 +12,8 @@ export type SettingsSearchEntry = {
 export type SettingsSearchSelection = { entry: SettingsSearchEntry; requestId: number };
 
 export const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
-  general: "settings.navGeneral", permissions: "settings.navPermissions", models: "settings.navModels",
+  general: "settings.navGeneral", chat: "settings.navChat", notifications: "settings.navNotifications",
+  about: "settings.navAbout", permissions: "settings.navPermissions", models: "settings.navModels",
   memory: "settings.navMemory", storage: "settings.navStorage", connectors: "settings.navConnectors",
   instructions: "settings.navInstructions", developer: "settings.navDeveloper",
 };
@@ -29,21 +30,21 @@ function group(section: SettingsSection, panel: string, rows: readonly (readonly
 
 export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...group("general", "startup-animation", [["settings.startupAnimation", "settings.startupAnimationDesc"]]),
-  ...group("general", "onboarding", [["settings.onboarding", "settings.onboardingDesc"]]),
+  ...group("about", "onboarding", [["settings.onboarding", "settings.onboardingDesc"]]),
   ...group("general", "appearance", [
     ["settings.themeCustomization", "settings.themeCustomizationDesc"], ["settings.themePalette"],
     ["settings.themeCustomAccent"], ["settings.themeCustomSurface"], ["settings.themeBackground"],
     ["settings.themeBackgroundScope"], ["settings.themeBackgroundOpacity"], ["settings.themeReset"],
   ]),
   ...group("general", "language", [["settings.language", "settings.languageDesc"]]),
-  ...group("general", "enter", [["settings.inputPrediction", "settings.inputPredictionDesc"], ["settings.runningEnterAction"], ["settings.runningEnterQueue"], ["settings.runningEnterSteer"]]),
-  ...group("general", "notifications", [["settings.backgroundGoalNotifications", "settings.backgroundGoalNotificationsDesc"]]),
-  ...group("general", "sounds", [
+  ...group("chat", "enter", [["settings.inputPrediction", "settings.inputPredictionDesc"], ["settings.runningEnterAction"], ["settings.runningEnterQueue"], ["settings.runningEnterSteer"]]),
+  ...group("notifications", "notifications", [["settings.backgroundGoalNotifications", "settings.backgroundGoalNotificationsDesc"]]),
+  ...group("notifications", "sounds", [
     ["settings.notificationSoundTitle", "settings.notificationSoundDesc"], ["settings.notificationSoundOrdinary"], ["settings.notificationSoundBlocking"],
   ]),
-  ...group("general", "diagnostics", [["settings.diagnostics", "settings.loggingDesc"], ["settings.logLevel"], ["settings.openLogsFolder"], ["settings.exportBundle"]]),
-  ...group("general", "about", [["settings.aboutTitle", "settings.aboutSafety"]]),
-  ...group("general", "developer-toggle", [["settings.developerOptions", "settings.developerOptionsDesc"]]),
+  ...group("about", "diagnostics", [["settings.diagnostics", "settings.loggingDesc"], ["settings.logLevel"], ["settings.openLogsFolder"], ["settings.exportBundle"]]),
+  ...group("about", "about", [["settings.aboutTitle", "settings.aboutSafety"]]),
+  ...group("about", "developer-toggle", [["settings.developerOptions", "settings.developerOptionsDesc"]]),
   ...group("permissions", "permissions", [["settings.permissionMode", "settings.permissionModeDescription"], ["executionMode.approval", "executionMode.approvalDesc"], ["header.autoApproval", "executionMode.autoDesc"], ["header.fullPermission", "executionMode.roslynFullAutoDesc"]]),
   ...group("models", "account", [["chatgptOAuth.title"], ["chatgptOAuth.model"], ["chatgptOAuth.reasoningSelect"], ["chatgptOAuth.testConnection"]]),
   ...group("models", "api", [

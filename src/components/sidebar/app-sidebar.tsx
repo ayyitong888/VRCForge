@@ -1,5 +1,6 @@
 import {
   ArrowLeft,
+  Bell,
   Bot,
   Boxes,
   Brain,
@@ -7,6 +8,7 @@ import {
   Database,
   FolderPlus,
   History,
+  Info,
   ListFilter,
   MessageSquare,
   Plug,
@@ -24,10 +26,30 @@ import type { SidebarChatGroupsWithTimes } from "../../lib/sidebar-view";
 import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
 import { groupSidebarProjects } from "../../lib/sidebar-project-order";
 import { cn } from "../../lib/utils";
-import type { SettingsSearchEntry } from "../../lib/settings-search";
+import { SETTINGS_SECTION_LABELS, type SettingsSearchEntry } from "../../lib/settings-search";
 import { SettingsSearchNavigation } from "../settings/settings-search-navigation";
 import { useSidebarChatOrder } from "../../hooks/use-sidebar-chat-order";
 import { SidebarChat, SidebarChatList, SidebarProject, SidebarProjectList, SidebarSection, type DragHandleProps } from "./sidebar";
+
+const SETTINGS_NAV_GROUPS = [
+  { label: "settings.navPersonal", items: [
+    { section: "general", icon: SlidersHorizontal },
+    { section: "chat", icon: MessageSquare },
+    { section: "notifications", icon: Bell },
+  ] },
+  { label: "settings.navAgent", items: [
+    { section: "models", icon: Bot },
+    { section: "permissions", icon: Shield },
+    { section: "instructions", icon: Boxes },
+    { section: "memory", icon: Brain },
+    { section: "connectors", icon: Plug },
+  ] },
+  { label: "settings.navApplication", items: [
+    { section: "storage", icon: Database },
+    { section: "about", icon: Info },
+    { section: "developer", icon: Bug },
+  ] },
+] satisfies Array<{ label: string; items: Array<{ section: SettingsSection; icon: typeof Bot }> }>;
 
 type SidebarProjectItem = {
   name?: string;
@@ -136,18 +158,21 @@ export function AppSidebar({
   const { t } = useTranslation();
   const { orderedGroups: chatSidebar, reorderChats, resetChatOrder, manualChatIds } = useSidebarChatOrder(unorderedChatSidebar);
   const projectGroups = groupSidebarProjects(projectItems);
-  const settingsNavItems = ([
-    { section: "general", label: t("settings.navGeneral"), icon: <SlidersHorizontal className="h-4 w-4 shrink-0" /> },
-    { section: "permissions", label: t("settings.navPermissions"), icon: <Shield className="h-4 w-4 shrink-0" /> },
-    { section: "models", label: t("settings.navModels"), icon: <Bot className="h-4 w-4 shrink-0" /> },
-    { section: "memory", label: t("settings.navMemory"), icon: <Brain className="h-4 w-4 shrink-0" /> },
-    { section: "storage", label: t("settings.navStorage"), icon: <Database className="h-4 w-4 shrink-0" /> },
-    { section: "connectors", label: t("settings.navConnectors"), icon: <Plug className="h-4 w-4 shrink-0" /> },
-    { section: "instructions", label: t("settings.navInstructions"), icon: <Boxes className="h-4 w-4 shrink-0" /> },
-    { section: "developer", label: t("settings.navDeveloper"), icon: <Bug className="h-4 w-4 shrink-0" />, developerOnly: true },
-  ] satisfies Array<{ section: SettingsSection; label: string; icon: ReactNode; developerOnly?: boolean }>).filter((item) => !item.developerOnly || developerOptionsEnabled);
-
   if (activeView === "settings") {
+    const settingsNavigation = SETTINGS_NAV_GROUPS.map((group) => (
+      <nav key={group.label} aria-label={t(group.label)} className={collapsed ? "mt-3 space-y-0.5" : "mt-4 space-y-0.5"}>
+        {collapsed ? null : <div aria-hidden="true" className="px-2.5 pb-1 text-xs font-medium text-muted-foreground">{t(group.label)}</div>}
+        {group.items.filter(({ section }) => section !== "developer" || developerOptionsEnabled).map(({ section, icon: Icon }) => (
+          <SidebarNavButton
+            key={section}
+            icon={<Icon aria-hidden="true" className="h-4 w-4 shrink-0" />}
+            label={t(SETTINGS_SECTION_LABELS[section])}
+            active={activeSettingsSection === section}
+            onClick={() => onOpenSettingsSection(section)}
+          />
+        ))}
+      </nav>
+    ));
     return (
       <aside
         className={cn(
@@ -166,26 +191,14 @@ export function AppSidebar({
             onClick={onBackFromSettings}
           />
         </nav>
-        {collapsed ? null : (
+        {collapsed ? settingsNavigation : (
           <SettingsSearchNavigation
             developerOptionsEnabled={developerOptionsEnabled}
             onSelect={(entry) => onSelectSettingsSearchResult ? onSelectSettingsSearchResult(entry) : onOpenSettingsSection(entry.section)}
           >
-            <div className="px-3 pb-1 pt-4 text-xs font-medium text-muted-foreground">{t("settings.navPersonal")}</div>
-            <nav className="mt-2 space-y-0.5">
-              {settingsNavItems.map((item) => (
-                <SidebarNavButton
-                  key={item.section}
-                  icon={item.icon}
-                  label={item.label}
-                  active={activeSettingsSection === item.section}
-                  onClick={() => onOpenSettingsSection(item.section)}
-                />
-              ))}
-            </nav>
+            {settingsNavigation}
           </SettingsSearchNavigation>
         )}
-        {collapsed ? <nav className="mt-4 space-y-0.5">{settingsNavItems.map((item) => <SidebarNavButton key={item.section} icon={item.icon} label={item.label} active={activeSettingsSection === item.section} onClick={() => onOpenSettingsSection(item.section)} />)}</nav> : null}
       </aside>
     );
   }
@@ -467,6 +480,7 @@ function SidebarNavButton({
       onClick={onClick}
       data-vrcforge-sidebar-nav={semanticId}
       aria-label={label}
+      aria-current={active ? "page" : undefined}
       data-app-tooltip={label}
       className={cn(
         "flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-sm transition-colors",

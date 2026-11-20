@@ -54,8 +54,9 @@ const feedback = await read("src/components/settings/support-feedback-panel.tsx"
 
 assert.ok(workspace.includes("<DiagnosticsSettingsPanel"));
 assert.ok(
-  workspace.indexOf("<DiagnosticsSettingsPanel") < workspace.indexOf('{visibleSection === "developer"'),
-  "normal diagnostics must render in General before the developer-only section",
+  workspace.indexOf('{visibleSection === "about"') < workspace.indexOf("<DiagnosticsSettingsPanel")
+    && workspace.indexOf("<DiagnosticsSettingsPanel") < workspace.indexOf('{visibleSection === "permissions"'),
+  "normal diagnostics must render under About & Support",
 );
 assert.equal((workspace.match(/<DiagnosticsSettingsPanel/g) || []).length, 1);
 assert.ok(workspace.includes("developerOptionsEnabled={developerOptionsEnabled}"));

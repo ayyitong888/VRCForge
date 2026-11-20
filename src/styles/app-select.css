@@ -4,6 +4,10 @@
     appearance: base-select;
   }
 
+  :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"]) {
+    align-items: center;
+  }
+
   :where(select:not([multiple]):not([size]), select:not([multiple])[size="1"])::picker(select) {
     inline-size: max(anchor-size(width), 12rem);
     min-inline-size: 0;

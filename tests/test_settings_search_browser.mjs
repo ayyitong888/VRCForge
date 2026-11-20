@@ -38,13 +38,14 @@ const props = {
 };
 function Fixture() {
  const [section,setSection] = useState('general'); const [selection,setSelection] = useState(null); const [developer,setDeveloper] = useState(false);
+ const [collapsed, setCollapsed] = useState(false);
  const [apiProvider,setApiProvider] = useState('chatgpt');
  const [visionEnabled,setVisionEnabled] = useState(false);
  const select = entry => {setSection(entry.section);setSelection(previous=>({entry,requestId:(previous?.requestId||0)+1}));};
- window.fixture = {select, setDeveloper, apiProvider, setApiProvider, visionEnabled, setVisionEnabled, language:code=>i18n.changeLanguage(code), entries:SETTINGS_SEARCH_ENTRIES,
+ window.fixture = {select, setDeveloper, setCollapsed, apiProvider, setApiProvider, visionEnabled, setVisionEnabled, language:code=>i18n.changeLanguage(code), entries:SETTINGS_SEARCH_ENTRIES,
   search:query=>searchSettings(query,key=>i18n.t(key),developer), label:key=>i18n.t(key)};
- return <div style={{display:'grid',gridTemplateColumns:'260px minmax(0,1fr)',height:'100vh'}}>
- <AppSidebar collapsed={false} activeView='settings' activeSettingsSection={section} developerOptionsEnabled={developer}
+ return <div style={{display:'grid',gridTemplateColumns:(collapsed?'56px':'260px')+' minmax(0,1fr)',height:'100vh'}}>
+ <AppSidebar collapsed={collapsed} activeView='settings' activeSettingsSection={section} developerOptionsEnabled={developer}
   projectItems={[]} chatSidebar={{temporaryChats:[],testChats:[],projectChatsByPath:new Map()}}
   onOpenSettingsSection={next=>{setSelection(null);setSection(next);}} onSelectSettingsSearchResult={select} onBackFromSettings={()=>{}} />
  <SettingsWorkspace {...props} apiProvider={apiProvider} visionEnabled={visionEnabled} activeSection={section} developerOptionsEnabled={developer} searchSelection={selection}/>
@@ -53,12 +54,12 @@ function Fixture() {
 createRoot(document.getElementById('root')).render(<Fixture/>);
 `}, bundle:true,write:false,format:'esm',jsx:'automatic',define:{'process.env.NODE_ENV':'"test"'}});
 const css = await postcss([tailwindcss]).process('@tailwind base;\n@tailwind components;\n@tailwind utilities;', {from:'src/styles.css'});
-const theme = await readFile('src/theme.css','utf8');
+const appStyles = (await readFile('src/theme.css','utf8')) + (await readFile('src/styles/app-select.css','utf8'));
 const writes=[];
 const server=createServer((req,res)=>{
  if(req.method !== 'GET') writes.push(req.url);
  if(req.url==='/fixture.js'){res.setHeader('Content-Type','text/javascript');res.end(bundle.outputFiles[0].text);}
- else if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end('<!doctype html><style>'+theme+'\n'+css.css+'</style><div id="root"></div><script type="module" src="/fixture.js"></script>');}
+ else if(req.url==='/'){res.setHeader('Content-Type','text/html');res.end('<!doctype html><style>'+appStyles+'\n'+css.css+'</style><div id="root"></div><script type="module" src="/fixture.js"></script>');}
  else if(req.url?.includes('telegram')){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({configured:false,enabled:false,state:'disabled',ownerId:0,projects:[],proxyMode:'environment'}));}
  else if(req.url?.includes('data-root')){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({path:'/fixture',writable:true,inProgramFiles:false,migrated:false}));}
  else {res.statusCode=404;res.end('{}');}
@@ -67,12 +68,50 @@ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 let browser;
 try {
  browser=await chromium.launch({headless:true,channel:process.env.VRCFORGE_BROWSER_CHANNEL||'msedge'});
- const page=await browser.newPage({viewport:{width:1280,height:900}}); const errors=[];
+ const page=await browser.newPage({viewport:{width:1280,height:900},deviceScaleFactor:1.5}); const errors=[];
  page.on('pageerror',e=>{errors.push(e.message);console.error(e.message);});
  await page.goto('http://127.0.0.1:'+server.address().port);
  const input=page.getByRole('searchbox'); await input.waitFor();
  const normalNav=page.locator('aside').getByRole('button',{name:'General',exact:true});
  assert.ok(await normalNav.isVisible());
+ const preferences=page.getByRole('navigation',{name:'Preferences'});
+ const agent=page.getByRole('navigation',{name:'Agent',exact:true});
+ const application=page.getByRole('navigation',{name:'Application'});
+ await preferences.getByRole('button',{name:'Chat',exact:true}).click();
+ assert.equal(await page.getByRole('heading',{name:'Chat',exact:true}).count(),1);
+ assert.equal(await page.locator('[data-settings-panel="enter"]').count(),1);
+ await preferences.getByRole('button',{name:'Notifications',exact:true}).click();
+ assert.equal(await page.locator('[data-settings-panel="sounds"]').count(),1);
+ await application.getByRole('button',{name:'About & Support',exact:true}).click();
+ assert.equal(await page.locator('[data-settings-panel="diagnostics"]').count(),1);
+ assert.equal(await page.locator('[data-settings-panel="developer-toggle"]').count(),1);
+ await agent.getByRole('button',{name:'Connectors',exact:true}).click();
+ const targetAgent=page.getByRole('combobox',{name:'Target Agent'});
+ const install=page.getByRole('button',{name:'Install MCP config',exact:true});
+ const targetBox=await targetAgent.boundingBox();
+ const installBox=await install.boundingBox();
+ assert.equal(targetBox.y,installBox.y,'connector select and install control share a top edge');
+ assert.equal(targetBox.height,installBox.height,'connector select and install control share a height');
+ assert.equal(await targetAgent.evaluate(element=>getComputedStyle(element).alignItems),'center');
+ await targetAgent.press('Space');
+ await page.getByRole('option',{name:'Codex App',exact:true}).waitFor();
+ await page.keyboard.press('ArrowDown');
+ await page.keyboard.press('Enter');
+ assert.equal(await targetAgent.inputValue(),'codexApp');
+ await targetAgent.selectOption('deepseekHarness');
+ if(process.env.VRCFORGE_SCREENSHOT_DIR){
+  await mkdir(process.env.VRCFORGE_SCREENSHOT_DIR,{recursive:true});
+  await page.screenshot({path:process.env.VRCFORGE_SCREENSHOT_DIR+'/settings-connectors-wide.png'});
+ }
+ await page.setViewportSize({width:580,height:820});
+ assert.ok((await install.boundingBox()).y>(await targetAgent.boundingBox()).y,'install wraps under the select in narrow content');
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ if(process.env.VRCFORGE_SCREENSHOT_DIR) await page.screenshot({path:process.env.VRCFORGE_SCREENSHOT_DIR+'/settings-connectors-narrow.png'});
+ await page.evaluate(()=>window.fixture.setCollapsed(true));
+ await preferences.getByRole('button',{name:'General',exact:true}).click();
+ assert.equal(await preferences.getByRole('button',{name:'General',exact:true}).getAttribute('aria-current'),'page');
+ await page.evaluate(()=>window.fixture.setCollapsed(false));
+ await page.setViewportSize({width:1280,height:900});
  // A help-text term, without a matching section name, must locate the actual field.
  await input.fill('oldest eligible');
  const countResult=page.locator('[data-settings-search-result="checkpoints:settings.checkpointArchiveCountLimit"]');
@@ -146,6 +185,12 @@ try {
  // All four locale resources work in the same real sidebar.
  for(const locale of ['zh-CN','zh-TW','ja-JP','en-US']){
   await page.evaluate(code=>window.fixture.language(code),locale);
+  await input.fill('');
+  for(const key of ['settings.navPersonal','settings.navAgent','settings.navApplication']){
+   const groupLabel=await page.evaluate(key=>window.fixture.label(key),key);
+   assert.notEqual(groupLabel,key);
+   assert.ok(await page.getByRole('navigation',{name:groupLabel,exact:true}).isVisible());
+  }
   const label=await page.evaluate(()=>window.fixture.label('settings.language'));
   await input.fill(label); assert.equal(await page.locator('[data-settings-search-result="language:settings.language"]').count(),1);
  }
