@@ -13,6 +13,7 @@ const bundle = await build({
     import {DesktopTitlebar} from './src/components/workspace/desktop-titlebar';
     import {WorkspaceHeader} from './src/components/workspace/workspace-header';
     import {LayoutSplitter} from './src/components/workspace/layout-splitter';
+    import {AppTooltipLayer} from './src/components/ui/app-tooltip';
     import messages from './src/locales/en-US.json';
     await i18n.use(initReactI18next).init({lng:'en',resources:{en:{translation:messages}}});
     window.calls=[];window.maximized=false;window.stops=0;
@@ -21,9 +22,9 @@ const bundle = await build({
       React.useEffect(()=>{document.documentElement.classList.toggle('dark',theme==='dark');},[theme]);
       return <main style={{height:'100vh',background:'linear-gradient(90deg,rgb(245,232,230),rgb(230,235,245))'}}>
         <DesktopTitlebar theme={theme} onToggleTheme={()=>setTheme(theme==='light'?'dark':'light')}/>
-        <div style={{display:'grid',height:'calc(100vh - 36px)',gridTemplateColumns:'240px 4px minmax(0,1fr)',gridTemplateRows:'minmax(0,1fr)'}}>
+        <div style={{display:'grid',height:'calc(100vh - 36px)',gridTemplateColumns:'240px 4px minmax(0,1fr) 4px 40px',gridTemplateRows:'minmax(0,1fr)'}}>
           <aside style={{height:'100%',overflow:'auto'}}>Navigation</aside>
-          <LayoutSplitter side="left" value={240} min={200} max={400} title="Resize sidebar" onPointerDown={()=>{}}/>
+          <LayoutSplitter side="left" value={240} min={200} max={400} title="Resize left sidebar" onPointerDown={()=>{}}/>
           <section data-workspace-panel style={{height:'100%',minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
             <WorkspaceHeader activeProjectLabel="Selected Project" activeView={view} activeChatTitle="Conversation" theme={theme}
               showDoctorStartupPrompt={false} hasStartupIssue={false} healthErrors={0} healthWarnings={0} startupIssue=""
@@ -32,7 +33,10 @@ const bundle = await build({
             <div style={{flex:1,minHeight:0,overflow:'auto'}}>Workspace</div>
             <footer data-test-composer style={{height:180,flexShrink:0}}><button>Send</button></footer>
           </section>
+          <LayoutSplitter side="right" value={280} min={0} max={400} title="Resize right sidebar" onPointerDown={()=>{}}/>
+          <aside>Tools</aside>
         </div>
+        <AppTooltipLayer/>
       </main>;}
     root.render(<Fixture/>);window.unmount=()=>root.unmount();
   ` }, bundle: true, write: false, format: "esm", jsx: "automatic",
@@ -72,9 +76,42 @@ try {
     drag:el.hasAttribute('data-tauri-drag-region'),
   }));
   assert.deepEqual(visual,{background:'rgba(0, 0, 0, 0)',border:'0px',height:36,versionBackground:'rgba(0, 0, 0, 0)',drag:true});
+  const tooltip = page.getByRole("tooltip");
+  const viewport = page.viewportSize();
+  for (const side of ["left", "right"]) {
+    const label = `Resize ${side} sidebar`;
+    const splitter = await page.getByRole("separator", {name:label}).boundingBox();
+    const x = splitter.x + 2;
+    for (const y of [splitter.y + 5, splitter.y + splitter.height / 2, viewport.height - 2]) {
+      await page.mouse.move(x, y);
+      await tooltip.waitFor();
+      assert.equal(await tooltip.textContent(), label);
+      const box = await tooltip.boundingBox();
+      const sideGap = side === "left" ? box.x - x : x - (box.x + box.width);
+      assert.ok(sideGap >= 8 && sideGap <= 16, `${side} tooltip is beside the pointer`);
+      assert.ok(Math.abs(box.y + box.height / 2 - y) <= box.height, `${side} tooltip follows pointer height`);
+      assert.ok(box.x >= 8 && box.x + box.width <= viewport.width - 8 && box.y >= 8 && box.y + box.height <= viewport.height - 8);
+    }
+    await page.mouse.move(x - 20, viewport.height - 2);
+    await tooltip.waitFor({state:"hidden"});
+  }
+  await page.mouse.move(242, 240);
+  await tooltip.waitFor();
+  await page.keyboard.press("Escape");
+  await page.mouse.move(242, 280);
+  await tooltip.waitFor({state:"hidden"});
+  await page.keyboard.press("Tab");
+  await tooltip.waitFor();
+  const keyboardTarget = page.locator(":focus");
+  assert.equal(await tooltip.textContent(), await keyboardTarget.getAttribute("data-app-tooltip"));
+  assert.equal(await keyboardTarget.getAttribute("aria-describedby"), await tooltip.getAttribute("id"));
+  const keyboardAnchor = await keyboardTarget.boundingBox();
+  const keyboardTooltip = await tooltip.boundingBox();
+  assert.ok(Math.abs(keyboardTooltip.y - keyboardAnchor.y - keyboardAnchor.height) <= 8, "focus tooltip remains anchored below the titlebar button");
+  await page.keyboard.press("Escape");
   for(const size of [{width:1100,height:720},{width:1320,height:860},{width:1920,height:1080}]) {
     await page.setViewportSize(size);
-    for(const selector of ['[data-workspace-panel]','[data-layout-splitter]','[data-test-composer]']) {
+    for(const selector of ['[data-workspace-panel]','[data-layout-splitter="left"]','[data-layout-splitter="right"]','[data-test-composer]']) {
       const rect=await page.locator(selector).boundingBox();
       assert.ok(rect.y+rect.height<=size.height+1,selector+' clipped below viewport');
     }
@@ -94,5 +131,5 @@ try {
   assert.deepEqual(await page.evaluate(()=>window.calls),['minimize','maximize','maximize','close']);
   await page.evaluate(()=>window.unmount());
   await page.waitForFunction(()=>window.stops===1);
-  console.log('Titlebar: runtime version, continuous background, theme, native control dispatch and listener cleanup passed.');
+  console.log('Titlebar: runtime version, continuous background, theme, native controls, listener cleanup, and sidebar cursor/keyboard tooltip behavior passed.');
 } finally {await browser?.close();await new Promise(resolve=>server.close(resolve));}

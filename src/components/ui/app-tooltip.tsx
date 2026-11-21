@@ -1,6 +1,7 @@
 import { useEffect, useId } from "react";
 
 const tooltipAttribute = "data-app-tooltip";
+const cursorPlacement = '[data-app-tooltip-placement="cursor"]';
 
 function tooltipTarget(target: EventTarget | null) {
   return target instanceof Element ? target.closest(`[${tooltipAttribute}]`) : null;
@@ -18,6 +19,7 @@ export function AppTooltipLayer() {
     tooltip.hidden = true;
     document.body.append(tooltip);
     let active: Element | null = null;
+    let cursor: Pick<PointerEvent, "clientX" | "clientY"> | undefined;
 
     const hide = () => {
       if (active) {
@@ -27,6 +29,7 @@ export function AppTooltipLayer() {
         else active.removeAttribute("aria-describedby");
       }
       active = null;
+      cursor = undefined;
       tooltip.hidden = true;
       mutations.disconnect();
       resize.disconnect();
@@ -40,27 +43,45 @@ export function AppTooltipLayer() {
       }
       if (tooltip.textContent !== label) tooltip.textContent = label;
       tooltip.hidden = false;
-      const anchor = active.getBoundingClientRect();
       const { clientWidth, clientHeight } = document.documentElement;
       const margin = 8;
-      const gap = 6;
-      const left = anchor.left + (anchor.width - tooltip.offsetWidth) / 2;
-      const above = anchor.top - tooltip.offsetHeight - gap;
-      const below = anchor.bottom + gap;
-      const preferBelow = active.closest('[data-app-tooltip-placement="below"]');
-      const pane = preferBelow?.closest("[data-chat-history-scroll]");
-      const bottomLimit = Math.min(clientHeight, pane?.getBoundingClientRect().bottom ?? clientHeight) - margin;
-      const top = (preferBelow && below + tooltip.offsetHeight <= bottomLimit) || above < margin ? below : above;
-      tooltip.style.left = `${Math.max(margin, Math.min(left, clientWidth - tooltip.offsetWidth - margin))}px`;
-      tooltip.style.top = `${Math.max(margin, Math.min(top, clientHeight - tooltip.offsetHeight - margin))}px`;
+      const { offsetWidth: width, offsetHeight: height } = tooltip;
+      let left: number;
+      let top: number;
+      if (cursor) {
+        const gap = 12;
+        const right = cursor.clientX + gap;
+        left = right + width <= clientWidth - margin ? right : cursor.clientX - gap - width;
+        top = cursor.clientY - height / 2;
+      } else {
+        const anchor = active.getBoundingClientRect();
+        const gap = 6;
+        left = anchor.left + (anchor.width - width) / 2;
+        const above = anchor.top - height - gap;
+        const below = anchor.bottom + gap;
+        const preferBelow = active.closest('[data-app-tooltip-placement="below"]');
+        const pane = preferBelow?.closest("[data-chat-history-scroll]");
+        const bottomLimit = Math.min(clientHeight, pane?.getBoundingClientRect().bottom ?? clientHeight) - margin;
+        top = (preferBelow && below + height <= bottomLimit) || above < margin ? below : above;
+      }
+      tooltip.style.left = `${Math.max(margin, Math.min(left, clientWidth - width - margin))}px`;
+      tooltip.style.top = `${Math.max(margin, Math.min(top, clientHeight - height - margin))}px`;
     };
 
     const mutations = new MutationObserver(refresh);
     const resize = new ResizeObserver(refresh);
-    const show = (target: Element) => {
-      if (target === active) return;
+    const show = (target: Element, pointer?: PointerEvent) => {
+      const position = pointer && target.matches(cursorPlacement)
+        ? { clientX: pointer.clientX, clientY: pointer.clientY }
+        : undefined;
+      if (target === active) {
+        cursor = position;
+        refresh();
+        return;
+      }
       hide();
       active = target;
+      cursor = position;
       // A native modal lives above the app's stacking contexts.
       (target.closest("dialog:modal") || document.body).append(tooltip);
       refresh();
@@ -73,11 +94,19 @@ export function AppTooltipLayer() {
     };
     const onPointerOver = (event: PointerEvent) => {
       const target = tooltipTarget(event.target);
-      if (event.pointerType !== "touch" && target && target !== tooltipTarget(event.relatedTarget)) show(target);
+      if (event.pointerType !== "touch" && target && target !== tooltipTarget(event.relatedTarget)) show(target, event);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (cursor && active && event.pointerType !== "touch" && tooltipTarget(event.target) === active) {
+        cursor = { clientX: event.clientX, clientY: event.clientY };
+        refresh();
+      }
     };
     const onPointerOut = (event: PointerEvent) => {
-      if (active && tooltipTarget(event.target) === active && tooltipTarget(event.relatedTarget) !== active
-        && !active.matches(":focus-visible")) hide();
+      if (active && tooltipTarget(event.target) === active && tooltipTarget(event.relatedTarget) !== active) {
+        if (active.matches(":focus-visible")) show(active);
+        else hide();
+      }
     };
     const onFocusIn = (event: FocusEvent) => {
       const target = tooltipTarget(event.target);
@@ -91,6 +120,7 @@ export function AppTooltipLayer() {
     };
 
     document.addEventListener("pointerover", onPointerOver, true);
+    document.addEventListener("pointermove", onPointerMove, true);
     document.addEventListener("pointerout", onPointerOut, true);
     document.addEventListener("focusin", onFocusIn, true);
     document.addEventListener("focusout", onFocusOut, true);
@@ -100,6 +130,7 @@ export function AppTooltipLayer() {
     window.addEventListener("blur", hide);
     return () => {
       document.removeEventListener("pointerover", onPointerOver, true);
+      document.removeEventListener("pointermove", onPointerMove, true);
       document.removeEventListener("pointerout", onPointerOut, true);
       document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("focusout", onFocusOut, true);
