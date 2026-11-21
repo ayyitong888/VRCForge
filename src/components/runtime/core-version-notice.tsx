@@ -1,4 +1,4 @@
-import { AlertTriangle, Check } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { UnityToolsHealthDetail } from "../../lib/api";
 
@@ -24,12 +24,7 @@ export function CoreVersionNotice({ detail, bridgeStatus, toolsStatus }: {
   const readiness = detail && typeof detail === "object" ? (detail as UnityToolsHealthDetail).readiness : undefined;
   const hasConnectionStatus = bridgeStatus !== undefined || toolsStatus !== undefined;
   if (!hasConnectionStatus && readiness?.ready !== false) return null;
-  if (hasConnectionStatus && (readiness?.ready ?? toolsStatus === "ok") && bridgeStatus === "ok") {
-    return <p className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground" data-unity-readiness="ready">
-      <Check className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
-      {t("workspace.toolsReady")}
-    </p>;
-  }
+  if (hasConnectionStatus && (readiness?.ready ?? toolsStatus === "ok") && bridgeStatus === "ok") return null;
   if (readiness?.ready !== false && !["ok", "warning", "error"].includes(bridgeStatus || "")) {
     return <p className="mb-2 px-1 text-xs text-muted-foreground" data-unity-readiness="checking">{t("workspace.unityConnectionChecking")}</p>;
   }

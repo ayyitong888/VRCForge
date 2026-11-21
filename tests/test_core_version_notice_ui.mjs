@@ -33,6 +33,10 @@ for (const locale of ["zh-CN", "zh-TW", "en-US", "ja-JP"]) {
   new Function("exports", "require", compiled)(exports, (id) =>
     id === "react-i18next" ? { useTranslation: () => ({ t }) } : require(id));
   const render = (detail) => renderToStaticMarkup(React.createElement(exports.CoreVersionNotice, { detail }));
+  const ready = renderToStaticMarkup(React.createElement(exports.CoreVersionNotice, {
+    detail: { readiness: { ready: true } }, bridgeStatus: "ok", toolsStatus: "ok",
+  }));
+  assert.equal(ready, "", `${locale}: readiness is shown only in the environment details`);
   assert.equal(render(null), "");
   assert.equal(render({ readiness: { ready: true } }), "");
   assert.equal(render({ readiness: { ready: true, blockerCode: "unity_compile_errors" } }), "");

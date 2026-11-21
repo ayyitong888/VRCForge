@@ -35,7 +35,7 @@ const bundle = await build({
         workspaceProjectType={projectType} projectWorkspace
         selectedProjectComponent={{status:"ok"}} backendComponent={{status:"ok"}} mcpPackageComponent={{status:"ok"}}
         unityBridgeComponent={{status:bridge}} unityInstanceComponent={{status:bridge}}
-        unityToolsComponent={{status:tools, detail:state === "checking" ? undefined : {readiness:{
+        unityToolsComponent={{status:tools, message:state === "ready" ? "Avatar tools are ready" : undefined, detail:state === "checking" ? undefined : {readiness:{
           ready:state === "ready", blockerCode:state === "offline" ? "unity_core_connection_failed" : "unknown",
         }}}}
         authorizationStatus={{source:"none",status:"unknown"}} agentProgress={[]}
@@ -51,7 +51,7 @@ const bundle = await build({
           onOpen: () => { window.reviewItemOpened = runtimeReview.id; } }}
         activeDesktopActions={[]} refreshUnityStatus={() => {}} providerTestAttempted={false}
         onHideSidebar={() => {}} onOpenPendingApprovals={() => window.approvalsOpened = true}
-        localizeHealthMessage={() => ""} />
+        localizeHealthMessage={(message) => message || ""} />
         <output data-review-owner>{active}</output>
         {reveal && currentChat && <AgentQuestionCard
           questions={filterQuestionsForRuntimeScope(questions, {sessionId: currentChat.sessionId, projectRoot: currentChat.projectPath || ""})}
@@ -80,7 +80,7 @@ try {
   const blocked = page.locator('[data-unity-readiness="blocked"]');
   await blocked.waitFor({ timeout: 4000 });
   assert.match(await blocked.innerText(), /Unity is connected.*Avatar tools are unavailable/);
-  assert.match(await blocked.innerText(), /Check the selected project and Unity Console/);
+  assert.match(await blocked.innerText(), /Switch to Unity and check whether the project is still loading or waiting for you to respond/);
   assert.equal(await blocked.locator("details").evaluate((element) => element.open), false);
   const details = page.getByRole("button", { name: "Environment details" });
   assert.equal(await details.getAttribute("aria-expanded"), "false");
@@ -90,10 +90,12 @@ try {
   await approval.click();
   assert.equal(await page.evaluate(() => window.approvalsOpened), true);
   assert.equal(await details.getAttribute("aria-expanded"), "false");
-  await details.click();
-  await page.locator("[data-vrcforge-project-environment]").waitFor();
   await show("ready", 0);
-  await page.locator('[data-unity-readiness="ready"]').waitFor();
+  await details.click();
+  const toolsStatus = page.locator('[data-vrcforge-project-environment] [data-vrcforge-status="tools"]');
+  await toolsStatus.locator(".bg-emerald-500").waitFor({ state: "attached", timeout: 4000 });
+  assert.equal(await page.locator("[data-unity-readiness]").count(), 0);
+  assert.match(await toolsStatus.innerText(), /Avatar tools are ready/);
   assert.equal(await approval.count(), 0);
   await show("offline", 0);
   const unavailable = page.locator('[data-unity-readiness="unavailable"]');
