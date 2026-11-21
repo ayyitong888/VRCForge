@@ -38,7 +38,6 @@ export const CONTEXT_COMPACTION_HARD_LIMIT_RATIO = 0.95;
 
 const DEFAULT_MINIMUM_REDUCTION_RATIO = 0.1;
 const DEFAULT_MINIMUM_REDUCTION_FLOOR_TOKENS = 1024;
-const DEFAULT_POST_COMPACTION_TARGET_RATIO = 0.5;
 const DEFAULT_ATTACHMENT_METADATA_TOKENS = 16;
 const DEFAULT_FALLBACK_MAX_ENTRIES = 9;
 const DEFAULT_FALLBACK_TARGET_CHARACTERS = 6000;
@@ -213,7 +212,6 @@ export type ContextCompactionPolicyOverrides = {
   triggerRatio?: number;
   minimumReductionRatio?: number;
   minimumReductionFloorTokens?: number;
-  targetRatio?: number;
   attachmentMetadataTokens?: number;
 };
 
@@ -224,7 +222,6 @@ export type ResolvedContextCompactionPolicy = {
   hardLimitRatio: number;
   minimumReductionRatio: number;
   minimumReductionFloorTokens: number;
-  targetRatio: number;
   attachmentMetadataTokens: number;
 };
 
@@ -235,7 +232,6 @@ export const DEFAULT_CONTEXT_COMPACTION_POLICY: Readonly<ResolvedContextCompacti
   hardLimitRatio: CONTEXT_COMPACTION_HARD_LIMIT_RATIO,
   minimumReductionRatio: DEFAULT_MINIMUM_REDUCTION_RATIO,
   minimumReductionFloorTokens: DEFAULT_MINIMUM_REDUCTION_FLOOR_TOKENS,
-  targetRatio: DEFAULT_POST_COMPACTION_TARGET_RATIO,
   attachmentMetadataTokens: DEFAULT_ATTACHMENT_METADATA_TOKENS,
 });
 
@@ -264,7 +260,6 @@ export type ContextCompactionBudgetDecision = {
   triggerTokens?: number;
   hardLimitTokens?: number;
   minimumReductionTokens?: number;
-  targetAfterTokens?: number;
   sourceDigest?: string;
   duplicateSource: boolean;
   previousReductionTokens?: number;
@@ -459,11 +454,6 @@ export function resolveContextCompactionPolicy(
     1,
     Math.floor(finiteNumber(overrides.minimumReductionFloorTokens) ?? DEFAULT_CONTEXT_COMPACTION_POLICY.minimumReductionFloorTokens),
   );
-  const targetRatio = clamp(
-    finiteNumber(overrides.targetRatio) ?? DEFAULT_CONTEXT_COMPACTION_POLICY.targetRatio,
-    0.1,
-    Math.min(CONTEXT_COMPACTION_PREFIRE_RATIO, triggerRatio - 0.1),
-  );
   const attachmentMetadataTokens = Math.max(
     0,
     Math.ceil(finiteNumber(overrides.attachmentMetadataTokens) ?? DEFAULT_CONTEXT_COMPACTION_POLICY.attachmentMetadataTokens),
@@ -475,7 +465,6 @@ export function resolveContextCompactionPolicy(
     hardLimitRatio: CONTEXT_COMPACTION_HARD_LIMIT_RATIO,
     minimumReductionRatio,
     minimumReductionFloorTokens,
-    targetRatio,
     attachmentMetadataTokens,
   };
 }
@@ -542,7 +531,6 @@ export function evaluateCompactionBudget(
     policy.minimumReductionFloorTokens,
     Math.ceil(limit * policy.minimumReductionRatio),
   );
-  const targetAfterTokens = Math.floor(limit * policy.targetRatio);
   const level = compactionLevel(projectedRatio, policy);
   const sameWindow = input.previousCompaction?.contextLimit === limit;
   const previousStatus = input.previousCompaction?.status;
@@ -584,7 +572,6 @@ export function evaluateCompactionBudget(
     triggerTokens,
     hardLimitTokens,
     minimumReductionTokens,
-    targetAfterTokens,
     sourceDigest: input.sourceDigest,
     duplicateSource,
     previousReductionTokens,

@@ -26,24 +26,29 @@ import React, { useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatWorkspace } from "./src/components/chat/chat-workspace";
 import { initializeI18n } from "./src/i18n";
+import { buildChatHistory } from "./src/lib/conversation-utils";
 const noop = () => {};
 function Fixture() {
   const [scenario, setScenario] = useState("cold");
   const [draft, setDraft] = useState("");
+  const [reminder, setReminder] = useState({});
   const conversationEndRef = useRef(null);
   window.setChatScenario = setScenario;
-  const conversation = scenario === "warm"
+  window.setReminderFixture = setReminder;
+  const conversation = scenario === "warm" || scenario === "ready"
     ? [{ id: "warm-user", type: "user", text: "Original cached conversation body" }]
     : [];
+  window.getModelHistory = () => buildChatHistory(conversation, (key) => key);
   return <ChatWorkspace
     projectPromptTitle="New task welcome"
-    conversationPending={scenario !== "new"}
+    conversationPending={scenario === "cold" || scenario === "warm"}
     conversationPendingMessage="Loading selected conversation…"
     input={draft} setInput={setDraft} sending={false} queueAllowed={false}
     onSubmit={noop} onSwitchMode={noop} commands={[]} actions={[]} onAction={noop} disabledReason=""
     attachments={[]} onAttachFiles={noop} onRemoveAttachment={noop}
     providerLabel="" model="" activeGoal={null} onGoalChanged={noop} goalEndpoint=""
     projects={[]} onBindProject={noop} conversation={conversation} queued={[]}
+    compaction={reminder.compaction} resourceChatId={reminder.chatId} readOnlyHistory={reminder.preview}
     agentQuestions={[]} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
     onBackgroundGoalCatchUpRendered={noop} onBackgroundGoalProviderWarningsRendered={noop}
     onBackgroundGoalCatchUpDismiss={noop} onAnswerQuestion={noop}
@@ -78,7 +83,7 @@ await new Promise((resolveListen) => server.listen(0, "127.0.0.1", resolveListen
 let browser;
 try {
   browser = await chromium.launch({ headless: true, channel: process.env.VRCFORGE_BROWSER_CHANNEL || "msedge" });
-  const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+  const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1100, height: 800 } });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
@@ -98,11 +103,51 @@ try {
   assert.match(await warmMessage.innerText(), /Original cached conversation body/, "warm cached transcript renders its original message while authority is pending");
   assert.equal(await loading.count(), 0, "warm cached transcript does not show the cold loading skeleton");
   assert.equal(await composer.inputValue(), "unsent draft survives transcript changes", "draft survives rendering the cached transcript");
+  const initialModelHistory = await page.evaluate(() => window.getModelHistory());
 
   await page.evaluate(() => window.setChatScenario("new"));
   await welcome.waitFor();
   assert.equal(await loading.count(), 0, "a genuinely empty new conversation has no transcript loading state");
   assert.equal(await composer.inputValue(), "unsent draft survives transcript changes", "draft survives returning to the empty new conversation");
+
+  const newChatReminder = page.getByRole("dialog", { name: "这段对话已经很长" });
+  const reminderState = ({ chatId = "older-chat", generation = "first", trigger = "auto", status = "applied",
+    afterTokens = 51, contextLimit = 100, preview = false } = {}) => page.evaluate(
+    async ({ chatId, generation, trigger, status, afterTokens, contextLimit, preview }) => {
+      window.setChatScenario("ready");
+      window.setReminderFixture({ chatId, preview, compaction: { generation, status, trigger, afterTokens, contextLimit } });
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }, { chatId, generation, trigger, status, afterTokens, contextLimit, preview },
+  );
+  for (const state of [{ afterTokens: 49 }, { afterTokens: 50 }, { afterTokens: null }, { contextLimit: null },
+    { contextLimit: 0 }, { status: "compacting" }, { status: "failed" }, { status: "cancelled" }, { preview: true }]) {
+    await reminderState(state);
+    assert.equal(await newChatReminder.count(), 0, `no suggestion for ${JSON.stringify(state)}`);
+  }
+  await reminderState();
+  await newChatReminder.waitFor({ timeout: 4000 });
+  assert.equal(await newChatReminder.count(), 1, "applied compaction above half the window shows one dialog");
+  assert.equal(await newChatReminder.evaluate((node) => Boolean(node.closest("form, [data-chat-history-scroll]"))), false);
+  assert.equal(await newChatReminder.getByRole("button").count(), 1, "the only action acknowledges the reminder");
+  assert.deepEqual(await page.evaluate(() => window.getModelHistory()), initialModelHistory);
+  assert.equal(await composer.inputValue(), "unsent draft survives transcript changes");
+
+  await newChatReminder.getByRole("button", { name: "知道了", exact: true }).click();
+  await newChatReminder.waitFor({ state: "detached" });
+  assert.equal(await warmMessage.count(), 1, "acknowledgment keeps the selected conversation");
+  await reminderState({ chatId: "another-chat", afterTokens: 23 });
+  await reminderState();
+  assert.equal(await newChatReminder.count(), 0, "returning to the same generation does not reopen the dialog");
+  await page.reload();
+  await loading.waitFor();
+  await reminderState();
+  assert.equal(await newChatReminder.count(), 0, "the acknowledgment survives a reload for the same generation");
+  await reminderState({ generation: "second", afterTokens: 50 });
+  assert.equal(await newChatReminder.count(), 0, "even a new generation at exactly half stays quiet");
+  await reminderState({ generation: "third", trigger: "manual" });
+  await newChatReminder.waitFor();
+  await page.keyboard.press("Escape");
+  await newChatReminder.waitFor({ state: "detached" });
 
   const evidenceDirectory = process.env.VRCFORGE_CHAT_CACHE_EVIDENCE_DIR;
   if (evidenceDirectory) {
@@ -111,7 +156,7 @@ try {
     await page.screenshot({ path: screenshotPath, fullPage: true });
   }
   assert.deepEqual(errors, [], "real ChatWorkspace renders without browser errors");
-  console.log("PASS ChatWorkspace cold transcript loading, warm cached body, new-chat welcome, and draft retention");
+  console.log("PASS ChatWorkspace transcript loading, draft retention, and user-only post-compaction reminder");
 } finally {
   await browser?.close();
   server.closeAllConnections();

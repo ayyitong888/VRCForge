@@ -28,6 +28,26 @@ const RUNNING_ENTER_ACTION_KEY = "vrcforge_running_enter_action";
 const INPUT_PREDICTION_KEY = "vrcforge_input_prediction";
 const INPUT_PREDICTION_MODELS_KEY = "vrcforge_input_prediction_models";
 const INPUT_PREDICTION_REASONING_KEY = "vrcforge_input_prediction_reasoning";
+const NEW_SESSION_REMINDER_KEY_PREFIX = "vrcforge_new_session_reminder:";
+const dismissedNewSessionReminders = new Map<string, string>();
+
+export function isNewSessionReminderDismissed(chatId: string, generation: string): boolean {
+  if (dismissedNewSessionReminders.get(chatId) === generation) return true;
+  try {
+    return window.localStorage.getItem(NEW_SESSION_REMINDER_KEY_PREFIX + chatId) === generation;
+  } catch {
+    return false;
+  }
+}
+
+export function dismissNewSessionReminder(chatId: string, generation: string): void {
+  dismissedNewSessionReminders.set(chatId, generation);
+  try {
+    window.localStorage.setItem(NEW_SESSION_REMINDER_KEY_PREFIX + chatId, generation);
+  } catch {
+    // The acknowledgment still applies to the current window.
+  }
+}
 
 export function loadInputPredictionEnabled(): boolean {
   try {

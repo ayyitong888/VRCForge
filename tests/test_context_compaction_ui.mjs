@@ -80,9 +80,9 @@ test("roadmap ratios are 75/85/90/95 and boundary equality is inclusive", () => 
   assert.equal(decisionAt(901, { policy: { triggerRatio: 0.9 } }).level, "compact");
   assert.equal(policy.resolveContextCompactionPolicy({ triggerRatio: 0.99 }).triggerRatio, 0.9);
   assert.equal(policy.resolveContextCompactionPolicy({ triggerRatio: 0.8 }).triggerRatio, 0.8);
-  const lowTrigger = decisionAt(800, { policy: { triggerRatio: 0.75, targetRatio: 0.75 } });
-  assert.equal(lowTrigger.targetAfterTokens, 650);
-  assert.equal(decisionAt(850).targetAfterTokens, 500);
+  assert.equal(decisionAt(850).triggerTokens, 850);
+  assert.equal("targetAfterTokens" in decisionAt(850), false);
+  assert.equal("targetRatio" in policy.DEFAULT_CONTEXT_COMPACTION_POLICY, false);
 });
 
 test("unknown windows and missing exact occupancy never auto-trigger", () => {
@@ -283,7 +283,7 @@ test("same source in the same window is suppressed and reduction requirements sc
   assert.equal(largerWindow.duplicateSource, false);
   assert.equal(largerWindow.shouldCompact, true);
   assert.equal(largerWindow.minimumReductionTokens, 10000);
-  assert.equal(largerWindow.targetAfterTokens, 50000);
+  assert.equal(largerWindow.triggerTokens, 85000);
 });
 
 test("bounded fallback keeps the primary goal and newest complete turns without slicing entries", () => {

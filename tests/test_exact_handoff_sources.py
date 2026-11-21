@@ -46,7 +46,7 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
                 return {"nodes": {"inspect": {"text": "Inspect the newer observation"}}}
             metadata["_recordUsage"]("fixture", {"exact": True, "inputTokens": 12, "outputTokens": 8})
             return compact_context(history, summarizer=summarize, handoff=True, has_todo=metadata["hasTodo"],
-                                   input_mode="native", target_tokens=metadata["targetTokens"],
+                                   input_mode="native",
                                    prior_handoff=metadata["_priorHandoff"], recovery_history=metadata["_recoveryHistory"],
                                    handoff_archive_indices=metadata["_handoffArchiveIndices"],
                                    task_inputs=metadata["_handoffTaskInputs"])

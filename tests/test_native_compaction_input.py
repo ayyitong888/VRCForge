@@ -162,7 +162,6 @@ def test_native_runtime_accepts_bounded_provider_summary_and_keeps_current_instr
             assert metadata["inputMode"] == "native"
             self.result = compact_context(history, input_mode=metadata["inputMode"],
                 real_context_limit=metadata["realContextLimit"],
-                target_tokens=metadata["targetTokens"],
                 summarizer=lambda prompt: {"summary": "Earlier read only work; awaiting user review."})
             return self.result
 

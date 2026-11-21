@@ -27,7 +27,8 @@ test('actual failed projection includes completed answer and reserves exact late
  const before=JSON.stringify(raw);
  const h=harness(raw.state.items);const outcome=await h.run();
  assert.equal(h.requests.length,1);
- assert.ok(h.requests[0].targetTokens > 0 && h.requests[0].targetTokens <= 250000);
+ assert.equal("targetTokens" in h.requests[0],false);
+ assert.equal(h.requests[0].realContextLimit,500000);
  assert.equal(h.requests[0].history.length,6);
  assert.equal(h.requests[0].history.filter(x=>x.role==='user').length,5);
  assert.equal(h.requests[0].history.at(-1).role,'agent');
@@ -76,11 +77,12 @@ test('budget probe cannot collide with a stored compaction id',async()=>{
  } finally {Date.now=now;Math.random=random;}
 });
 
-test('a small residual budget preserves source history and the returned handoff',async()=>{
+test('a small context window preserves the source and the handoff without a summary target',async()=>{
  const h=harness([user('old','first'),agent('older','中'.repeat(76)),user('latest','last '.repeat(150)),agent('last','y')]);
  assert.equal((await h.run(100)).status,'applied');
- assert.equal(h.requests[0].targetTokens,1);
+ assert.equal("targetTokens" in h.requests[0],false);
+ assert.equal(h.requests[0].realContextLimit,100);
  assert.ok(h.requests[0].history.some(item=>item.text==='first'));
- assert.equal(h.chat.compaction.failureClass,'context_target_unreachable');
- assert.ok(h.chat.compaction.afterTokens > h.chat.compaction.targetAfterTokens);
+ assert.equal(h.chat.compaction.failureClass,undefined);
+ assert.ok(h.chat.compaction.afterTokens > h.chat.compaction.contextLimit);
 });

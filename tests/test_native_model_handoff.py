@@ -1,6 +1,8 @@
 import json
 from pathlib import PureWindowsPath
 
+import pytest
+
 from agent_handoff_graph import HANDOFF_GRAPH_SCHEMA, parse_handoff_graph
 from context_compaction import LEGACY_HANDOFF_PREFIX, MODEL_HANDOFF_PREFIX, NATIVE_TRANSACTION_PREFIX, compact_context
 from tests.test_native_context_compaction import fixture
@@ -39,7 +41,7 @@ class ModelHandoff:
                 "inspect": _node("task", "Review the next authorized evidence.", "pending"),
             }, "edges": [["inspect", "blocked_by", "readback"], ["inspect", "belongs_to", "goal"]]})
         return compact_context(entries, handoff=metadata["handoff"], has_todo=metadata["hasTodo"],
-                               real_context_limit=metadata["realContextLimit"], target_tokens=metadata["targetTokens"],
+                               real_context_limit=metadata["realContextLimit"],
                                recovery_history=metadata.get("_recoveryHistory"),
                                handoff_archive_indices=metadata.get("_handoffArchiveIndices"),
                                prior_handoff=metadata.get("_priorHandoff"),
@@ -154,7 +156,7 @@ def test_verified_handoff_larger_than_the_old_graph_limit_is_kept_in_one_call():
         }})
     result = compact_context([{"role": "tool", "text": "OLD_TOOL_ROW"}], handoff=True, real_context_limit=240_000, summarizer=summarize)
     assert result["ok"] is True and len(attempts) == 1
-    assert result["targetTokens"] == 120_000
+    assert "targetTokens" not in result
     assert estimate_compaction_prompt_tokens(result["summary"]) > 12_000
     assert "OLD_TOOL_ROW" in attempts[0]
     assert parse_handoff_graph(result["summary"])["nodes"]["readback"]["text"] == evidence
@@ -377,7 +379,7 @@ def test_verbatim_assistant_reply_is_never_cut_to_force_fit():
         _, guard = planner.maybe_compact_native_context(_request(planner, before), turn, force=True)
     assert guard["blocked"] is True
     assert turn.compaction["applied"] is True and turn.compaction["blocked"] is True
-    assert turn.compaction["failureClass"] == "context_target_unreachable"
+    assert turn.compaction["failureClass"] == "still_over_threshold"
     assert turn.compaction["afterTokens"] > turn.compaction["hardLimitTokens"]
     saved = turn.snapshot()
     reply_id = saved["handoffLastReplyId"]
@@ -409,7 +411,7 @@ def test_native_above_trigger_below_hard_sends_once_without_resummarizing_unchan
         pressure = turn.compaction
         assert pressure["applied"] and not pressure["blocked"]
         assert pressure["triggerTokens"] <= pressure["afterTokens"] < pressure["hardLimitTokens"]
-        assert pressure["failureClass"] == "context_target_unreachable"
+        assert "failureClass" not in pressure
         turn.persist_runtime_state(request["messages"][-1])
         request = _request(planner, turn.snapshot())
         unchanged, guard = planner.maybe_compact_native_context(request, turn)
@@ -420,7 +422,8 @@ def test_native_above_trigger_below_hard_sends_once_without_resummarizing_unchan
     assert len(model.requests) == len(compactor.calls) == 1
 
 
-def test_native_budget_folds_completed_branch_and_retains_full_graph_after_restart(tmp_path):
+@pytest.mark.parametrize(("detail_repetitions", "folded"), [(5_000, False), (12_000, True)])
+def test_native_budget_folds_completed_branch_only_when_needed(tmp_path, detail_repetitions, folded):
     from agent_native_history_store import NativeHistoryStore
     from tests.test_native_context_compaction import Compactor
     from tests.test_native_handoff_blocks import _state
@@ -428,7 +431,7 @@ def test_native_budget_folds_completed_branch_and_retains_full_graph_after_resta
     pointer = {"type": "receipt", "id": "verified-detail"}
     summary = json.dumps({"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
         "complete": _node("task", "Completed export", "done", evidence=[pointer]),
-        "detail": _node("task", "Verified rows " * 12_000, "done", evidence=[pointer]),
+        "detail": _node("task", "Verified rows " * detail_repetitions, "done", evidence=[pointer]),
         "pending": _node("task", "Review the exported result", "pending"),
     }, "edges": [["detail", "belongs_to", "complete"], ["pending", "depends_on", "detail"]]})
     store = NativeHistoryStore(tmp_path)
@@ -438,11 +441,15 @@ def test_native_budget_folds_completed_branch_and_retains_full_graph_after_resta
     with planner.bind_turn({}):
         planner.maybe_compact_native_context(_request(planner, turn.snapshot()), turn, force=True)
     assert turn.compaction["applied"] is True
-    assert turn.compaction["afterTokens"] <= turn.compaction["targetAfterTokens"]
+    assert turn.compaction["afterTokens"] < turn.compaction["triggerTokens"]
     restarted = _state(store)
     saved = restarted.native_conversation("s", binding="b")
     node_graph = next(row["content"] for row in saved["messages"] if row.get("content", "").startswith(MODEL_HANDOFF_PREFIX))
     graph = parse_handoff_graph(node_graph.removeprefix(MODEL_HANDOFF_PREFIX))
+    if not folded:
+        assert turn.compaction["afterTokens"] > turn.compaction["contextLimit"] // 2
+        assert graph == parse_handoff_graph(summary)
+        return
     assert set(graph["nodes"]) == {"complete", "pending"}
     assert graph["edges"] == [["pending", "depends_on", "complete"]]
     graph_id = next(item["id"] for item in graph["nodes"]["complete"]["evidence"] if item["type"] == "message")
@@ -467,7 +474,7 @@ def test_native_pressure_preserves_both_long_endpoints_and_retrieves_middle_afte
     with planner.bind_turn({}):
         planner.maybe_compact_native_context(_request(planner, turn.snapshot()), turn, force=True)
     assert turn.compaction["applied"] is True
-    assert turn.compaction["afterTokens"] <= turn.compaction["targetAfterTokens"]
+    assert turn.compaction["afterTokens"] < turn.compaction["triggerTokens"]
     restarted = _state(store)
     saved = restarted.native_conversation("s", binding="b")
     first, middle, latest = [row for row in saved["messages"] if row.get("handoffUser")]

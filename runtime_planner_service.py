@@ -65,7 +65,6 @@ CONTEXT_USAGE_SCHEMA = "vrcforge.context_usage.v1"
 RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
 RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO = 0.85
 RUNTIME_CONTEXT_COMPACTION_HARD_RATIO = 0.95
-RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO = 0.50
 EXPOSURE_LAYER_PLANNING = "planning"
 EXPOSURE_LAYER_EXECUTION = "execution"
 RUNTIME_REPLY_LANGUAGE_INSTRUCTION = (
@@ -2570,7 +2569,6 @@ class RuntimePlannerService:
             "contextLimit": context_limit,
             "triggerTokens": trigger_tokens,
             "hardLimitTokens": hard_limit_tokens,
-            "targetAfterTokens": min(trigger_tokens - 1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO)),
             "usageExact": usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None,
             "providerOverheadTokens": provider_overhead,
             "requestTokens": request_tokens,
@@ -2636,6 +2634,7 @@ class RuntimePlannerService:
             and guard.get("softProjectedTokens", guard["beforeTokens"]) < guard["triggerTokens"]
         ):
             return request, guard
+        fit_limit = guard["triggerTokens"] - 1
         snapshot = native_turn.snapshot()
         metadata = {**guard, "attempts": 0, "trigger": "manual" if force else "auto", "phase": phase}
         if expected_snapshot is not None and expected_snapshot != snapshot:
@@ -2696,7 +2695,7 @@ class RuntimePlannerService:
             from agent_handoff_operations import native_handoff_operations, native_handoff_package_selector_archive
             skeleton = copy_native_request(request, {"messages": [*current_context, *runtime_messages]})
             base_tokens = self.native_context_guard(skeleton, context_usage=context_usage)["beforeTokens"]
-            text_budget = max(0, guard["targetAfterTokens"] - base_tokens)
+            text_budget = max(0, fit_limit - base_tokens)
             source_messages, blocks = native_turn.handoff_projection(snapshot, character_budget=text_budget,
                                                                      measure=estimate_runtime_context_tokens,
                                                                      preserve_user_text=True)
@@ -2751,7 +2750,7 @@ class RuntimePlannerService:
                     provider_receipt(usage)
 
             result = dict(self._compactor.compact(tuple(entries), {
-                "trigger": metadata["trigger"], "phase": metadata["phase"], "targetTokens": guard["targetAfterTokens"],
+                "trigger": metadata["trigger"], "phase": metadata["phase"],
                 "inputMode": "native",
                 "handoff": True,
                 "_priorHandoff": prior_handoff,
@@ -2795,7 +2794,7 @@ class RuntimePlannerService:
 
             graph_valid = parse_handoff_graph(summary) is not None
             full_summary = summary
-            summary, blocks, after_tokens = fit_handoff_post_context(summary, blocks, guard["targetAfterTokens"], measured_tokens)
+            summary, blocks, after_tokens = fit_handoff_post_context(summary, blocks, fit_limit, measured_tokens)
             reduction = guard["beforeTokens"] - after_tokens
             # Unstructured adapters still use the normal reduction gate. A
             # verified graph is durable even when fixed context exhausts the window.
@@ -2817,7 +2816,7 @@ class RuntimePlannerService:
             metadata.update({"applied": True, "blocked": blocked, "afterTokens": after_tokens,
                              "entryCount": result.get("entryCount"), "retainedEntryCount": result.get("retainedEntryCount"),
                              "summaryDigest": summary_digest, "fidelity": result.get("fidelity"),
-                             "failureClass": "context_target_unreachable" if after_tokens > guard["targetAfterTokens"] else result.get("fallbackReason"),
+                             "failureClass": "still_over_threshold" if blocked else result.get("fallbackReason"),
                              "retainedSummaryCharacters": len(MODEL_HANDOFF_PREFIX) + len(summary)})
             if recovery is not None:
                 metadata["recovery"] = recovery
@@ -4345,9 +4344,9 @@ class RuntimePlannerService:
             projected_tokens = provider_overhead + next_prompt_tokens
             trigger_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO + 0.999999))
             hard_limit_tokens = max(1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_HARD_RATIO + 0.999999))
-            target_tokens = min(trigger_tokens - 1, int(context_limit * RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO))
-            if projected_tokens < trigger_tokens and (not adopt_handoff or projected_tokens <= target_tokens):
+            if projected_tokens < trigger_tokens:
                 return history, None, False
+            fit_limit = trigger_tokens - 1
 
             metadata: dict[str, object] = {
                 "schema": RUNTIME_CONTEXT_COMPACTION_SCHEMA,
@@ -4358,7 +4357,6 @@ class RuntimePlannerService:
                 "contextLimit": context_limit,
                 "triggerTokens": trigger_tokens,
                 "hardLimitTokens": hard_limit_tokens,
-                "targetAfterTokens": target_tokens,
                 "usageExact": usage_exact and last_input_tokens is not None and previous_prompt_tokens is not None,
                 "providerOverheadTokens": provider_overhead,
                 "measurement": "provider_usage_plus_prompt_estimate"
@@ -4372,7 +4370,7 @@ class RuntimePlannerService:
                     return history, None, False
                 blocks = project_legacy_handoff_blocks(
                     history, is_handoff=lambda row: model_handoff_payload(row) is not None,
-                    character_budget=target_tokens, measure=estimate_runtime_context_tokens, preserve_user_text=True,
+                    character_budget=fit_limit, measure=estimate_runtime_context_tokens, preserve_user_text=True,
                 )
                 human_rows = {row["messageId"]: row for row in blocks["legacyRows"] if row.get("_handoffUser")}
                 blocks["legacyRows"] = [
@@ -4386,11 +4384,11 @@ class RuntimePlannerService:
                                    "_handoffArchive": projection["messageArchive"]}
                     return rows
 
-                summary, blocks, measured = fit_handoff_post_context(summary, blocks, target_tokens,
+                summary, blocks, measured = fit_handoff_post_context(summary, blocks, fit_limit,
                     lambda text, projection: provider_overhead + prompt_tokens(adopted_rows(text, projection), loop_state))
                 blocked = measured >= hard_limit_tokens
                 metadata.update({"afterTokens": measured, "blocked": blocked, "attempts": 0,
-                                 "failureClass": "context_target_unreachable" if measured > target_tokens else None})
+                                 "failureClass": "still_over_threshold" if blocked else None})
                 return adopted_rows(summary, blocks), metadata, blocked
 
             if compact_port is None or not attempt_compaction:
@@ -4449,7 +4447,7 @@ class RuntimePlannerService:
                         "role": "user", "messageId": current_id, "text": str(input_text or params.get("message") or message),
                         "handoffAttachments": ensure_list(ensure_dict(observe.get("turn")).get("attachments")),
                     }, current_source=current_source, is_handoff=lambda row: model_handoff_payload(row) is not None,
-                    character_budget=max(0, target_tokens - provider_overhead -
+                    character_budget=max(0, fit_limit - provider_overhead -
                                          estimate_runtime_context_tokens(projection_overhead) - 64),
                     measure=estimate_runtime_context_tokens,
                     public_reply=observe.get("_handoffLastPublicReply")
@@ -4486,7 +4484,7 @@ class RuntimePlannerService:
                         [(row["role"], row["text"]) for row in retained_history], ensure_ascii=False))
                     graph_row["_handoffPendingPrefix"] = len(retained_loop_state)
                     if ("data:image/" in pending_group or
-                            estimated_context + fixed_rows + estimate_runtime_context_tokens(pending_group) + 64 > target_tokens):
+                            estimated_context + fixed_rows + estimate_runtime_context_tokens(pending_group) + 64 > fit_limit):
                         pending_group = legacy_transaction_pointer(blocks["messageArchive"], current_id, pending_group)
                     retained_history.append({"role": "runtime", "text": pending_group})
                 loop_entries = []
@@ -4523,7 +4521,6 @@ class RuntimePlannerService:
                         "language": str(params.get("language") or ""),
                         "provider": str(params.get("provider") or ""),
                         "model": str(params.get("model") or ""),
-                        "targetTokens": target_tokens,
                         "realContextLimit": context_limit,
                         "handoff": True,
                         "_priorHandoff": prior_handoff,
@@ -4569,7 +4566,7 @@ class RuntimePlannerService:
 
                 graph_valid = parse_handoff_graph(summary) is not None
                 full_summary = summary
-                summary, blocks, after_tokens = fit_handoff_post_context(summary, blocks, target_tokens, measured_tokens)
+                summary, blocks, after_tokens = fit_handoff_post_context(summary, blocks, fit_limit, measured_tokens)
                 replacement_history = replacement_rows(summary, blocks)
                 minimum_reduction = max(1024, int(context_limit * 0.10 + 0.999999))
                 blocked = after_tokens >= hard_limit_tokens
@@ -4598,7 +4595,7 @@ class RuntimePlannerService:
                             24 * 60 * 60 * 1000,
                         ),
                         "retainedSummaryCharacters": bounded_runtime_compaction_integer(len(summary), 100_000),
-                        "failureClass": "context_target_unreachable" if after_tokens > target_tokens else result.get("fallbackReason"),
+                        "failureClass": "still_over_threshold" if blocked else result.get("fallbackReason"),
                         "blocked": blocked,
                         "_handoffArchive": blocks["messageArchive"],
                     }

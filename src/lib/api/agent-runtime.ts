@@ -19,11 +19,6 @@ export type ChatHistoryEntry = {
   references?: Array<{ id: string; text: string }>;
 };
 
-export type AgentHistoryContextBudget = {
-  targetTokens?: number;
-  realContextLimit?: number;
-};
-
 export type AgentHistoryCompactionPhase =
   | "standalone"
   | "pre_turn"
@@ -42,9 +37,7 @@ export type CompactAgentHistoryOptions = {
   sessionId?: string;
   projectRoot?: string;
   requireNative?: boolean;
-  targetTokens?: number;
   realContextLimit?: number;
-  contextBudget?: AgentHistoryContextBudget;
 };
 
 export type AgentHistoryCompactionRedaction = {
@@ -1008,12 +1001,7 @@ export async function compactAgentHistory(
   const options: CompactAgentHistoryOptions = Array.isArray(historyOrOptions)
     ? { history: historyOrOptions, signal }
     : historyOrOptions;
-  const { signal: requestSignal, contextBudget, ...requestBody } = options;
-  const body = {
-    ...requestBody,
-    targetTokens: requestBody.targetTokens ?? contextBudget?.targetTokens,
-    realContextLimit: requestBody.realContextLimit ?? contextBudget?.realContextLimit,
-  };
+  const { signal: requestSignal, ...body } = options;
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<CompactAgentHistoryResponse>("compact_agent_history", {
       request: { body, timeoutMs: 120000 },

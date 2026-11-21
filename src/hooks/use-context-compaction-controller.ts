@@ -152,9 +152,7 @@ export function useContextCompactionController({
     if (request.trigger === "manual") {
       const projectedTokens = estimateHistoryTokens(history)
         + estimateIncomingContextTokens(request.incomingText, request.incomingAttachments);
-      decision = { ...decision, projectedTokens,
-        targetAfterTokens: contextLimit.known ? Math.floor(contextLimit.limit * 0.5) : undefined,
-      };
+      decision = { ...decision, projectedTokens };
     }
 
     if (request.trigger === "auto" && !decision.shouldCompact) {
@@ -171,7 +169,6 @@ export function useContextCompactionController({
               beforeTokens: decision.projectedTokens,
               contextLimit: contextLimit.limit,
               minimumReductionTokens: decision.minimumReductionTokens,
-              targetAfterTokens: decision.targetAfterTokens,
               provider: request.provider,
               model: request.model,
               startedAt: new Date().toISOString(),
@@ -198,8 +195,7 @@ export function useContextCompactionController({
 
     let generation = `compact-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     while (snapshotItems.some((item) => item.id === generation)) generation += "-";
-    // The API budgets summary text; the decision budgets the whole replacement.
-    // Project the same retained history and reserve the summary entry framing.
+    // Use the same replacement projection to identify the items being summarized.
     const retainedProjection = buildReplacementItems(snapshotItems, {
       id: generation, type: "compact", text: "", detail: "", status: "completed",
     });
@@ -211,10 +207,6 @@ export function useContextCompactionController({
       ...buildChatHistory(summarySourceItems, t, snapshotItems, true),
       ...buildDurableCompactionStateEntries(summarySourceItems),
     ] : [];
-    const summaryTargetTokens = decision.targetAfterTokens === undefined ? undefined : Math.max(1,
-      decision.targetAfterTokens - estimateHistoryTokens(buildChatHistory(retainedProjection, t))
-      - estimateIncomingContextTokens(request.incomingText, request.incomingAttachments) - 8,
-    );
     if (!summaryHistory.length && !mayCompactNative) {
       if (request.trigger === "manual") setError(t("compact.noContent"));
       return { status: "skipped", decision, chat: snapshot };
@@ -237,7 +229,6 @@ export function useContextCompactionController({
       beforeTokens,
       contextLimit: contextLimit.known ? contextLimit.limit : undefined,
       minimumReductionTokens: decision.minimumReductionTokens,
-      targetAfterTokens: decision.targetAfterTokens,
       provider: request.provider,
       model: request.model,
       prefireOutcome: prefireHit ? "hit" : undefined,
@@ -269,7 +260,6 @@ export function useContextCompactionController({
         sessionId: snapshot.sessionId,
         projectRoot: snapshot.projectPath,
         requireNative,
-        targetTokens: summaryTargetTokens,
         realContextLimit: contextLimit.known ? contextLimit.limit : undefined,
       });
       compactionResponseReceived = true;
@@ -302,7 +292,6 @@ export function useContextCompactionController({
       });
       const afterTokens = payload.afterTokens ?? (estimateHistoryTokens(buildChatHistory(replacementItems, t))
         + estimateIncomingContextTokens(request.incomingText, request.incomingAttachments));
-      const targetAfterTokens = payload.targetAfterTokens ?? decision.targetAfterTokens;
       const latestBeforeCommit = getChatById(request.chatId);
       if (latestBeforeCommit && hasUnresolvedRuntimeStateRef.current?.(request.chatId, latestBeforeCommit.sessionId, allowPendingApproval)) {
         markLatestGeneration(request.chatId, generation, "failed", "runtime_pending", t("compact.failed"), undefined, compactionProviderUsage);
@@ -324,7 +313,6 @@ export function useContextCompactionController({
         summaryDigest: payload.summaryDigest,
         beforeTokens: payload.beforeTokens ?? beforeTokens,
         afterTokens,
-        targetAfterTokens,
         entryCount: payload.entryCount ?? history.length,
         retainedEntryCount: payload.retainedEntryCount,
         fidelity: payload.fidelity || "full",
@@ -332,8 +320,7 @@ export function useContextCompactionController({
         latencyMs: boundedCompactionLatencyMs(startState.startedAt, appliedAt),
         retainedSummaryCharacters: boundedCompactionSummaryCharacters(summary.length),
         completedAt: appliedAt,
-        failureClass: payload.failureClass || payload.fallbackReason || (targetAfterTokens !== undefined && afterTokens > targetAfterTokens
-          ? "context_target_unreachable" : undefined),
+        failureClass: payload.failureClass || payload.fallbackReason,
         providerUsage: compactionProviderUsage,
       };
       const committed = updateChatIfRevision(request.chatId, workingRevision, (chat) => ({

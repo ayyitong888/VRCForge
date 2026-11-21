@@ -534,12 +534,7 @@ def estimate_compaction_prompt_tokens(prompt: str) -> int:
     return _estimate_entry_tokens({"role": "user", "text": prompt})
 
 
-def _effective_budget(target_tokens: int | None, real_context_limit: int | None, *, handoff: bool) -> int:
-    if handoff:
-        context_target = real_context_limit // 2 if real_context_limit else None
-        if target_tokens is None:
-            return context_target or 0
-        return max(0, min(int(target_tokens), context_target if context_target is not None else int(target_tokens)))
+def _effective_budget(target_tokens: int | None, real_context_limit: int | None) -> int:
     requested = max(64, min(int(target_tokens or DEFAULT_TARGET_TOKENS), MAX_INPUT_BUDGET_TOKENS))
     if real_context_limit:
         context_bound = max(64, int(real_context_limit) // 2)
@@ -1198,7 +1193,7 @@ def compact_context(
         int(real_context_limit) if real_context_limit and int(real_context_limit) > 0 else None
     )
     normalized_language = _safe_language(language)
-    budget = _effective_budget(target_tokens, normalized_real_context_limit, handoff=handoff)
+    budget = 0 if handoff else _effective_budget(target_tokens, normalized_real_context_limit)
     estimated_tokens = sum(_estimate_entry_tokens(entry) for entry in entries)
     task_text_limit = min(2400, normalized_real_context_limit // 16) if normalized_real_context_limit else 2400
     goal_sources = {next((row["id"] for row in task_inputs if row["source"] != "agent_relay"), None)}
@@ -1272,7 +1267,6 @@ def compact_context(
         if handoff_graph:
             handoff_refs.update((item["type"], item["id"]) for node in handoff_graph["nodes"].values()
                                 for item in node.get("evidence", ()))
-    # targetTokens is the summary output goal, not the source page size.
     # Reserve room for framing and output under the verified context limit.
     # A verified context limit reserves the other half for the summary output
     # and provider framing.  The fixed 64k cap remains the safe default when
@@ -1280,8 +1274,6 @@ def compact_context(
     request_budget = (max(64, normalized_real_context_limit // 2)
                       if normalized_real_context_limit else MAX_INPUT_BUDGET_TOKENS)
     if handoff and normalized_real_context_limit:
-        # A post-compaction target describes the full resumed turn. It is not
-        # the summarizer's output reservation or an independent graph quota.
         request_budget = normalized_real_context_limit * 95 // 100
     elif input_mode == "native" and normalized_real_context_limit:
         request_budget = max(0, normalized_real_context_limit * 95 // 100 - budget)
@@ -1530,7 +1522,7 @@ def compact_context(
         "trigger": trigger,
         "phase": phase,
         "language": normalized_language,
-        "targetTokens": budget,
+        **({} if handoff else {"targetTokens": budget}),
         "realContextLimit": normalized_real_context_limit,
         "estimatedInputTokens": estimated_tokens,
         "maxRequestEstimatedTokens": max(request_estimates, default=0),

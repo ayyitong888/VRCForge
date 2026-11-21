@@ -653,6 +653,7 @@ from provider_vision_service import (
 from runtime_provider_steering import interrupt_for_steer
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION as RUNTIME_PLANNER_EXECUTION_LAYER,
+    RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO,
     PlannerCatalogSnapshot,
     PlannerModelResult,
     PlannerProviderNotConfiguredError,
@@ -3682,7 +3683,7 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
             result = compact_context(
                 history, summarizer=summarizer, source_digest=request.source_digest,
                 trigger=request.trigger, phase=request.phase, language=request.language,
-                provider=settings.llm_provider, model=settings.llm_model, target_tokens=request.target_tokens,
+                provider=settings.llm_provider, model=settings.llm_model,
                 real_context_limit=request.real_context_limit, handoff=True, has_todo=bool(todo_items), todo_items=todo_items,
                 prior_handoff=prior_handoff, recovery_history=request.history if prior_handoff is not None else None,
                 handoff_archive_indices=archive_indices if prior_handoff is not None else None,
@@ -3691,22 +3692,25 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
                 goal_bindings=AGENT_GATEWAY.goal.handoff_goal_bindings(request.session_id or "", request.project_root or ""),
                 goal_acceptances=AGENT_GATEWAY.goal.handoff_acceptances(request.session_id or "", request.project_root or ""),
             )
-            if result.get("ok") and (request.target_tokens is not None or request.real_context_limit):
+            fit_limits = []
+            if request.target_tokens is not None:
+                fit_limits.append(max(0, request.target_tokens))
+            if request.real_context_limit is not None and request.real_context_limit > 0:
+                fit_limits.append(math.ceil(request.real_context_limit * RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO) - 1)
+            if result.get("ok") and fit_limits:
                 from agent_native_handoff_blocks import fit_handoff_post_context
 
-                # The browser supplies the portion of its low-water target
-                # left after measuring retained history and incoming content.
-                target = result["targetTokens"]
+                fit_limit = min(fit_limits)
                 full_summary = result["summary"]
                 summary, _, estimated = fit_handoff_post_context(full_summary, {
                     "messages": [], "messageArchive": {}, "humanUserMessageIndices": [],
-                }, target, lambda text, _: estimate_compaction_prompt_tokens(text))
+                }, fit_limit, lambda text, _: estimate_compaction_prompt_tokens(text))
                 if summary != full_summary:
                     result["summary"] = summary
                     result["summaryDigest"] = hashlib.sha256(summary.encode("utf-8")).hexdigest()
                     result["completeness"]["inlineSummaryComplete"] = False
-                if estimated > target:
-                    result["fallbackReason"] = "context_target_unreachable"
+                if estimated > fit_limit:
+                    result["fallbackReason"] = "still_over_threshold"
         result["providerUsage"] = aggregate_compact_provider_usage(
             provider_receipts, provider=settings.llm_provider, model=settings.llm_model
         )

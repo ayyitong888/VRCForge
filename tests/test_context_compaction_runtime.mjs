@@ -80,7 +80,7 @@ const mergeCompactionProviderUsage = (prior, current) => {
   if (!result.exact) result.unavailableReason = prior.unavailableReason || current.unavailableReason || "provider_usage_incomplete";
   return result;
 };
-const evaluateCompactionBudget = () => globalThis.__compactionHarness.budget || ({ shouldCompact: true, level: "hard-limit", reason: "test", projectedTokens: 120, targetAfterTokens: 100, minimumReductionTokens: 1 });
+const evaluateCompactionBudget = () => globalThis.__compactionHarness.budget || ({ shouldCompact: true, level: "hard-limit", reason: "test", projectedTokens: 120, minimumReductionTokens: 1 });
 ${implementation}
 `;
 const compiled = ts.transpileModule(harness, {
@@ -206,7 +206,7 @@ test("manual native compaction keeps the pending approval on its original sessio
   assert.equal(chat.sessionId, "session-old");
   assert.equal(chat.compaction.beforeTokens, 900);
   assert.equal(chat.compaction.afterTokens, 425);
-  assert.equal(chat.compaction.targetAfterTokens, 500);
+  assert.equal("targetAfterTokens" in chat.compaction, false);
   assert.deepEqual(chat.items.filter(item => item.type !== "compact"), transcript);
   assert.deepEqual(chat.items.find(item => item.type === "compact").summarizedItemIds, ["agent-1", "agent-2", "agent-3"]);
 });
@@ -231,7 +231,7 @@ test("manual compact of a small conversation does not require saving ten percent
   const chat = makeChat();
   const harness = makeHarness(chat, async () => undefined);
   harness.budget = { shouldCompact: false, level: "normal", projectedTokens: 12099,
-    minimumReductionTokens: 50000, targetAfterTokens: 0 };
+    minimumReductionTokens: 50000 };
   harness.compactAgentHistoryState.promise = async () => ({ summary: "summary", summaryDigest: "digest", entryCount: 2,
     providerUsage: { exact: true, inputTokens: 100, outputTokens: 10, totalTokens: 110 } });
   const outcome = await harness.render(() => false).compactChat({ ...request(), contextLimit: 500000 });
@@ -380,7 +380,7 @@ test("legacy compact state without a receipt remains unknown when a later compac
   assert.equal(chat.compaction.providerUsage.unavailableReason, "provider_usage_missing");
 });
 
-test("a returned handoff is retained even when the active projection cannot reach its target", async () => {
+test("a returned handoff is retained even when the active projection grows", async () => {
   const chat = makeChat();
   const harness = makeHarness(chat, async () => undefined);
   harness.compactAgentHistoryState.promise = async () => ({
@@ -391,7 +391,7 @@ test("a returned handoff is retained even when the active projection cannot reac
   });
   const result = await harness.render(() => false).compactChat(request());
   assert.equal(result.status, "applied");
-  assert.equal(chat.compaction.failureClass, "context_target_unreachable");
+  assert.equal(chat.compaction.failureClass, undefined);
   assert.equal(typeof chat.compaction.beforeTokens, "number");
   assert.equal(typeof chat.compaction.afterTokens, "number");
   assert.ok(chat.compaction.afterTokens > chat.compaction.beforeTokens);

@@ -58,7 +58,6 @@ def test_partial_summary_reaches_model_and_full_source_remains_pageable():
         def compact(self, history, metadata):
             return compact_context(history, input_mode="native",
                                    real_context_limit=metadata["realContextLimit"],
-                                   target_tokens=metadata["targetTokens"],
                                    summarizer=lambda _: "Recent tool transaction.")
 
     state, planner, model, turn = fixture(Compactor())

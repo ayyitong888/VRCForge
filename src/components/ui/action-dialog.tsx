@@ -8,7 +8,7 @@ export type DialogAction = {
   confirmLabel: string;
   destructive?: boolean;
   initialValue?: string;
-  onConfirm: (value: string) => void;
+  onConfirm?: (value: string) => void;
 };
 
 export function ActionDialog({ action, onClose }: { action: DialogAction; onClose: () => void }) {
@@ -39,14 +39,14 @@ export function ActionDialog({ action, onClose }: { action: DialogAction; onClos
         event.preventDefault();
         const value = input.current?.value ?? "";
         close();
-        action.onConfirm(value);
+        action.onConfirm?.(value);
       }}>
         <h2 id={titleId} className="text-base font-semibold">{action.title}</h2>
         {action.description && <p id={descriptionId} className="mt-2 break-words text-sm text-muted-foreground">{action.description}</p>}
         {action.initialValue !== undefined && <input ref={input} aria-labelledby={titleId} defaultValue={action.initialValue}
           className="mt-4 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />}
         <div className="mt-5 flex justify-end gap-2">
-          <Button type="button" variant="outline" onClick={close}>{t("common.cancel")}</Button>
+          {action.onConfirm && <Button type="button" variant="outline" onClick={close}>{t("common.cancel")}</Button>}
           <Button type="submit" variant={action.destructive ? "danger" : "primary"}>{action.confirmLabel}</Button>
         </div>
       </form>

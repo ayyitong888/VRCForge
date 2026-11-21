@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "
 import { useTranslation } from "react-i18next";
 import { updateAgentGoal } from "../../lib/api";
 import type { AgentApproval, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
-import type { RunningEnterAction } from "../../lib/app-preferences";
+import { dismissNewSessionReminder, isNewSessionReminderDismissed, type RunningEnterAction } from "../../lib/app-preferences";
 import type {
   ApprovalActionState,
   ChatAttachment,
@@ -22,6 +22,7 @@ import { ChatMarkdown } from "./chat-markdown";
 import { SessionHandoffCard } from "./session-handoff-card";
 import { SessionHandoffSend, type SessionHandoffTargetChat } from "./session-handoff-send";
 import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-card";
+import { ActionDialog } from "../ui/action-dialog";
 import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
@@ -40,6 +41,20 @@ import { isExternalRuntimeStream } from "../../lib/runtime-stream-owner";
 import { automaticTurnWaitStage, runtimeTurnActivityStatus } from "../../lib/runtime-run-status";
 import { chatCompactionStatusForDisplay } from "../../lib/chat-compaction-state";
 import { useQuestionDockPresentation } from "../../lib/chat-question-dock";
+
+function NewSessionReminder({ chatId, generation }: { chatId: string; generation: string }) {
+  const { t } = useTranslation();
+  const [dismissed, setDismissed] = useState(() => isNewSessionReminderDismissed(chatId, generation));
+  if (dismissed) return null;
+  return <ActionDialog onClose={() => {
+    dismissNewSessionReminder(chatId, generation);
+    setDismissed(true);
+  }} action={{
+    title: t("compact.newSessionReminderTitle"),
+    description: t("compact.newSessionReminderDescription"),
+    confirmLabel: t("compact.newSessionReminderButton"),
+  }} />;
+}
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -752,8 +767,16 @@ export function ChatWorkspace({
 
   const visibleCompaction = chatCompactionStatusForDisplay(compaction, conversation);
   const hasHistory = conversation.length > 0;
+  const showNewSessionReminder = hasHistory && !conversationPending && !readOnlyHistory
+    && visibleCompaction?.status === "applied"
+    && typeof visibleCompaction.afterTokens === "number" && Number.isFinite(visibleCompaction.afterTokens)
+    && typeof visibleCompaction.contextLimit === "number" && Number.isFinite(visibleCompaction.contextLimit)
+    && visibleCompaction.contextLimit > 0 && visibleCompaction.afterTokens > visibleCompaction.contextLimit / 2;
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
+      {showNewSessionReminder && resourceChatId && visibleCompaction.generation ? (
+        <NewSessionReminder key={`${resourceChatId}\n${visibleCompaction.generation}`} chatId={resourceChatId} generation={visibleCompaction.generation} />
+      ) : null}
       {!hasHistory ? (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-5 md:p-8" data-empty-chat-content>
           <div className="w-full max-w-3xl">
