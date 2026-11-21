@@ -86,6 +86,7 @@ try {
   assert.equal(await entries.count(), firstTodos.filter(todo => todo.status !== "completed").length + 1,
     "opening a pending todo leaves its task status unchanged");
   assert.equal(await targetButton.getAttribute("data-app-tooltip"), null);
+  assert.equal(await targetButton.locator("..").locator('[role="img"]').getAttribute("data-app-tooltip"), null);
   await targetButton.hover();
   assert.equal(await targetButton.evaluate(button => getComputedStyle(button).textDecorationLine), "none");
   assert.equal(await rows.first().getByRole("button").evaluate(button => getComputedStyle(button).textDecorationLine), "line-through");

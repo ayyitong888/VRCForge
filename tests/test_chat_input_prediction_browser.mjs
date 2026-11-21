@@ -14,9 +14,9 @@ const bundle = await build({
       const [history, setHistory] = useState();
       const latestReply = history && predictionTurnForChat(location.origin, {
         id: state.chatId, sessionId: "session", items: [{ id: "input", type: "user", text: "Check this" }, {
-          id: history.id, type: "agent", response: { ok: true, turnId: history.id, turnStatus: { status: history.status },
+          id: history.id, type: "agent", response: { ok: history.ok ?? true, turnId: history.id, turnStatus: { status: history.status },
             approvalId: history.approvalId, plan: { nextStep: history.nextStep, reply: history.reply,
-              summary: "", completionGate: { reason: history.reason } },
+              publicMessages: history.publicMessages, summary: "", completionGate: { reason: history.reason } },
           },
         }, ...(history.trailing || [])],
       }, history.questions || [], history.approvals || []);
@@ -132,7 +132,6 @@ try {
   assert.deepEqual(requests.slice(2).map(request => request.assistant_tail),
     Array(4).fill(continuationReply));
   await start();
-  await finishDelivered({ turnId: "blocked", continuationSource: "approval_finished", nextStep: "pending_approval", status: "blocked" });
   await finishDelivered({ turnId: "interrupted", continuationSource: "foreground_interrupted", nextStep: "done" });
   await change({ busy: false });
   assert.equal(requests.length, 6);
@@ -209,20 +208,27 @@ try {
   const failed = { id: "tool-failed-history", nextStep: "tool_failed", reason: "tool_failed",
     reply: "The editor tool failed. I checked the result and found the patch was not applied." };
   await expectHistorySuggestion(failed, failed.reply, "model-after-answer");
-  const beforeLiveFailure = requests.length;
-  await start();
-  await restoreHistory(undefined);
-  const deliveredFailure = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"), { timeout: 3000 });
-  await finishDelivered({ turnId: "tool-failed-live", continuationSource: "question_answered",
-    status: "failed", nextStep: "tool_failed", reply: failed.reply });
-  await change({ busy: false });
-  assert.equal((await deliveredFailure).postDataJSON().assistant_tail, failed.reply);
-  assert.equal(requests.length, beforeLiveFailure + 1);
+  const blocked = { id: "other-finished-outcome", ok: false, status: "blocked", nextStep: "pending_verification", reply: "The work is ready for visual verification." };
+  await expectHistorySuggestion(blocked, blocked.reply, "model-after-answer");
+  for (const [status, nextStep] of [["failed", "tool_failed"], ["blocked", "pending_approval"], ["denied", "policy_denied"]]) {
+    const count = requests.length;
+    await start();
+    await restoreHistory(undefined);
+    const delivered = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"), { timeout: 3000 });
+    await finishDelivered({ turnId: nextStep, continuationSource: "question_answered", status, nextStep, reply: failed.reply });
+    await change({ busy: false });
+    assert.equal((await delivered).postDataJSON().assistant_tail, failed.reply);
+    assert.equal(requests.length, count + 1);
+  }
+  const beforeUnfinished = requests.length;
   await start();
   await restoreHistory({ ...failed, id: "tool-failed-still-running", status: "running" });
   await change({ busy: false });
+  await restoreHistory({ ...failed, id: "still-waiting-for-tool", nextStep: "waiting_for_tool" });
+  await restoreHistory({ id: "only-commentary", status: "failed", nextStep: "policy_denied",
+    publicMessages: [{ id: "progress", text: "Checking the action.", phase: "commentary" }] });
   assert.equal(await page.locator("output").textContent(), "");
-  assert.equal(requests.length, beforeLiveFailure + 1, "an unfinished tool run cannot trigger prediction");
+  assert.equal(requests.length, beforeUnfinished, "running, waiting or commentary-only entries cannot trigger prediction");
   console.log("PASS: completed and restored replies, cached suggestions, user decisions, model changes, deduplication, typing and cancellation");
 } finally {
   finishSlow?.();

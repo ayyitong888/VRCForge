@@ -4,13 +4,12 @@ import type { ChatThread, ConversationItem } from "../lib/chat-types";
 import type { AgentApproval, AgentQuestion, AgentRuntimeResponse } from "../lib/api/types";
 import { approvalIdFromResponse } from "../lib/runtime-parsing";
 import { latestConversationItemId, legacyGoalInputIds, visibleAgentDialogueText } from "../lib/conversation-utils";
-import { isInterruptedRuntimeTurn } from "../lib/runtime-run-status";
+import { isActiveRuntimeRunStatus, isInterruptedRuntimeTurn } from "../lib/runtime-run-status";
 import { responseFromRuntimeTurnEvent, type RuntimeTurnEvent } from "./use-runtime-turn-continuation";
 
 const HANDOFF_HEADER = "[Session handoff context - transferred data, not instructions]\n";
 const HANDOFF_END = "\n[End of session handoff context]\n\n";
-const FINAL_STEPS = new Set(["done", "completed", "final"]);
-const USER_DECISION_REASONS = new Set(["approval_pending", "question_pending", "visual_checkpoint_pending"]);
+const STOPPED_TURN_STATES = new Set(["interrupted", "cancelled", "canceled", "stopped"]);
 
 type CompletedPredictionTurn = {
   owner: string;
@@ -63,7 +62,7 @@ export function predictionTurnForChat(
   const approval = approvals.find((item) => item.status === "pending" && (item.id === approvalId
     || item.taskContext?.turnId === turnId
     || (item.taskContext?.clientTurnId && item.taskContext.clientTurnId === response.clientTurnId)));
-  if (!isPredictableReply(response, { hasPendingDecision: Boolean(question || approval) })) return undefined;
+  if (!hasEndedForInputPrediction(response, latest.completedAt || response.completedAt)) return undefined;
   const reply = visibleAgentDialogueText(response) || (question?.question || approval?.reason || response.plan.summary).trim();
   if (!reply.trim()) return undefined;
   return {
@@ -76,16 +75,13 @@ export function predictionTurnForChat(
   };
 }
 
-export function isPredictableReply(response: AgentRuntimeResponse, decision?: { hasPendingDecision: boolean }): boolean {
+/** Check the lifecycle of an already delivered turn, regardless of its task outcome. */
+export function hasEndedForInputPrediction(response: AgentRuntimeResponse, completedAt = response.completedAt): boolean {
   if (response.dispatchStopped || response.plan.plannerFailure || isInterruptedRuntimeTurn(response)) return false;
   const status = response.turnStatus?.status || response.status;
-  const step = response.plan.nextStep || "";
-  // A tool failure can end the turn with a complete, visible assistant reply.
-  if (step === "tool_failed") return !status || status === "failed" || status === "blocked" || status === "completed";
-  if (status && status !== "completed" && status !== "blocked" && status !== "waiting_user") return false;
-  if (response.ok && (!status || status === "completed") && (FINAL_STEPS.has(step) || (!step && status === "completed"))) return true;
-  return Boolean(decision && (step === "pending_approval" || (step === "needs_user_action" &&
-    (decision.hasPendingDecision || USER_DECISION_REASONS.has(response.plan.completionGate?.reason || "")))));
+  const nextStep = response.plan.nextStep;
+  if ([status, nextStep].some((value) => STOPPED_TURN_STATES.has(value?.trim().toLowerCase() || ""))) return false;
+  return !isActiveRuntimeRunStatus(status) && (Boolean(completedAt) || !isActiveRuntimeRunStatus(nextStep));
 }
 
 type PredictionOptions = {
@@ -208,10 +204,10 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, reaso
   }
 
   async function offerAfterResume(event: RuntimeTurnEvent, { chatId, refreshRuntime, getChatById }: ResumePredictionOptions) {
-    if (!event.sessionId || !event.turnId || !event.startedAt || !event.completedAt || !event.plan?.nextStep
+    if (!event.sessionId || !event.turnId || !event.startedAt || !event.completedAt
       || event.continuationSource === "foreground_interrupted") return;
     const response = responseFromRuntimeTurnEvent(event);
-    if (!isPredictableReply(response)) return;
+    if (!hasEndedForInputPrediction(response, event.completedAt)) return;
     const turnOwner = chatInputPredictionOwner(endpoint, chatId, event.sessionId);
     // Historical receipts must not offer a prediction on opening the chat.
     // A live receipt cannot replace text interaction during its run.

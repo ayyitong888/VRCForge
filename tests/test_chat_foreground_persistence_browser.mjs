@@ -221,6 +221,7 @@ try {
       window.__dismissPrediction();
       window.__nextResponse = {
         status: undefined, turnStatus: { status }, approvalId: "approval-fixture", approval_id: "approval-fixture",
+        plan: { reply: "fixture reply", summary: "fixture", nextStep: status === "completed" ? "done" : "pending_approval", planner: "fixture", shellNeeded: false },
         write: { status: status === "completed" ? "executed" : "pending_approval", approvalId: "approval-fixture" },
       };
       return window.__submit(turnId, "Apply the change");
@@ -228,17 +229,13 @@ try {
     await page.waitForFunction(id => window.__items().some(item => item.type === "agent"
       && item.response.clientTurnId === id), turnId);
     const ghost = page.locator("[data-composer-input-suggestion]");
-    if (status === "completed") {
-      await ghost.waitFor({ state: "visible", timeout: 3000 });
-      assert.equal(await ghost.textContent(), "Check the result");
-    } else {
-      assert.equal(await ghost.count(), 0);
-    }
+    await ghost.waitFor({ state: "visible", timeout: 3000 });
+    assert.equal(await ghost.textContent(), "Check the result");
   }
-  assert.equal(predictionRequests.length, 1);
+  assert.equal(predictionRequests.length, 2);
   assert.deepEqual(await page.evaluate(() => window.__completedReplies),
-    ["foreground-first", "foreground-conflict", "applied-auto-approval"],
-    "the prediction callback accepts completed auto-approved replies and still skips turns pending approval");
+    ["foreground-first", "foreground-conflict", "applied-auto-approval", "waiting-for-approval"],
+    "both completed model replies reach prediction, regardless of approval status");
 
   const { parent: waiting, continuation, lifecycle, events, user, terminal } = subagentReplay;
   await page.evaluate(({ waiting, user }) => {

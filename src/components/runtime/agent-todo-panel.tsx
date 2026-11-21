@@ -63,7 +63,7 @@ function TodoItems({ progress, activeTodoIds, onOpenTodo, todoReveal }: TodoPane
             data-vrcforge-agent-todo-status={status}
             aria-current={active ? "step" : undefined}
           >
-            <span role="img" aria-label={label} data-app-tooltip={label} className={cn(
+            <span role="img" aria-label={label} className={cn(
               "flex h-6 w-6 items-center justify-center rounded-full text-xs tabular-nums text-muted-foreground",
               !active && !marker && "border border-primary/30",
               (active || status === "completed") && "bg-primary text-primary-foreground",
