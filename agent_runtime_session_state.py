@@ -359,6 +359,7 @@ class AgentRuntimeSessionState:
         "_stream_context",
         "_user_adjustments",
         "_native_loaded",
+        "_read_only_loaded",
     )
 
     def __init__(self, ports: AgentRuntimeSessionStatePorts) -> None:
@@ -383,6 +384,7 @@ class AgentRuntimeSessionState:
         self._stream_context = threading.local()
         self._user_adjustments: dict[tuple[str, str], dict[str, Any]] = {}
         self._native_loaded: set[str] = set()
+        self._read_only_loaded: set[str] = set()
 
     def _load_native(self, session_id: str, binding: str | None = None) -> None:
         current = self._native_conversations.get(session_id)
@@ -406,6 +408,8 @@ class AgentRuntimeSessionState:
             session = self._sessions.setdefault(session_id, {"id": session_id, "turns": []})
             session["internalToolBlocks"] = sorted({"core", *selections})
             session["internalToolSelections"] = copy.deepcopy(selections)
+            if saved.get("sessionReadOnly") is True:
+                session["sessionReadOnly"] = True
         self._native_loaded.add(session_id)
 
     @classmethod
@@ -474,13 +478,18 @@ class AgentRuntimeSessionState:
                 return candidate
             return None
 
-    def _save_native(self, session_id: str, candidate: dict[str, Any]) -> None:
+    def _save_native(self, session_id: str, candidate: dict[str, Any], *, session_read_only: bool = False) -> None:
+        session = self._sessions.get(session_id) or {}
+        session_read_only = session_read_only or session.get("sessionReadOnly") is True
         store = self._ports.native_history_store
         if store:
-            selections = (self._sessions.get(session_id) or {}).get("internalToolSelections") or {}
-            store.save(session_id, candidate, {k: sorted(v) if v is not None else None for k, v in selections.items()})
+            selections = session.get("internalToolSelections") or {}
+            store.save(session_id, candidate, {k: sorted(v) if v is not None else None for k, v in selections.items()},
+                       **({"session_read_only": True} if session_read_only else {}))
         self._native_conversations[session_id] = candidate
         self._native_loaded.add(session_id)
+        if session_read_only:
+            self._sessions.setdefault(session_id, {"id": session_id, "turns": []})["sessionReadOnly"] = True
 
     def _save_native_selection(self, session_id: str) -> None:
         current = self._native_conversations.get(session_id)
@@ -515,6 +524,7 @@ class AgentRuntimeSessionState:
             self._steer_seen_ids.clear()
             self._native_conversations.clear()
             self._native_loaded.clear()
+            self._read_only_loaded.clear()
             self._user_adjustments.clear()
 
     def user_adjustment(self, session_id: str, project_root: str) -> dict[str, Any] | None:
@@ -592,6 +602,7 @@ class AgentRuntimeSessionState:
             if self._ports.native_history_store:
                 self._ports.native_history_store.delete(session_id)
             self._native_loaded.discard(session_id)
+            self._read_only_loaded.discard(session_id)
             self._sessions.pop(session_id, None)
             self._native_conversations.pop(session_id, None)
             for key in [key for key in self._waiting_turns if key[0] == session_id]:
@@ -618,7 +629,31 @@ class AgentRuntimeSessionState:
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self._ports.shared_state_lock:
             session = self._sessions.get(session_id)
+            if self.session_is_read_only(session_id):
+                return {"id": session_id, "turns": [], **copy.deepcopy(session or {}), "sessionReadOnly": True}
             return copy.deepcopy(session) if session is not None else None
+
+    def session_is_read_only(self, session_id: str) -> bool:
+        if not session_id:
+            return False
+        with self._ports.shared_state_lock:
+            if (self._sessions.get(session_id) or {}).get("sessionReadOnly") is True:
+                return True
+            store = self._ports.native_history_store
+            if store and session_id not in self._read_only_loaded:
+                if store.session_is_read_only(session_id) or (store.load(session_id) or {}).get("sessionReadOnly") is True:
+                    self._sessions.setdefault(session_id, {"id": session_id, "turns": []})["sessionReadOnly"] = True
+                self._read_only_loaded.add(session_id)
+            return (self._sessions.get(session_id) or {}).get("sessionReadOnly") is True
+
+    def mark_session_read_only(self, session_id: str) -> None:
+        with self._ports.shared_state_lock:
+            session = self._sessions.setdefault(session_id, {"id": session_id, "turns": []})
+            session["sessionReadOnly"] = True
+            store = self._ports.native_history_store
+            if store:
+                store.mark_session_read_only(session_id)
+            self._read_only_loaded.add(session_id)
 
     def session_summary(self, session_id: str) -> dict[str, Any]:
         with self._ports.shared_state_lock:
@@ -1426,6 +1461,7 @@ class AgentRuntimeSessionState:
         current_context: list[dict[str, Any]] | None = None,
         tail_from: int | None = None,
         handoff_blocks: dict[str, Any] | None = None,
+        session_read_only: bool = False,
     ) -> dict[str, Any]:
         session_id = self._native_required(session_id, "session id")
         binding = self._native_required(binding, "binding")
@@ -1490,7 +1526,7 @@ class AgentRuntimeSessionState:
             normalized = self._validate_native_snapshot(candidate, binding=binding)
             if self._native_pending(current) != self._native_pending(normalized):
                 raise ValueError("native compaction would change pending calls")
-            self._save_native(session_id, normalized)
+            self._save_native(session_id, normalized, session_read_only=session_read_only)
             return copy.deepcopy(normalized)
 
     def append_native_user(self, session_id: str, *, binding: str, message: str, human: bool = True,
@@ -2268,6 +2304,8 @@ class AgentRuntimeSessionState:
         if not session_id or not target_client_turn_id or not input_id or not (message or attachments):
             return {"accepted": False, "mode": "followup", "reason": "invalid_request"}
         with self._ports.shared_state_lock:
+            if self.session_is_read_only(session_id):
+                return {"accepted": False, "mode": "followup", "reason": "session_context_read_only"}
             key = (session_id, target_client_turn_id)
             turn_id = self._active_turns.get(key)
             if not turn_id or self.cancel_requested(

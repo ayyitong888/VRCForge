@@ -141,6 +141,7 @@ class RuntimeQuestionResolutionPort:
     interrupt: Callable[[str, Mapping[str, object], str], object] | None = None
     settle_skip: Callable[[Mapping[str, object]], object] | None = None
     accept_visual: Callable[[Mapping[str, object]], object] | None = None
+    require_writable_session: Callable[[str], None] | None = None
 
 
 class AgentQuestionPersistence:
@@ -465,6 +466,9 @@ class AgentQuestionService:
                 raise AgentQuestionServiceError("The task that asked this Question was stopped.", status_code=409)
             goal_delivery_id = str(existing.get("goalDeliveryId") or "").strip()
             runtime_seed = existing.get("runtimeTaskSeed")
+            if self._runtime_resolution and self._runtime_resolution.require_writable_session is not None:
+                seed_session = runtime_seed.get("sessionId") if isinstance(runtime_seed, Mapping) else None
+                self._runtime_resolution.require_writable_session(str(seed_session or existing.get("sessionId") or ""))
             tool_loop_pause = (
                 str(existing.get("sourceTool") or "").strip().lower() == RUNTIME_TOOL_LOOP_SOURCE
                 and isinstance(runtime_seed, Mapping)

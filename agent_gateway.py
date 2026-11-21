@@ -1011,6 +1011,7 @@ class AgentGateway:
                 ),
                 settle_skip=lambda seed: NativeRuntimeTurn.cancel_question(self._runtime_session_state, seed, skipped=True),
                 accept_visual=self._accept_todo_visual_receipt,
+                require_writable_session=self.require_writable_runtime_session,
             ),
         )
         # In-progress approved writes, keyed by approval id. This is a global,
@@ -1183,6 +1184,7 @@ class AgentGateway:
                 ),
                 native_result_observation=lambda step: RuntimePlannerService.native_result_observation(None, step),
                 session_checkpoint_choice=self._runtime_session_state.checkpoint_choice,
+                require_writable_session=self.require_writable_runtime_session,
             ),
             ApprovalGoalPorts(
                 deny_approval=self._goal.deny_agent_goal_approval,
@@ -2286,6 +2288,11 @@ class AgentGateway:
     def runtime_sessions(self) -> AgentRuntimeSessionState:
         return self._runtime_session_state
 
+    def require_writable_runtime_session(self, session_id: str) -> None:
+        if self._runtime_session_state.session_is_read_only(session_id):
+            raise AgentGatewayError("session_context_read_only", status_code=409,
+                                    cause_code="session_context_read_only")
+
     def compact_native_session(
         self, session_id: str, project_root: str, *, trigger: str, phase: str,
         record_provider_usage: Callable[[Mapping[str, Any]], None],
@@ -2293,6 +2300,7 @@ class AgentGateway:
         from project_instruction_context import load_project_instructions
         from runtime_planner_service import project_native_resume_reads
 
+        self.require_writable_runtime_session(session_id)
         planner = self.runtime_planner
         state = self.runtime_sessions
         binding = self._scoped_history_binding(session_id, project_root)
@@ -5516,6 +5524,7 @@ class AgentGateway:
             client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
             if len(session_id) > MAX_RUNTIME_SESSION_ID_LENGTH or len(client_turn_id) > MAX_RUNTIME_CLIENT_TURN_ID_LENGTH:
                 raise AgentGatewayError("Runtime sessionId or clientTurnId exceeds its length limit.", status_code=400)
+            self.require_writable_runtime_session(session_id)
             self._signal_background_activity("runtime_message")
             with self._bind_runtime_model(params) as metadata:
                 if params.pop("_requireNativeHistory", False):
@@ -6304,6 +6313,7 @@ class AgentGateway:
                 )
             try:
                 while True:
+                    self.require_writable_runtime_session(session_id)
                     if waiting_cancelled.is_set() or not self._runtime_continuation_accepting:
                         raise AgentGatewayError("The runtime turn was stopped before execution.", status_code=409)
                     pending_child = self._runtime_subagent_parent_delivery_pending
@@ -7609,8 +7619,9 @@ class AgentGateway:
         pending_approval_outcome: dict[str, Any] | None = None
         def discard_runtime_compaction_for_cancel() -> None:
             nonlocal runtime_compaction
-            if native_binding:
-                # Native compaction owns its cancellation and commits before publishing success.
+            if native_binding or ((runtime_compaction or {}).get("sessionReadOnly") is True
+                                  and self._runtime_session_state.session_is_read_only(session_id)):
+                # Native compaction and a retired legacy session have already committed.
                 return
             if runtime_compaction_usage_checkpoint is not None:
                 # Cancellation restores the prompt window, never already billed
@@ -7944,12 +7955,16 @@ class AgentGateway:
                     discard_runtime_compaction_for_cancel()
                     last_plan = cancelled_runtime_plan()
                     break
+                session_read_only = bool(compaction_result and compaction_result.get("applied") is True
+                                         and compaction_result.get("sessionReadOnly") is True)
                 if compaction_result and compaction_result.get("applied") is True:
+                    if session_read_only:
+                        self._runtime_session_state.mark_session_read_only(session_id)
                     append_timeline_event("context_compaction", status="completed")
-                if compaction_blocked:
+                if session_read_only or compaction_blocked:
                     last_plan = {
                         "summary": "Context compaction could not create enough safe headroom.",
-                        "reply": "VRCForge paused before another model request because the context was at its safety limit and compaction did not create enough headroom. The original conversation is still intact; retry manual compaction or switch to a model with a larger verified context window.",
+                        "reply": "" if session_read_only else "VRCForge paused before another model request because the context was at its safety limit and compaction did not create enough headroom. The original conversation is still intact; retry manual compaction or switch to a model with a larger verified context window.",
                         "planner": "runtime",
                         "shellNeeded": False,
                         "nextStep": "context_compaction_required",
@@ -10255,6 +10270,7 @@ class AgentGateway:
                 "contextUsage": context_usage,
                 **memory_attribution,
                 **stop_flags,
+                **({"sessionReadOnly": True} if (runtime_compaction or {}).get("sessionReadOnly") is True else {}),
                 **({"model": actual_response_model} if actual_response_model else {}),
             }
         )
@@ -10410,14 +10426,19 @@ class AgentGateway:
         )}, "planMode": params.get("planMode") is True}
 
     def enqueue_runtime_followup(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._runtime_followup_queue.enqueue(
-            session_id=str(params.get("sessionId") or params.get("session_id") or ""),
-            client_turn_id=str(params.get("clientTurnId") or params.get("client_turn_id") or ""),
-            target_client_turn_id=str(params.get("targetClientTurnId") or params.get("target_client_turn_id") or ""),
-            message=str(params.get("message") or ""),
-            attachments=params.get("attachments") if isinstance(params.get("attachments"), list) else [],
-            envelope=self._runtime_followup_envelope(params),
-        )
+        lane_id = str(params.get("sessionId") or params.get("session_id") or "")
+        runtime_session_id = str(params.get("runtimeSessionId") or lane_id).strip()
+        with self._lock:
+            if self._runtime_session_state.session_is_read_only(runtime_session_id):
+                return {"ok": False, "accepted": False, "reason": "session_context_read_only"}
+            return self._runtime_followup_queue.enqueue(
+                session_id=lane_id,
+                client_turn_id=str(params.get("clientTurnId") or params.get("client_turn_id") or ""),
+                target_client_turn_id=str(params.get("targetClientTurnId") or params.get("target_client_turn_id") or ""),
+                message=str(params.get("message") or ""),
+                attachments=params.get("attachments") if isinstance(params.get("attachments"), list) else [],
+                envelope=self._runtime_followup_envelope(params),
+            )
 
     def claim_runtime_followups(self, *, session_id: str = "", owner_id: str = "", limit: int = 8, queue_id: str = "") -> list[dict[str, Any]]:
         if not session_id:
@@ -10632,6 +10653,8 @@ class AgentGateway:
                 session_id=session_id,
                 client_turn_id=client_turn_id,
             )
+            if self._runtime_session_state.session_is_read_only(session_id):
+                final_response["sessionReadOnly"] = True
             if final_response.get("status") != "missing":
                 return final_response
             continuation = self._runtime_run_ledger.read_terminal_continuation(
@@ -10654,6 +10677,7 @@ class AgentGateway:
                 "clientTurnId": continuation["clientTurnId"],
                 "status": "completed",
                 "response": response,
+                **({"sessionReadOnly": True} if final_response.get("sessionReadOnly") is True else {}),
             }
         session = self._runtime_session_state.get_session(session_id)
         if not session:

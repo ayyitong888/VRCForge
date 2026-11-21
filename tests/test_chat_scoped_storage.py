@@ -70,7 +70,7 @@ def test_catalog_and_pages_read_only_the_selected_page(chat_store):
     recent[-1].update(queueStatus="queued", clientTurnId="turn", queueEnvelope={"sessionId": "session"})
     reply = agent("latest-reply")
     write_store(project_path, [{
-        "id": "selected", "title": "Selected", "isTestChat": True, "projectPath": "stale",
+        "id": "selected", "title": "Selected", "isTestChat": True, "sessionReadOnly": True, "projectPath": "stale",
         "items": [agent("old-reply"), *recent, reply],
     }])
     before = {path: path.read_bytes() for path in (app_path, project_path)}
@@ -81,11 +81,13 @@ def test_catalog_and_pages_read_only_the_selected_page(chat_store):
         ("unopened", ""), ("selected", str(project)),
     ]
     assert catalog["entries"][1]["isTestChat"]
+    assert catalog["entries"][1]["sessionReadOnly"] is True
     assert catalog["pendingChatIds"] == ["selected"]
     assert archive_reads == []
 
     scope = {"chatId": "selected", "chatProjectPath": str(project)}
     first = client.get("/api/app/chats", params=scope).json()
+    assert first["chats"][0]["sessionReadOnly"] is True
     assert first["chats"][0]["items"] == [*recent[-11:], reply]
     assert first["hasOlder"] and first["nextBefore"]
     assert archive_reads == ["latest-reply"]
@@ -97,6 +99,7 @@ def test_catalog_and_pages_read_only_the_selected_page(chat_store):
     assert archive_reads == ["latest-reply", "old-reply"]
 
     full = client.get("/api/app/chats", params={**scope, "full": "1"}).json()
+    assert full["chats"][0]["sessionReadOnly"] is True
     assert full["chats"][0]["items"] == [agent("old-reply"), *recent, reply]
     assert full["chatDigests"]["selected"] and full["chatMetadataShapes"]["selected"]
     assert archive_reads == ["latest-reply", "old-reply", "old-reply", "latest-reply"]

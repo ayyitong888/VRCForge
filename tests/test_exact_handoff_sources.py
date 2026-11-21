@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_server as dashboard
+import runtime_planner_service
 from agent_gateway import AgentGateway
 from agent_handoff_graph import parse_handoff_graph
 from agent_runtime_input import RuntimeInputSource
@@ -14,8 +15,10 @@ from runtime_planner_service import PlannerTurnMetadata, RuntimePlannerService
 from tests.test_native_context_guard import _Catalog, _Desktop, _NativeModel, _Turn
 
 
-@pytest.mark.parametrize("first_source", [RuntimeInputSource.USER, RuntimeInputSource.PARENT_AGENT])
-def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_path, monkeypatch, first_source):
+@pytest.mark.parametrize(("first_source", "retire_session"), [
+    (RuntimeInputSource.USER, False), (RuntimeInputSource.PARENT_AGENT, False), (RuntimeInputSource.USER, True),
+])
+def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_path, monkeypatch, first_source, retire_session):
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     project = tmp_path / "project"
     project.mkdir()
@@ -80,6 +83,12 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     state.append_native_assistant("owner", binding=binding, message={"role": "assistant", "tool_calls": [call]})
     state.mark_native_dispatch("owner", binding=binding, call_id="pending-call")
 
+    if retire_session:
+        def measured_at_trigger(summary, blocks, fit_limit, _measure):
+            return summary, blocks, fit_limit + 1
+
+        monkeypatch.setattr(runtime_planner_service, "fit_handoff_post_context", measured_at_trigger)
+
     client = TestClient(dashboard.app)
     compact_body = {
         "sessionId": "owner", "projectRoot": str(project), "provider": "openai", "model": "requested",
@@ -105,6 +114,23 @@ def test_manual_native_endpoint_keeps_exact_instruction_and_todo_sources(tmp_pat
     assert any(message.get("content") == first_source.model_text("  Exact first request\r\n") for message in saved["messages"])
     original_graph = parse_handoff_graph(next(payload for row in saved["messages"] if (payload := model_handoff_payload(row))))
     assert original_graph["nodes"]["inspect"]["text"] == "Inspect the saved observation"
+
+    if retire_session:
+        assert reply.json()["sessionReadOnly"] is True
+        assert reply.json()["afterTokens"] == reply.json()["triggerTokens"] == 10_200
+        later = client.post("/api/app/agent/compact", json=compact_body)
+        assert later.status_code == 409 and later.json()["detail"]["code"] == "session_context_read_only"
+        send = client.post("/api/app/agent/message", json={"session_id": "owner", "message": "Continue"})
+        assert send.status_code == 409 and send.json()["detail"] == "session_context_read_only"
+        queue = client.post("/api/app/agent/runs/queue", json={
+            "sessionId": "owner", "laneId": "owner-chat", "clientTurnId": "later", "message": "Continue",
+        })
+        assert queue.status_code == 409 and queue.json()["detail"] == "session_context_read_only"
+        read = client.get("/api/app/agent/session/owner")
+        assert read.status_code == 200 and read.json()["session"]["sessionReadOnly"] is True
+        assert len(prompts) == 1 and state.native_conversation("owner", binding=binding) == saved
+        return
+    assert reply.json()["sessionReadOnly"] is False
 
     state.settle_native_call("owner", binding=binding, call_id="pending-call", content='{"status":"approved"}')
     for index in range(3):

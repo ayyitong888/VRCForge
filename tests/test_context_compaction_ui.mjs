@@ -21,6 +21,21 @@ const stateTranspiled = ts.transpileModule(stateSource, {
 }).outputText;
 const statePolicy = await import(`data:text/javascript;base64,${Buffer.from(stateTranspiled).toString("base64")}`);
 
+test("a recovered receipt retires its chat only if compaction applied and marked it read-only", () => {
+  const { applyReadOnlyCompactionReceipt } = statePolicy;
+  const items = [{ id: "original", type: "user", text: "Preserve this transcript" }];
+  const chat = { id: "chat", sessionId: "session", items };
+  const base = { schema: "vrcforge.runtime_context_compaction.v1", contextLimit: 1000, afterTokens: 850 };
+  assert.equal(applyReadOnlyCompactionReceipt(chat, { ...base, applied: false, sessionReadOnly: true }, "turn"), chat);
+  assert.equal(applyReadOnlyCompactionReceipt(chat, { ...base, applied: true, afterTokens: 849 }, "turn"), chat);
+  const retired = applyReadOnlyCompactionReceipt(chat, { ...base, applied: true, sessionReadOnly: true }, "turn");
+  assert.equal(retired.sessionReadOnly, true);
+  assert.equal(retired.compaction.status, "applied");
+  assert.equal(retired.compaction.generation, "runtime-compact-turn-read-only");
+  assert.equal(retired.items, items);
+  assert.equal(applyReadOnlyCompactionReceipt(retired, { ...base, applied: true, sessionReadOnly: true }, "turn"), retired);
+});
+
 test("a previous compaction cancellation stops appearing after a newer message is submitted", () => {
   const state = { generation: "old-compaction", status: "cancelled", completedAt: "2026-11-11T18:15:36.659Z" };
   const newer = { type: "user", createdAt: "2026-11-12T14:08:46.021Z" };

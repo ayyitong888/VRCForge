@@ -49,12 +49,13 @@ function Fixture() {
     providerLabel="" model="" activeGoal={null} onGoalChanged={noop} goalEndpoint=""
     projects={[]} onBindProject={noop} conversation={conversation} queued={[]}
     compaction={reminder.compaction} resourceChatId={reminder.chatId} readOnlyHistory={reminder.preview}
+    sessionReadOnly={reminder.sessionReadOnly}
     agentQuestions={[]} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
     onBackgroundGoalCatchUpRendered={noop} onBackgroundGoalProviderWarningsRendered={noop}
     onBackgroundGoalCatchUpDismiss={noop} onAnswerQuestion={noop}
     conversationEndRef={conversationEndRef} onConversationMouseUp={noop} onConversationScroll={noop}
     showScrollToBottom={false} onScrollToBottom={noop} pendingApprovalForResponse={() => null}
-    approvalActions={{}} latestRetryableItemId="" latestEditableUserItemId=""
+    approvalActions={{}} latestRetryableItemId="warm-user" latestEditableUserItemId="warm-user"
     editingItemId="" editingText="" editingAttachments={[]} onEditItemChangeText={noop}
     onEditItemRemoveAttachment={noop} onCopyItem={noop} onRetryItem={noop} onEditItem={noop}
     onEditItemSave={noop} onEditItemCancel={noop} scopedPendingApprovals={[]}
@@ -112,15 +113,15 @@ try {
 
   const newChatReminder = page.getByRole("dialog", { name: "这段对话已经很长" });
   const reminderState = ({ chatId = "older-chat", generation = "first", trigger = "auto", status = "applied",
-    afterTokens = 51, contextLimit = 100, preview = false } = {}) => page.evaluate(
-    async ({ chatId, generation, trigger, status, afterTokens, contextLimit, preview }) => {
+    afterTokens = 51, contextLimit = 100, preview = false, sessionReadOnly = false } = {}) => page.evaluate(
+    async ({ chatId, generation, trigger, status, afterTokens, contextLimit, preview, sessionReadOnly }) => {
       window.setChatScenario("ready");
-      window.setReminderFixture({ chatId, preview, compaction: { generation, status, trigger, afterTokens, contextLimit } });
+      window.setReminderFixture({ chatId, preview, sessionReadOnly, compaction: { generation, status, trigger, afterTokens, contextLimit } });
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    }, { chatId, generation, trigger, status, afterTokens, contextLimit, preview },
+    }, { chatId, generation, trigger, status, afterTokens, contextLimit, preview, sessionReadOnly },
   );
   for (const state of [{ afterTokens: 49 }, { afterTokens: 50 }, { afterTokens: null }, { contextLimit: null },
-    { contextLimit: 0 }, { status: "compacting" }, { status: "failed" }, { status: "cancelled" }, { preview: true }]) {
+    { contextLimit: 0 }, { status: "compacting" }, { status: "failed", afterTokens: 85 }, { status: "cancelled" }, { preview: true }]) {
     await reminderState(state);
     assert.equal(await newChatReminder.count(), 0, `no suggestion for ${JSON.stringify(state)}`);
   }
@@ -144,10 +145,29 @@ try {
   assert.equal(await newChatReminder.count(), 0, "the acknowledgment survives a reload for the same generation");
   await reminderState({ generation: "second", afterTokens: 50 });
   assert.equal(await newChatReminder.count(), 0, "even a new generation at exactly half stays quiet");
-  await reminderState({ generation: "third", trigger: "manual" });
+  await reminderState({ generation: "third", trigger: "manual", afterTokens: 84 });
   await newChatReminder.waitFor();
+  assert.equal(await composer.count(), 1, "a successful compaction below the automatic threshold leaves the chat writable");
   await page.keyboard.press("Escape");
   await newChatReminder.waitFor({ state: "detached" });
+
+  await reminderState({ generation: "still-at-auto-line", afterTokens: 85, sessionReadOnly: true });
+  assert.equal(await composer.count(), 0, "a read-only session cannot send or edit drafts");
+  const retiredReminder = page.getByRole("dialog", { name: "此会话已转为只读" });
+  await retiredReminder.waitFor();
+  assert.equal(await retiredReminder.getByRole("button").count(), 1);
+  assert.equal(await newChatReminder.count(), 0, "the ordinary reminder is replaced by the read-only notice");
+  await retiredReminder.getByRole("button", { name: "知道了", exact: true }).click();
+  await retiredReminder.waitFor({ state: "detached" });
+  assert.equal(await page.locator("[data-chat-session-read-only]").count(), 1, "the reason remains visible after acknowledgment");
+  assert.equal(await warmMessage.count(), 1, "the original conversation remains readable");
+  const historyActions = page.locator('[data-conversation-item-id="warm-user"] [data-chat-message-actions] button');
+  assert.equal(await historyActions.count(), 1, "history keeps copy and suppresses retry and edit");
+  await reminderState({ chatId: "another-chat", afterTokens: 23 });
+  assert.equal(await composer.count(), 1, "another conversation remains writable");
+  await reminderState({ generation: "still-at-auto-line", afterTokens: 85, sessionReadOnly: true });
+  assert.equal(await retiredReminder.count(), 0, "a confirmed notice stays dismissed on return");
+  assert.equal(await composer.count(), 0, "returning to the retired chat keeps it read-only");
 
   const evidenceDirectory = process.env.VRCFORGE_CHAT_CACHE_EVIDENCE_DIR;
   if (evidenceDirectory) {
@@ -156,7 +176,7 @@ try {
     await page.screenshot({ path: screenshotPath, fullPage: true });
   }
   assert.deepEqual(errors, [], "real ChatWorkspace renders without browser errors");
-  console.log("PASS ChatWorkspace transcript loading, draft retention, and user-only post-compaction reminder");
+  console.log("PASS ChatWorkspace transcript loading, draft retention, compaction reminder, and read-only session");
 } finally {
   await browser?.close();
   server.closeAllConnections();

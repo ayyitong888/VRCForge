@@ -1032,7 +1032,7 @@ def _is_valid_context_compaction(value: Any, *, applied_required: bool) -> bool:
         return False
     if "applied" in value and not isinstance(value.get("applied"), bool):
         return False
-    if "blocked" in value and not isinstance(value.get("blocked"), bool):
+    if any(field in value and not isinstance(value.get(field), bool) for field in ("blocked", "sessionReadOnly")):
         return False
     if any(
         field in value and not isinstance(value.get(field), str)
@@ -1146,7 +1146,7 @@ def is_valid_chat_record(value: Any) -> bool:
         return False
     if "titleSource" in value and value.get("titleSource") not in {"auto", "manual"}:
         return False
-    if any(field in value and not isinstance(value.get(field), bool) for field in ("pinned", "archived", "isTestChat")):
+    if any(field in value and not isinstance(value.get(field), bool) for field in ("pinned", "archived", "isTestChat", "sessionReadOnly")):
         return False
     if "revision" in value and not _is_safe_nonnegative_integer(value.get("revision")):
         return False

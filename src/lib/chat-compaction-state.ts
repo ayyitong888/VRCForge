@@ -1,9 +1,38 @@
 import type { ChatCompactionState, ChatThread, ConversationItem } from "./chat-types";
-import type { AgentContextUsage } from "./api";
+import type { AgentContextUsage, AgentRuntimeResponse } from "./api";
 
 const MAX_COMPACTION_LATENCY_MS = 24 * 60 * 60 * 1_000;
 const MAX_COMPACTION_SUMMARY_CHARACTERS = 100_000;
 const MAX_COMPACTION_ATTEMPTS = 16;
+
+export function isCompactionSessionReadOnly(compaction: AgentRuntimeResponse["contextCompaction"]): boolean {
+  return compaction?.applied === true && compaction.sessionReadOnly === true;
+}
+
+export function applyReadOnlyCompactionReceipt(
+  chat: ChatThread,
+  compaction: AgentRuntimeResponse["contextCompaction"],
+  turnId: string,
+  sessionReadOnly?: boolean,
+): ChatThread {
+  if (chat.sessionReadOnly) return chat;
+  if (!compaction || !isCompactionSessionReadOnly(compaction)) {
+    return sessionReadOnly === true ? { ...chat, sessionReadOnly: true } : chat;
+  }
+  return {
+    ...chat,
+    sessionReadOnly: true,
+    compaction: {
+      generation: `runtime-compact-${turnId}-read-only`,
+      status: "applied",
+      trigger: compaction.trigger,
+      phase: compaction.phase,
+      beforeTokens: compaction.beforeTokens,
+      afterTokens: compaction.afterTokens,
+      contextLimit: compaction.contextLimit,
+    },
+  };
+}
 
 export function chatCompactionStatusForDisplay(
   state: ChatCompactionState | undefined,

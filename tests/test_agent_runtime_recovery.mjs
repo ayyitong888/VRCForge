@@ -45,6 +45,19 @@ const recovered = await recoverAgentTurnResponse(
 assert.equal(posts, 2, "recovery reads only after the one original POST failed");
 assert.deepEqual(recovered, response, "the full recovered response reaches the controller unchanged");
 
+const retired = await recoverAgentTurnResponse(
+  transportError, sessionId, clientTurnId,
+  async () => ({ ok: true, sessionId, clientTurnId, status: "completed", response, sessionReadOnly: true }),
+  undefined, noWait,
+);
+assert.deepEqual(retired, { ...response, sessionReadOnly: true });
+
+await assert.rejects(
+  recoverAgentTurnResponse(transportError, sessionId, clientTurnId,
+    async () => ({ ok: true, sessionId, clientTurnId, status: "missing", sessionReadOnly: true }), undefined, noWait),
+  (error) => error.status === 409 && error.message === "session_context_read_only",
+);
+
 await assert.rejects(
   recoverAgentTurnResponse(transportError, sessionId, clientTurnId, async () => ({ ok: true, sessionId, clientTurnId, status: "missing" }), undefined, noWait),
   (error) => error === transportError,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AgentTurnDeliveryUnconfirmedError, ApiError } from "../lib/api/http";
+import { AgentTurnDeliveryUnconfirmedError, ApiError, isReadOnlySessionError } from "../lib/api/http";
 import type { AgentRuntimeResponse } from "../lib/api/types";
 import { useTranslation } from "react-i18next";
 import { markRuntimeStreamStopping } from "../lib/runtime-stream-owner";
@@ -36,8 +36,10 @@ import {
 } from "../lib/conversation-utils";
 import { isRuntimeSessionVerificationError } from "../lib/app-runtime";
 import {
+  applyReadOnlyCompactionReceipt,
   boundedCompactionAttempts,
   boundedCompactionSummaryCharacters,
+  isCompactionSessionReadOnly,
 } from "../lib/chat-compaction-state";
 import { fingerprintCompactionSource, mergeCompactionRecovery, projectRuntimeCompactionItems } from "../lib/context-compaction";
 import {
@@ -318,6 +320,7 @@ export function useChatRunController({
     if (initialRestore) {
       rehydratedRef.current = true;
     for (const chat of chats) for (const item of chat.items) {
+      if (chat.sessionReadOnly) continue;
       if (item.type !== "user" || !item.clientTurnId || !item.queueEnvelope) continue;
       if (item.queueStatus === "steering") {
         interruptedSteerRecovered = true;
@@ -377,6 +380,7 @@ export function useChatRunController({
           setError(t("chat.queueOwnerNotFound"));
           continue;
         }
+        if (chat.sessionReadOnly) continue;
         const runtimeSessionId = entry.runtimeSessionId || chat.sessionId || laneId;
         const staleBranch = !followsChatSession(chat, runtimeSessionId);
         const savedItem = chat.items.find((item): item is Extract<ConversationItem, { type: "user" }> => (
@@ -506,6 +510,7 @@ export function useChatRunController({
   }
 
   function nextQueueTurn(chatId: string): QueuedTurn | undefined {
+    if (getChatById(chatId)?.sessionReadOnly) return undefined;
     const blockedLanes = new Set<string>();
     for (const turn of queueRef.current) {
       if (turn.chatId !== chatId) continue;
@@ -607,7 +612,10 @@ export function useChatRunController({
           projectPath: head.projectPath,
           projectRoot: head.projectPath,
           projectType: head.projectType,
-        }).catch(() => null);
+        }).catch((cause) => {
+          if (isReadOnlySessionError(cause)) preserveSessionReadOnly(chatId, head.sessionId);
+          return null;
+        });
         if (lane.sending || lane.cancellingQueue || nextQueueTurn(chatId) !== head) return;
         if (!result?.accepted || result.mode !== "followup" || !result.queueId) {
           markQueuedTurnStatus(head, "waiting_for_resources");
@@ -685,7 +693,7 @@ export function useChatRunController({
       return;
     }
     const lane = foregroundLane(chatId);
-    if (lane.cancellingQueue) return;
+    if (lane.cancellingQueue || getChatById(chatId)?.sessionReadOnly) return;
     lane.cancellingQueue = true;
     const pending = queueRef.current.filter((turn) => turn.chatId === chatId);
     lane.cancellationGeneration += 1;
@@ -805,7 +813,7 @@ export function useChatRunController({
     if (options.deliveryMode === "queue") return enqueueFollowupTurn(turn);
     const visibleOwnerChatId = turn.chatId && getChatById(turn.chatId) ? turn.chatId : ensureActiveChat();
     const visibleOwnerChat = getChatById(visibleOwnerChatId);
-    if (visibleOwnerChat && !followsChatSession(visibleOwnerChat, turn.sessionId)) return "not_accepted";
+    if (visibleOwnerChat?.sessionReadOnly || (visibleOwnerChat && !followsChatSession(visibleOwnerChat, turn.sessionId))) return "not_accepted";
     const targetSessionId = turn.sessionId || visibleOwnerChat?.sessionId;
     if (!turn.queueId && targetSessionId && hasPendingChildDelivery?.(targetSessionId)) {
       return enqueueFollowupTurn(turn);
@@ -899,7 +907,8 @@ export function useChatRunController({
             trace("dispatch_skipped_stop", { targetClientTurnId });
             return null;
           }
-          if (getChatById(ownerChatId)?.sessionId !== queuedTurn.sessionId) return null;
+          const latest = getChatById(ownerChatId);
+          if (latest?.sessionId !== queuedTurn.sessionId || latest?.sessionReadOnly) return null;
           trace("rpc_started", { targetClientTurnId });
           const rpcStartedAt = performance.now();
           try {
@@ -927,6 +936,7 @@ export function useChatRunController({
             if (result?.accepted !== true) trace("rpc_rejected", { targetClientTurnId });
             return result;
           } catch (cause) {
+            if (isReadOnlySessionError(cause)) preserveSessionReadOnly(ownerChatId, queuedTurn.sessionId);
             trace("rpc_failed", {
               targetClientTurnId,
               durationMs: performance.now() - rpcStartedAt,
@@ -937,6 +947,11 @@ export function useChatRunController({
         });
       lane.dispatchTail = dispatch.then(() => undefined, () => undefined);
        const queueResult = await dispatch;
+       if (!queueResult?.accepted && getChatById(ownerChatId)?.sessionReadOnly) {
+         lane.arbitration.settle(turn.id, { acceptedSteer: false, stopRequested: false, cancelled: true }, lane.sending);
+         steerIntentRef.current.delete(turn.id);
+         return "not_accepted";
+       }
        if (cancellationGeneration !== lane.cancellationGeneration) {
          const cancellation = queueResult?.queueId && queuedTurn.queueLaneId
            ? await cancelAgentRunFollowup(queueEndpoint, queueResult.queueId, { sessionId: queuedTurn.queueLaneId }).catch(() => null)
@@ -1076,7 +1091,7 @@ export function useChatRunController({
   async function enqueueFollowupTurn(turn: QueuedTurn): Promise<SubmitTurnResult> {
     const ownerChatId = turn.chatId || ensureActiveChat();
     const ownerChat = getChatById(ownerChatId);
-    if (!ownerChat || !followsChatSession(ownerChat, turn.sessionId)) return "not_accepted";
+    if (!ownerChat || ownerChat.sessionReadOnly || !followsChatSession(ownerChat, turn.sessionId)) return "not_accepted";
     const active = lanesRef.current.get(ownerChatId)?.turn;
     const projectPath = ownerChat?.projectPath || undefined;
     const queuedTurn: QueuedTurn = {
@@ -1164,6 +1179,7 @@ export function useChatRunController({
       projectRoot: queuedTurn.projectPath,
       projectType: queuedTurn.projectType,
     }).catch((cause) => {
+      if (isReadOnlySessionError(cause)) preserveSessionReadOnly(ownerChatId, queuedTurn.sessionId);
       trace("rpc_failed", {
         requestedDeliveryMode: "queue",
         durationMs: performance.now() - rpcStartedAt,
@@ -1171,6 +1187,7 @@ export function useChatRunController({
       });
       return null;
     });
+    if (getChatById(ownerChatId)?.sessionReadOnly) return "not_accepted";
     trace("rpc_ack", {
       requestedDeliveryMode: "queue",
       durationMs: performance.now() - rpcStartedAt,
@@ -1231,10 +1248,17 @@ export function useChatRunController({
     if (owner) await recordLocalChatInput(targetEndpoint, owner, clientTurnId).catch(reportChatSaveError);
   }
 
+  function preserveSessionReadOnly(chatId: string, sessionId?: string) {
+    if (sessionId && updateChat(chatId, (chat) => chat.sessionId === sessionId && !chat.sessionReadOnly
+      ? { ...chat, sessionReadOnly: true } : chat)) {
+      void persistChatsNow?.().catch(reportChatSaveError);
+    }
+  }
+
   async function removeQueuedTurn(turnId: string, ownerChatId?: string): Promise<boolean> {
     const turn = queueRef.current.find((candidate) => candidate.id === turnId
       && (!ownerChatId || candidate.chatId === ownerChatId));
-    if (!turn) return false;
+    if (!turn || getChatById(turn.chatId || "")?.sessionReadOnly) return false;
     if (!turn.queueId && turn.queueStatus === "delivery_unverified") return false;
     if (turn.queueId) {
       const cancelled = await cancelAgentRunFollowup(endpoint, turn.queueId, {
@@ -1276,7 +1300,7 @@ export function useChatRunController({
   async function steerQueuedTurn(turnId: string, ownerChatId?: string): Promise<SubmitTurnResult> {
     const current = queueRef.current.find((candidate) => candidate.id === turnId
       && (!ownerChatId || candidate.chatId === ownerChatId));
-    if (!current || current.staleBranch) return "failed";
+    if (!current || current.staleBranch || getChatById(current.chatId || "")?.sessionReadOnly) return "failed";
     if (current.queueStatus === "delivery_unverified" && !current.queueId) return "failed";
     if (current.queueId) {
       const cancelled = await cancelAgentRunFollowup(endpoint, current.queueId, {
@@ -1391,6 +1415,7 @@ export function useChatRunController({
       if (loadChat && !getChatById(chatId) && !await loadChat(chatId)) {
         throw new Error(t("chat.sessionRestoreFailed"));
       }
+      if (getChatById(chatId)?.sessionReadOnly) return false;
       let targetEndpoint = endpoint;
       if (!runtimeConnected) {
         const readyEndpoint = await startRuntime();
@@ -1414,6 +1439,7 @@ export function useChatRunController({
           })
         : null;
       const chat = getChatById(chatId);
+      if (chat?.sessionReadOnly) return false;
       if (pinnedQueueSession && (!chat || !followsChatSession(chat, pinnedQueueSession))) {
         throw new ApiError("Queued work could not be matched to one existing chat.", 409, {
           code: "followup_admission_rejected",
@@ -1543,6 +1569,10 @@ export function useChatRunController({
       if (abortController.signal.aborted) throw new Error("Request cancelled.");
       if (!background && getChatById(chatId)?.sessionId !== chatSessionId) {
         throw new AgentTurnDeliveryUnconfirmedError("The chat changed before the Agent turn could start.");
+      }
+      if (getChatById(chatId)?.sessionReadOnly) {
+        if (!presentingFollowup) clearTurnTransientItems(chatId, turn.id, userItemId);
+        return false;
       }
       runtimeRequestStarted = true;
       // A desktop follow-up stores the composer defaults for its local history.
@@ -1687,6 +1717,7 @@ export function useChatRunController({
         ...response,
         ...(response.timeline ? { timeline: durableTimeline } : {}),
       };
+      const sessionReadOnly = response.sessionReadOnly === true || isCompactionSessionReadOnly(response.contextCompaction);
       if (background) {
         const responseItemId = turn.goalDelivery?.agentItemId || response.turnId || response.turn_id;
         updateChat(chatId, (current) => {
@@ -1704,7 +1735,7 @@ export function useChatRunController({
             }),
           };
           return {
-            ...touchChat(current),
+            ...touchChat(applyReadOnlyCompactionReceipt(current, response.contextCompaction, responseTurnId, response.sessionReadOnly)),
             sessionId: chatSessionId,
             title: current.title || (message.length > 24 ? `${message.slice(0, 24)}...` : message),
             titleSource: current.title ? current.titleSource : "auto",
@@ -1730,6 +1761,7 @@ export function useChatRunController({
             ],
           };
         });
+        if (sessionReadOnly) void persistChatsNow?.().catch(reportChatSaveError);
         await Promise.allSettled([
           refresh(targetEndpoint),
           refreshRuntimeRuns(false, targetEndpoint),
@@ -1740,12 +1772,12 @@ export function useChatRunController({
       updateChat(chatId, (current) => ({
         ...applyRuntimeResponseToChat(current),
       }));
-      if (shouldGenerateTitle && !abortController.signal.aborted && !owner.stopAcknowledgement
+      if (!sessionReadOnly && shouldGenerateTitle && !abortController.signal.aborted && !owner.stopAcknowledgement
         && canRequestChatTitleAfterTurn(response)) {
         const fallbackTitle = message.length > 24 ? `${message.slice(0, 24)}...` : message;
         void maybeGenerateChatTitle(targetEndpoint, chatId, chatSessionId, turn, fallbackTitle);
       }
-      if (midTurnCompactionApplied && persistChatsNow) {
+      if ((midTurnCompactionApplied || sessionReadOnly) && persistChatsNow) {
         void persistChatsNow().catch(reportChatSaveError);
       }
       if (response.dispatchStopped) {
@@ -1754,7 +1786,7 @@ export function useChatRunController({
       }
       await refresh(targetEndpoint);
       await refreshRuntimeRuns(false, targetEndpoint);
-      if (turn.onCompletedReply && !lane?.stopping && !abortController.signal.aborted
+      if (!sessionReadOnly && turn.onCompletedReply && !lane?.stopping && !abortController.signal.aborted
         && !owner.stopAcknowledgement && isCompletedPublicReply(response)) {
         completedPublicReply = durableResponse;
       }
@@ -1916,9 +1948,11 @@ export function useChatRunController({
             completedAt: new Date().toISOString(),
           };
         }
+        const reclassified = applyReadOnlyCompactionReceipt(current, runtimeCompaction, responseTurnId!, response.sessionReadOnly);
         return {
-          ...touchChat(current),
-          compaction,
+          ...touchChat(reclassified),
+          compaction: reclassified !== current && (compaction === current.compaction || compaction?.status !== "applied")
+            ? reclassified.compaction : compaction,
           items: [
             ...durableItems,
             { id: responseItemId, type: "agent", response: responseForChat, timeline: mergedTimeline, compactionRecovery: responseRecovery, elapsedSeconds, providerLabel: turn.providerLabel, model: turn.model, ...(response.completedAt ? { completedAt: response.completedAt } : {}) },
@@ -1927,6 +1961,11 @@ export function useChatRunController({
         };
       }
     } catch (cause) {
+      if (isReadOnlySessionError(cause)) {
+        if (!presentingFollowup) clearTurnTransientItems(chatId, turn.id, userItemId);
+        preserveSessionReadOnly(chatId, chatSessionId);
+        return false;
+      }
       const text = cause instanceof Error ? cause.message : String(cause);
       // A broken/aborted response channel does not prove backend cancellation.
       // Preserve its accepted dialogue as an interrupted transport placeholder;

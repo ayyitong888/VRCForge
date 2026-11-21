@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_gateway import AgentGateway
+from agent_gateway import AgentGateway, AgentGatewayError
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_scan_result_policy import SCAN_RESULT_CONTINUATION_POLICY
 
@@ -59,6 +59,35 @@ def test_gateway_owns_one_runtime_session_state_with_the_gateway_lock(tmp_path: 
     gateway.configure_paths(tmp_path / "next-config.json", tmp_path / "next-audit")
     assert gateway.runtime_sessions.session_count() == 0
     assert gateway.runtime_sessions.cancel_requested(turn_id="cancelled") is False
+
+
+def test_read_only_session_blocks_queued_input_approval_and_question_mutations(tmp_path: Path) -> None:
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    session_id = "retired-session"
+    approval = {"id": "pending-mutation", "status": "pending", "taskContext": {"sessionId": session_id}}
+    gateway._approvals[approval["id"]] = approval
+    approved = {**approval, "id": "already-approved", "status": "approved"}
+    gateway._approvals[approved["id"]] = approved
+    question = gateway.questions.create({"sessionId": session_id, "question": "Continue this task?"})["question"]
+    gateway.runtime_sessions.mark_session_read_only(session_id)
+
+    for mutate in (
+        lambda: gateway.approval_transactions.approve(approval["id"]),
+        lambda: gateway.approval_transactions.request_approval_revision(approval["id"]),
+        lambda: gateway.approval_transactions.apply_approved({"approvalId": approved["id"]}),
+        lambda: gateway.questions.answer(question["id"], {"sessionId": session_id, "answer": "Yes"}),
+    ):
+        with pytest.raises(AgentGatewayError, match="session_context_read_only") as rejected:
+            mutate()
+        assert rejected.value.status_code == 409
+
+    assert approval["status"] == "pending" and approved["status"] == "approved"
+    assert gateway.questions.list(session_id=session_id)["questions"][0]["status"] == "pending"
+    assert gateway.enqueue_runtime_followup({"sessionId": "chat-lane", "runtimeSessionId": session_id,
+                                             "clientTurnId": "new", "message": "Continue"})["reason"] == "session_context_read_only"
+    assert gateway.submit_runtime_steer({"sessionId": session_id, "targetClientTurnId": "old",
+                                         "clientTurnId": "new", "message": "Continue"})["reason"] == "session_context_read_only"
+    assert not gateway.list_runtime_followups(session_id="chat-lane")
 
 
 def test_restore_append_bootstrap_and_clear_preserve_session_contract() -> None:
@@ -735,10 +764,13 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     class FailingStore:
         fail = False
 
-        def load(self, session_id, binding):
+        def load(self, session_id, binding=None):
             return None
 
-        def save(self, session_id, snapshot, selections):
+        def session_is_read_only(self, session_id):
+            return False
+
+        def save(self, session_id, snapshot, selections, *, session_read_only=False):
             if self.fail:
                 raise OSError("disk unavailable")
 
@@ -774,9 +806,10 @@ def test_native_compaction_tail_restores_exact_prefix_policy_in_same_save_and_is
     failing_store.fail = True
     with pytest.raises(OSError, match="disk unavailable"):
         failed_state.replace_native_compacted_history(
-            "s", binding="b", expected_snapshot=before, summary="summary",
+            "s", binding="b", expected_snapshot=before, summary="summary", session_read_only=True,
         )
     assert failed_state.native_conversation("s", binding="b") == before
+    assert not failed_state.session_is_read_only("s")
 
 
 def test_native_compaction_rejects_pending_calls_and_invalid_boundary_atomically() -> None:

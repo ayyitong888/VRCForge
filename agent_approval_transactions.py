@@ -830,6 +830,7 @@ class ApprovalTransactionPorts:
     native_result_observation: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     session_checkpoint_choice: Callable[[str], dict[str, Any] | None] | None = None
     resource_context_for_approval: Callable[[Mapping[str, Any]], AbstractContextManager[object]] = lambda _approval: nullcontext()
+    require_writable_session: Callable[[str], None] | None = None
 
 
 def _blocked_recovery_failure_facts(applied: Mapping[str, Any]) -> dict[str, Any]:
@@ -1980,6 +1981,7 @@ class AgentApprovalTransactionService:
                     )
                 raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
 
+            self._require_writable_approval_session(approval)
             approval = self._refresh_approval_expiry(approval)
             if approval.get("status") != "approved":
                 return {
@@ -2804,6 +2806,7 @@ class AgentApprovalTransactionService:
                 expected_project_root=expected_project_root,
                 global_only=global_only,
             )
+            self._require_writable_approval_session(approval)
             approval = self._refresh_approval_expiry(approval)
             if approval.get("status") != "pending":
                 return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {approval.get('status')}."}
@@ -5446,6 +5449,11 @@ class AgentApprovalTransactionService:
         if expected_key and candidate and normalize_filesystem_path(candidate) != expected_key:
             raise AgentGatewayError("Approval belongs to a different project.", status_code=409)
 
+    def _require_writable_approval_session(self, approval: Mapping[str, Any]) -> None:
+        if self._ports.require_writable_session is not None:
+            context = ensure_dict(approval.get("taskContext"))
+            self._ports.require_writable_session(str(context.get("sessionId") or approval.get("sessionId") or ""))
+
     def _set_approval_status(
         self,
         approval_id: str,
@@ -5471,6 +5479,8 @@ class AgentApprovalTransactionService:
                 expected_project_root=expected_project_root,
                 global_only=global_only,
             )
+            if status == "approved":
+                self._require_writable_approval_session(approval)
             approval = self._refresh_approval_expiry(approval)
             if approval.get("status") not in {"pending", "approved"} and status == "approved":
                 return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {approval.get('status')}."}
@@ -5534,6 +5544,7 @@ class AgentApprovalTransactionService:
                 expected_project_root=expected_project_root,
                 global_only=global_only,
             )
+            self._require_writable_approval_session(approval)
             approval = self._refresh_approval_expiry(approval)
             status = str(approval.get("status") or "")
             if status != "pending":

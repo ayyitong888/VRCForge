@@ -582,6 +582,7 @@ export type RuntimeTurnLineage = {
 };
 
 export type AgentRuntimeResponse = RuntimeTurnLineage & {
+  sessionReadOnly?: boolean;
   ok: boolean;
   session_id: string;
   sessionId: string;
@@ -694,6 +695,7 @@ export type AgentRuntimeResponse = RuntimeTurnLineage & {
     failureClass?: string;
     suppressionReason?: string;
     blocked?: boolean;
+    sessionReadOnly?: boolean;
     target?: "native_history" | string;
     recovery?: CompactionRecoveryEntry | CompactionRecoveryEntry[];
   };
@@ -770,6 +772,7 @@ export type AgentTurnResponseRecovery = {
   sessionId: string;
   clientTurnId: string;
   status: "running" | "completed" | "failed" | "missing";
+  sessionReadOnly?: boolean;
   response?: AgentRuntimeResponse;
   error?: string;
 };

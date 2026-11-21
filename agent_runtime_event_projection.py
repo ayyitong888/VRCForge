@@ -266,6 +266,7 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
            if isinstance(payload.get(key), str) and (bounded := _text(payload[key], limit))},
         **{key: payload[key] for key in ("dispatchStopped", "unityWriteMayHaveExecuted")
            if isinstance(payload.get(key), bool)},
+        **({"sessionReadOnly": True} if payload.get("sessionReadOnly") is True else {}),
         "plan": {
             "summary": _text(plan.get("summary"), 1200),
             "reply": _text(plan.get("reply"), reply_limit),

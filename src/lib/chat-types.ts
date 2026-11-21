@@ -207,6 +207,8 @@ export type ChatThread = {
   revision?: number;
   /** Last time this chat's completed output was viewed in the conversation. */
   lastViewedAt?: string;
+  /** Successful compaction exhausted this conversation's input headroom. */
+  sessionReadOnly?: boolean;
   compaction?: ChatCompactionState;
   contextUsageCache?: AgentContextUsage;
   attachmentPayloads?: Record<string, ChatAttachmentPayload>;

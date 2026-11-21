@@ -1415,6 +1415,7 @@ function normalizeStoredChatSnapshot(values: unknown[], liveChats: ChatThread[] 
       archived: chat.archived === true,
       revision: normalizeChatRevision(chat.revision),
       lastViewedAt: typeof chat.lastViewedAt === "string" ? chat.lastViewedAt : undefined,
+      sessionReadOnly: chat.sessionReadOnly === true ? true : undefined,
       compaction: normalizeRestoredCompaction(chat.compaction, undefined, preserveActive),
       contextUsageCache: normalizeChatContextUsage(chat.contextUsageCache),
       attachmentPayloads: normalizeAttachmentPayloadVault(chat.attachmentPayloads),

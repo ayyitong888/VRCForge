@@ -42,7 +42,7 @@ import { automaticTurnWaitStage, runtimeTurnActivityStatus } from "../../lib/run
 import { chatCompactionStatusForDisplay } from "../../lib/chat-compaction-state";
 import { useQuestionDockPresentation } from "../../lib/chat-question-dock";
 
-function NewSessionReminder({ chatId, generation }: { chatId: string; generation: string }) {
+function NewSessionReminder({ chatId, generation, sessionReadOnly }: { chatId: string; generation: string; sessionReadOnly: boolean }) {
   const { t } = useTranslation();
   const [dismissed, setDismissed] = useState(() => isNewSessionReminderDismissed(chatId, generation));
   if (dismissed) return null;
@@ -50,8 +50,8 @@ function NewSessionReminder({ chatId, generation }: { chatId: string; generation
     dismissNewSessionReminder(chatId, generation);
     setDismissed(true);
   }} action={{
-    title: t("compact.newSessionReminderTitle"),
-    description: t("compact.newSessionReminderDescription"),
+    title: t(sessionReadOnly ? "compact.sessionReadOnlyTitle" : "compact.newSessionReminderTitle"),
+    description: t(sessionReadOnly ? "compact.sessionReadOnlyDescription" : "compact.newSessionReminderDescription"),
     confirmLabel: t("compact.newSessionReminderButton"),
   }} />;
 }
@@ -152,6 +152,7 @@ export function ChatWorkspace({
   conversationPendingMessage,
   developerOptionsEnabled,
   readOnlyHistory = false,
+  sessionReadOnly = false,
   input,
   setInput,
   inputSuggestion,
@@ -268,6 +269,7 @@ export function ChatWorkspace({
   conversationPending?: boolean;
   conversationPendingMessage?: string;
   readOnlyHistory?: boolean;
+  sessionReadOnly?: boolean;
   input: string;
   setInput: (value: string) => void;
   inputSuggestion?: string;
@@ -482,11 +484,11 @@ export function ChatWorkspace({
       {question.question && showPrompt ? (
         <div data-chat-quote-content><ChatMarkdown text={question.question} /></div>
       ) : null}
-      <button type="button" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm hover:bg-muted"
+      {!sessionReadOnly && <button type="button" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm hover:bg-muted"
         onClick={() => onReopenQuestion?.(question.questionId)} data-chat-answer-question={question.questionId}>
         <HelpCircle className="h-4 w-4" aria-hidden="true" />
         {t("questionCard.answerQuestion")}
-      </button>
+      </button>}
     </div>
   );
   const conversationRenderScope = sessionHandoffSourceChatId || "chat";
@@ -769,13 +771,14 @@ export function ChatWorkspace({
   const hasHistory = conversation.length > 0;
   const showNewSessionReminder = hasHistory && !conversationPending && !readOnlyHistory
     && visibleCompaction?.status === "applied"
-    && typeof visibleCompaction.afterTokens === "number" && Number.isFinite(visibleCompaction.afterTokens)
-    && typeof visibleCompaction.contextLimit === "number" && Number.isFinite(visibleCompaction.contextLimit)
-    && visibleCompaction.contextLimit > 0 && visibleCompaction.afterTokens > visibleCompaction.contextLimit / 2;
+    && (sessionReadOnly || (typeof visibleCompaction.afterTokens === "number" && Number.isFinite(visibleCompaction.afterTokens)
+      && typeof visibleCompaction.contextLimit === "number" && Number.isFinite(visibleCompaction.contextLimit)
+      && visibleCompaction.contextLimit > 0 && visibleCompaction.afterTokens > visibleCompaction.contextLimit / 2));
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       {showNewSessionReminder && resourceChatId && visibleCompaction.generation ? (
-        <NewSessionReminder key={`${resourceChatId}\n${visibleCompaction.generation}`} chatId={resourceChatId} generation={visibleCompaction.generation} />
+        <NewSessionReminder key={`${resourceChatId}\n${visibleCompaction.generation}`} chatId={resourceChatId}
+          generation={visibleCompaction.generation} sessionReadOnly={sessionReadOnly} />
       ) : null}
       {!hasHistory ? (
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-5 md:p-8" data-empty-chat-content>
@@ -785,8 +788,8 @@ export function ChatWorkspace({
                 <div className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />{conversationPendingMessage || t("common.loading")}</div>
                 <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse"><div className="h-4 w-3/4 rounded bg-muted" /><div className="h-4 w-full rounded bg-muted" /><div className="h-4 w-1/2 rounded bg-muted" /></div>
               </div>
-            ) : projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
-            {handoffSendOpen ? (
+            ) : !sessionReadOnly && projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
+            {!sessionReadOnly && handoffSendOpen ? (
               <div className="mb-3">
                 <SessionHandoffSend
                   endpoint={sessionHandoffEndpoint}
@@ -803,7 +806,7 @@ export function ChatWorkspace({
                 providerWarnings={backgroundGoalProviderWarnings}
                 onRendered={onBackgroundGoalCatchUpRendered}
                 onProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
-                onDismiss={onBackgroundGoalCatchUpDismiss}
+                onDismiss={sessionReadOnly ? undefined : onBackgroundGoalCatchUpDismiss}
               />
             </div>
           </div>
@@ -819,7 +822,7 @@ export function ChatWorkspace({
           ref={historyScrollRef}
           className="app-scrollbar h-full overflow-auto pl-7 pr-4 py-5 md:pl-8 md:pr-6 md:py-6"
           data-chat-history-scroll
-          onMouseUp={readOnlyHistory ? undefined : onConversationMouseUp}
+          onMouseUp={readOnlyHistory || sessionReadOnly ? undefined : onConversationMouseUp}
           onScroll={(event) => onConversationScroll(event.currentTarget)}
           onWheel={(event) => {
             if (event.deltaY < 0 && event.currentTarget.scrollTop === 0) onConversationScroll(event.currentTarget, true);
@@ -831,7 +834,7 @@ export function ChatWorkspace({
             providerWarnings={backgroundGoalProviderWarnings}
             onRendered={readOnlyHistory ? undefined : onBackgroundGoalCatchUpRendered}
             onProviderWarningsRendered={readOnlyHistory ? undefined : onBackgroundGoalProviderWarningsRendered}
-            onDismiss={onBackgroundGoalCatchUpDismiss}
+            onDismiss={sessionReadOnly ? undefined : onBackgroundGoalCatchUpDismiss}
           />
           {(() => {
             let recentAssistantTurns: ConversationItem[] = [];
@@ -860,6 +863,7 @@ export function ChatWorkspace({
                 <div key={renderKey} data-chat-nav-anchor={renderKey} {...historyInteraction}>
                 {roundStartedAt !== undefined ? <MessageDateSeparator timestamp={roundStartedAt} /> : null}
                 <SessionHandoffCard
+                  readOnly={sessionReadOnly}
                   handoff={{
                     id: item.handoffId,
                     status: item.status || "pending_review",
@@ -883,7 +887,7 @@ export function ChatWorkspace({
               );
             }
             const liveAgent = item.type === "agent" && isLiveTurn(item);
-            const approval = !readOnlyHistory && liveAgent ? pendingApprovalForResponse(item.response) : null;
+            const approval = !readOnlyHistory && !sessionReadOnly && liveAgent ? pendingApprovalForResponse(item.response) : null;
             const turnId = item.type === "agent" ? item.response.clientTurnId : item.type === "streaming" ? item.clientTurnId : "";
             const turnSessionId = runtimeSessionId || (item.type === "agent" ? item.response.sessionId || item.response.session_id : "");
             const runtimeActive = turnId && turnSessionId ? runtimeTurnActivityStatus(runtimeRuns, turnSessionId, turnId) : undefined;
@@ -942,9 +946,9 @@ export function ChatWorkspace({
                       onOpenChatById={onOpenChatById}
                       lookupChatTitle={lookupChatTitle}
                       attachmentPayloads={attachmentPayloads}
-                      canRetry={!sending && queued.length === 0 && initialUser.id === latestRetryableItemId}
-                      canEdit={initialUser.id === latestEditableUserItemId}
-                      editing={editingItemId === initialUser.id}
+                      canRetry={!sessionReadOnly && !sending && queued.length === 0 && initialUser.id === latestRetryableItemId}
+                      canEdit={!sessionReadOnly && initialUser.id === latestEditableUserItemId}
+                      editing={!sessionReadOnly && editingItemId === initialUser.id}
                       editingText={editingText}
                       editSaveDisabledReason={editSaveDisabledReason || (sending || queued.length > 0 ? t("chat.cannotActionWhileRunning") : "")}
                       editingAttachments={editingAttachments}
@@ -965,12 +969,12 @@ export function ChatWorkspace({
                 } : undefined}
                 attachmentPayloads={attachmentPayloads}
                 approval={approval}
-                hidePendingApproval={!liveAgent}
+                hidePendingApproval={sessionReadOnly || !liveAgent}
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
                 approvalRuns={runtimeRuns}
-                canRetry={!sending && queued.length === 0 && item.id === latestRetryableItemId}
-                canEdit={item.id === latestEditableUserItemId}
-                editing={editingItemId === item.id}
+                canRetry={!sessionReadOnly && !sending && queued.length === 0 && item.id === latestRetryableItemId}
+                canEdit={!sessionReadOnly && item.id === latestEditableUserItemId}
+                editing={!sessionReadOnly && editingItemId === item.id}
                 editingText={editingText}
                 editSaveDisabledReason={editSaveDisabledReason || (sending || queued.length > 0 ? t("chat.cannotActionWhileRunning") : "")}
                 editingAttachments={editingAttachments}
@@ -985,7 +989,7 @@ export function ChatWorkspace({
                 onReject={onReject}
                 onModifyApproval={onModifyApproval}
                 onOpenDoctor={onOpenDoctor}
-                saveOperationSummary={capturedOperation?.summary}
+                saveOperationSummary={sessionReadOnly ? undefined : capturedOperation?.summary}
                 saveOperationTool={capturedOperation?.tool}
                 onSaveOperationAsSkill={onSaveOperationAsSkill}
                 />
@@ -1015,26 +1019,36 @@ export function ChatWorkspace({
           <ArrowDown className="h-4 w-4" />
         </Button>
       ) : null}
-      <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock data-chat-composer-has-queue={queued.length ? "" : undefined}>
+      <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock data-chat-composer-has-queue={!sessionReadOnly && queued.length ? "" : undefined}>
         <div className="mx-auto max-w-3xl">
-          {replyBanner}
-          <CompactionStatus state={visibleCompaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
-          {hasHistory && handoffSendOpen ? (
-            <div className="mb-2">
-              <SessionHandoffSend
-                endpoint={sessionHandoffEndpoint}
-                sourceChatId={sessionHandoffSourceChatId}
-                targetChats={sessionHandoffTargetChats}
-                open={handoffSendOpen}
-                onOpenChange={onHandoffSendOpenChange}
-              />
+          {sessionReadOnly ? (
+            <div className="flex items-start gap-3 rounded-xl border border-border bg-card p-3 text-sm" data-chat-session-read-only>
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-accent" aria-hidden="true" />
+              <div>
+                <p className="font-medium">{t("compact.sessionReadOnlyTitle")}</p>
+                <p className="mt-0.5 text-muted-foreground">{t("compact.sessionReadOnlyDescription")}</p>
+              </div>
             </div>
-          ) : null}
-          {activeGoalBar}
-          {questionDock}
-          {pendingQueue}
-          {approvalCard}
-          {composer(hasHistory)}
+          ) : <>
+            {replyBanner}
+            <CompactionStatus state={visibleCompaction} onCancel={onCancelCompaction} onRetry={onRetryCompaction} />
+            {hasHistory && handoffSendOpen ? (
+              <div className="mb-2">
+                <SessionHandoffSend
+                  endpoint={sessionHandoffEndpoint}
+                  sourceChatId={sessionHandoffSourceChatId}
+                  targetChats={sessionHandoffTargetChats}
+                  open={handoffSendOpen}
+                  onOpenChange={onHandoffSendOpenChange}
+                />
+              </div>
+            ) : null}
+            {activeGoalBar}
+            {questionDock}
+            {pendingQueue}
+            {approvalCard}
+            {composer(hasHistory)}
+          </>}
         </div>
       </div>
     </div>

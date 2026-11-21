@@ -77,6 +77,9 @@ export type CompactAgentHistoryResponse = AgentHistoryCompactionDetails & {
   nativeApplied?: boolean;
   beforeTokens?: number;
   afterTokens?: number;
+  contextLimit?: number;
+  triggerTokens?: number;
+  sessionReadOnly?: boolean;
   targetAfterTokens?: number;
   status?: "no_content";
   ok: boolean;
@@ -159,6 +162,9 @@ export async function recoverAgentTurnResponse(
     if (state.sessionId !== sessionId || state.clientTurnId !== clientTurnId) {
       throw new AgentTurnDeliveryUnconfirmedError("Recovered Agent turn identity did not match the active request.");
     }
+    if (state.sessionReadOnly === true && (state.status === "missing" || state.status === "failed")) {
+      throw new ApiError("session_context_read_only", 409);
+    }
     if (state.status === "missing") {
       if (!accepted) throw initialError;
       throw new AgentTurnDeliveryUnconfirmedError(state.error || "Recovered Agent turn disappeared before completion.");
@@ -173,7 +179,7 @@ export async function recoverAgentTurnResponse(
       if (!response || responseSessionId !== sessionId || responseClientTurnId !== clientTurnId) {
         throw new AgentTurnDeliveryUnconfirmedError("Recovered Agent response identity did not match the active request.");
       }
-      return response;
+      return state.sessionReadOnly === true ? { ...response, sessionReadOnly: true } : response;
     }
     accepted = true;
     await waitForPoll(signal);

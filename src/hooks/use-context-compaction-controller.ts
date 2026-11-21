@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { compactAgentHistory, type AgentContextUsage, type ChatHistoryEntry, type CompactAgentHistoryResponse } from "../lib/api";
+import { isReadOnlySessionError } from "../lib/api/http";
 import type { ChatCompactionState, ChatThread, ConversationItem } from "../lib/chat-types";
 import {
   boundedCompactionAttempts,
@@ -95,7 +96,7 @@ export function useContextCompactionController({
       return { status: "skipped" };
     }
     const snapshot = getChatById(request.chatId);
-    if (!snapshot) {
+    if (!snapshot || snapshot.sessionReadOnly) {
       return { status: "skipped" };
     }
     const allowPendingApproval = request.trigger === "manual";
@@ -246,6 +247,7 @@ export function useContextCompactionController({
     let failureClassOverride: string | undefined;
     let compactionProviderUsage = priorCompactionUsage;
     let compactionResponseReceived = false;
+    let backendReadOnly = false;
 
     try {
       const payload: CompactAgentHistoryResponse = await compactAgentHistory(request.endpoint, {
@@ -269,6 +271,8 @@ export function useContextCompactionController({
         if (request.trigger === "manual") setError(t("compact.noContent"));
         return { status: "skipped", decision, chat: getChatById(request.chatId) };
       }
+      backendReadOnly = payload.ok === true && payload.sessionReadOnly === true;
+      const compactedContextLimit = payload.contextLimit ?? startState.contextLimit;
 
       const summary = String(payload.summary || "").trim();
       if (!summary) {
@@ -283,17 +287,25 @@ export function useContextCompactionController({
         status: "completed",
         entryCount: payload.entryCount ?? history.length,
         beforeTokens: payload.beforeTokens ?? beforeTokens,
-        contextLimit: contextLimit.known ? contextLimit.limit : undefined,
+        contextLimit: compactedContextLimit,
         compactionRecovery: mergeCompactionRecovery(
           ...snapshotItems.map((item) => (item.type === "agent" || item.type === "compact") ? item.compactionRecovery : undefined),
           payload.recovery,
         ),
         createdAt: new Date().toISOString(),
       });
-      const afterTokens = payload.afterTokens ?? (estimateHistoryTokens(buildChatHistory(replacementItems, t))
+      const compactedHistoryTokens = payload.afterTokens ?? estimateHistoryTokens(buildChatHistory(replacementItems, t));
+      const afterTokens = payload.afterTokens ?? (compactedHistoryTokens
         + estimateIncomingContextTokens(request.incomingText, request.incomingAttachments));
+      const triggerTokens = payload.triggerTokens ?? (contextLimit.known
+        ? Math.ceil(contextLimit.limit * decision.policy.triggerRatio) : undefined);
+      // A standalone compact has no native session measurement. Use
+      // its retained history without the unsent draft for the retirement test.
+      const sessionReadOnly = backendReadOnly || (payload.ok === true && !payload.nativeApplied
+        && triggerTokens !== undefined && Number.isFinite(triggerTokens) && triggerTokens > 0
+        && compactedHistoryTokens >= triggerTokens);
       const latestBeforeCommit = getChatById(request.chatId);
-      if (latestBeforeCommit && hasUnresolvedRuntimeStateRef.current?.(request.chatId, latestBeforeCommit.sessionId, allowPendingApproval)) {
+      if (!backendReadOnly && latestBeforeCommit && hasUnresolvedRuntimeStateRef.current?.(request.chatId, latestBeforeCommit.sessionId, allowPendingApproval)) {
         markLatestGeneration(request.chatId, generation, "failed", "runtime_pending", t("compact.failed"), undefined, compactionProviderUsage);
         return { status: "skipped", decision, chat: latestBeforeCommit };
       }
@@ -301,7 +313,7 @@ export function useContextCompactionController({
         item.type === "compact" && item.id === generation ? { ...item, afterTokens } : item
       ));
 
-      if (controller.signal.aborted) {
+      if (!backendReadOnly && controller.signal.aborted) {
         markLatestGeneration(request.chatId, generation, "cancelled", "cancelled", t("compact.cancelled"), undefined, compactionProviderUsage);
         return { status: "cancelled", decision, chat: getChatById(request.chatId) };
       }
@@ -313,6 +325,7 @@ export function useContextCompactionController({
         summaryDigest: payload.summaryDigest,
         beforeTokens: payload.beforeTokens ?? beforeTokens,
         afterTokens,
+        contextLimit: compactedContextLimit,
         entryCount: payload.entryCount ?? history.length,
         retainedEntryCount: payload.retainedEntryCount,
         fidelity: payload.fidelity || "full",
@@ -326,7 +339,8 @@ export function useContextCompactionController({
       const committed = updateChatIfRevision(request.chatId, workingRevision, (chat) => ({
         ...chat,
         ...applyCompactedAttachmentReferences(chat, snapshotItems, appliedItems),
-        sessionId: payload.nativeApplied ? chat.sessionId : "",
+        sessionId: payload.nativeApplied || sessionReadOnly ? chat.sessionId : "",
+        sessionReadOnly: sessionReadOnly || chat.sessionReadOnly,
         items: appliedItems,
         compaction: appliedState,
       }));
@@ -343,6 +357,7 @@ export function useContextCompactionController({
         const restored = updateChatIfRevision(request.chatId, committedRevision, (chat) => ({
           ...chat,
           sessionId: snapshot.sessionId,
+          sessionReadOnly: backendReadOnly || snapshot.sessionReadOnly,
           items: snapshotItems,
           attachmentPayloads: snapshot.attachmentPayloads,
           compactedAttachmentRefs: snapshot.compactedAttachmentRefs,
@@ -362,6 +377,11 @@ export function useContextCompactionController({
       }
       return { status: "applied", decision, chat: getChatById(request.chatId) };
     } catch (cause) {
+      if (isReadOnlySessionError(cause)) {
+        backendReadOnly = true;
+        updateChatIfRevision(request.chatId, workingRevision, (chat) => ({ ...chat, compaction: snapshot.compaction }));
+        return { status: "skipped", decision, chat: getChatById(request.chatId) };
+      }
       if (!compactionResponseReceived) {
         compactionProviderUsage = mergeCompactionProviderUsage(compactionProviderUsage, {
           exact: false,
@@ -381,6 +401,10 @@ export function useContextCompactionController({
       );
       return { status: cancelled ? "cancelled" : "failed", decision, chat: getChatById(request.chatId) };
     } finally {
+      if (backendReadOnly && updateChat(request.chatId, (chat) => chat.sessionId !== snapshot.sessionId || chat.sessionReadOnly
+        ? chat : { ...chat, sessionReadOnly: true })) {
+        void persistChatsNow().catch(() => undefined);
+      }
       unlinkAbort();
       const active = jobsRef.current.get(request.chatId);
       if (active?.generation === generation) {
@@ -392,7 +416,7 @@ export function useContextCompactionController({
 
   async function prepareTurnContext(input: PrepareTurnContextInput): Promise<PreparedTurnContext | null> {
     const chat = getChatById(input.chatId);
-    if (!chat) {
+    if (!chat || chat.sessionReadOnly) {
       return null;
     }
     if (input.pinnedSessionId) return { baseItems: chat.items, sessionId: chat.sessionId };
@@ -411,20 +435,19 @@ export function useContextCompactionController({
     if (outcome.status === "cancelled") {
       throw new Error(t("compact.cancelled"));
     }
+    const latest = getChatById(input.chatId);
+    if (!latest || latest.sessionReadOnly) return null;
     if (outcome.status === "failed" && outcome.decision?.level === "hard-limit") {
       throw new Error(t("compact.failed"));
     }
     if (outcome.status === "skipped" && outcome.decision?.level === "hard-limit") {
       throw new Error(t("compact.failed"));
     }
-    const latest = getChatById(input.chatId);
-    return latest
-      ? {
-          baseItems: latest.items,
-          sessionId: latest.sessionId,
-          compactionGeneration: latest.compaction?.generation,
-        }
-      : null;
+    return {
+      baseItems: latest.items,
+      sessionId: latest.sessionId,
+      compactionGeneration: latest.compaction?.generation,
+    };
   }
 
   function markLatestGeneration(

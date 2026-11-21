@@ -1481,6 +1481,8 @@
     "newSessionReminderTitle": "この会話が長くなっています",
     "newSessionReminderDescription": "新しい会話で続けることができます。",
     "newSessionReminderButton": "閉じる",
+    "sessionReadOnlyTitle": "この会話は読み取り専用になりました",
+    "sessionReadOnlyDescription": "圧縮後も自動圧縮のしきい値に達しています。履歴は閲覧できます。続けるには新しい会話を開始してください。",
     "usageChange": "{{before}} → {{after}} トークン",
     "failed": "コンテキスト圧縮に失敗しました。元のチャットは保持されています。",
     "cancelled": "コンテキスト圧縮をキャンセルしました。元のチャットは保持されています。",

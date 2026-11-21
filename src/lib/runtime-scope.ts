@@ -113,7 +113,8 @@ export function questionContinuationOwner(
 export function pendingQuestionReviewTargets(chats: ChatThread[], questions: AgentQuestion[], activeChatId: string) {
   const targets = questions.filter((question) => question.status === "pending" && question.sourceTool !== "runtime_tool_loop").flatMap((question) => {
     const chat = questionContinuationOwner(chats, question);
-    if (!chat || chat.archived || chat.items.some((item) => item.type === "question_answer" && item.questionId === question.questionId)) return [];
+    if (!chat || chat.archived || chat.sessionReadOnly
+      || chat.items.some((item) => item.type === "question_answer" && item.questionId === question.questionId)) return [];
     return [{ chat, question }];
   });
   const questionIds = new Set(targets.map(({ question }) => question.questionId));

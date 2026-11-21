@@ -394,11 +394,23 @@ def test_verbatim_assistant_reply_is_never_cut_to_force_fit():
     assert not model.requests
 
 
-def test_native_above_trigger_below_hard_sends_once_without_resummarizing_unchanged_graph():
+@pytest.mark.parametrize("exact_trigger", [False, True])
+def test_successful_native_compaction_at_or_above_trigger_retires_session(tmp_path, monkeypatch, exact_trigger):
+    import threading
+
+    import runtime_planner_service
+    from agent_native_history_store import NativeHistoryStore
+    from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
     from tests.test_native_context_compaction import Compactor, plan
 
     compactor = Compactor()
-    state, planner, model, turn = fixture(compactor, prior=False, current="Original request", limit=16_000)
+    store = NativeHistoryStore(tmp_path)
+    state, planner, model, turn = fixture(compactor, prior=False, current="Original request", limit=16_000, store=store)
+    if exact_trigger:
+        def measured_at_trigger(summary, blocks, fit_limit, _measure):
+            return summary, blocks, fit_limit + 1
+
+        monkeypatch.setattr(runtime_planner_service, "fit_handoff_post_context", measured_at_trigger)
     for index in range(3):
         _pair(state, index)
     with planner.bind_turn({}):
@@ -411,15 +423,16 @@ def test_native_above_trigger_below_hard_sends_once_without_resummarizing_unchan
         pressure = turn.compaction
         assert pressure["applied"] and not pressure["blocked"]
         assert pressure["triggerTokens"] <= pressure["afterTokens"] < pressure["hardLimitTokens"]
-        assert "failureClass" not in pressure
-        turn.persist_runtime_state(request["messages"][-1])
-        request = _request(planner, turn.snapshot())
-        unchanged, guard = planner.maybe_compact_native_context(request, turn)
-        assert unchanged is request
-        assert guard["triggerTokens"] <= guard["beforeTokens"] < guard["hardLimitTokens"]
-        assert not guard["blocked"] and len(compactor.calls) == 1
-    assert plan(planner, turn)["nextStep"] == "done"
-    assert len(model.requests) == len(compactor.calls) == 1
+        if exact_trigger:
+            assert pressure["afterTokens"] == pressure["triggerTokens"] == 13_600
+    assert pressure["sessionReadOnly"] is True
+    assert "failureClass" not in pressure
+    assert plan(planner, turn)["nextStep"] == "context_compaction_required"
+    assert not model.requests and len(compactor.calls) == 1
+    restored = AgentRuntimeSessionState(AgentRuntimeSessionStatePorts(threading.RLock(), store))
+    assert restored.session_is_read_only("s")
+    assert not restored.session_is_read_only("another-session")
+    assert restored.native_conversation("s", binding="b") == turn.snapshot()
 
 
 @pytest.mark.parametrize(("detail_repetitions", "folded"), [(5_000, False), (12_000, True)])

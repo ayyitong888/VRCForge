@@ -40,6 +40,17 @@ class NativeHistoryStore:
         route = hashlib.sha256(binding.encode("utf-8")).hexdigest()
         return self.directory / (session + "-" + route + ".json")
 
+    def _read_only_path(self, session_id: str) -> Path:
+        session = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        return self.directory / (session + ".read-only")
+
+    def session_is_read_only(self, session_id: str) -> bool:
+        return self._read_only_path(session_id).is_file()
+
+    def mark_session_read_only(self, session_id: str) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self._read_only_path(session_id).touch()
+
     def load(self, session_id: str, binding: str | None = None) -> dict[str, Any] | None:
         if binding is None:
             paths = self._paths(session_id)
@@ -72,9 +83,11 @@ class NativeHistoryStore:
             raise ValueError("Saved native history binding is invalid")
         return value
 
-    def save(self, session_id: str, snapshot: dict[str, Any], selections: dict[str, Any]) -> None:
+    def save(self, session_id: str, snapshot: dict[str, Any], selections: dict[str, Any], *,
+             session_read_only: bool = False) -> None:
         raw = json.dumps({"version": 1, "sessionId": session_id, "native": snapshot,
-                          "selections": selections}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                          "selections": selections, **({"sessionReadOnly": True} if session_read_only else {})},
+                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.directory.mkdir(parents=True, exist_ok=True)
         # mkstemp owns a single private handle; close before atomic replacement.
         fd, temporary = tempfile.mkstemp(prefix=".native-", dir=self.directory)
@@ -142,6 +155,7 @@ class NativeHistoryStore:
         return value
 
     def delete(self, session_id: str) -> None:
+        self._read_only_path(session_id).unlink(missing_ok=True)
         for path in self._paths(session_id):
             path.unlink(missing_ok=True)
         for path in self.directory.glob("approval-*.json"):

@@ -3309,6 +3309,11 @@ async def _execute_app_agent_runtime_message(
     browser_available: bool = False,
 ) -> dict[str, Any]:
     runtime_params = agent_runtime_request_payload(runtime_request)
+    if runtime_request.session_id and (runtime_request.attachments or runtime_request.goal_delivery_id):
+        try:
+            await asyncio.to_thread(AGENT_GATEWAY.require_writable_runtime_session, runtime_request.session_id)
+        except AgentGatewayError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.cause_code) from exc
     # Composer uploads use the chat ID. Replies to an active question can
     # use that chat's runtime session ID. This scope is owned by the App runner.
     runtime_params["_attachmentInspectionOwners"] = tuple(
@@ -3426,7 +3431,9 @@ async def _execute_app_agent_runtime_message(
         admission_rejected = getattr(exc, "runtime_admitted", None) is False
         deferred_for_child = admission_rejected and exc.cause_code == "sub_agent_parent_delivery_pending"
         detail: str | dict[str, str] = str(exc)
-        if admission_rejected and followup_claim_token:
+        if exc.cause_code == "session_context_read_only":
+            detail = exc.cause_code
+        elif admission_rejected and followup_claim_token:
             code = "followup_queue_not_ready" if deferred_for_child else "followup_admission_rejected"
             detail = {"code": code, "message": str(exc)}
         elif deferred_for_child:
@@ -3610,6 +3617,8 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
         "provider": request.provider, "model": request.model, "_requestedContextLimit": request.real_context_limit,
     }) if request.provider or request.model or request.session_id else nullcontext()
     try:
+        if request.session_id:
+            AGENT_GATEWAY.require_writable_runtime_session(request.session_id)
         with ExitStack() as stack:
             try:
                 route = stack.enter_context(bind_turn)
@@ -3696,7 +3705,9 @@ def app_agent_compact(request: AgentCompactRequest) -> dict[str, Any]:
             if request.target_tokens is not None:
                 fit_limits.append(max(0, request.target_tokens))
             if request.real_context_limit is not None and request.real_context_limit > 0:
-                fit_limits.append(math.ceil(request.real_context_limit * RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO) - 1)
+                trigger_tokens = math.ceil(request.real_context_limit * RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO)
+                fit_limits.append(trigger_tokens - 1)
+                result["triggerTokens"] = trigger_tokens
             if result.get("ok") and fit_limits:
                 from agent_native_handoff_blocks import fit_handoff_post_context
 
@@ -3866,6 +3877,8 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
         if steer_result.get("accepted") is True:
             await EVENT_BUS.broadcast("agentRuntimeQueue", steer_result)
             return steer_result
+        if steer_result.get("reason") == "session_context_read_only":
+            raise HTTPException(status_code=409, detail="session_context_read_only")
         if steer_result.get("status") == "backpressure" or steer_result.get("reason") in {
             "reserved_input_id", "input_already_recorded",
         }:
@@ -3882,6 +3895,8 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
             "model": queue_request.model, "projectPath": queue_request.project_path, "projectRoot": queue_request.project_root,
             "projectType": queue_request.project_type or ("unity" if (queue_request.project_path or queue_request.project_root) else "general"),
         })
+        if payload.get("reason") == "session_context_read_only":
+            raise HTTPException(status_code=409, detail="session_context_read_only")
         await EVENT_BUS.broadcast("agentRuntimeQueue", payload)
         return payload
     raise HTTPException(status_code=409, detail={"code": "queue_submission_failed"})
@@ -4354,7 +4369,7 @@ async def app_answer_agent_question(question_id: str, request: AgentQuestionAnsw
                 "projectRoot": request.project_root,
             },
         )
-    except AgentQuestionServiceError as exc:
+    except (AgentQuestionServiceError, AgentGatewayError) as exc:
         raise runtime_http_error("agent_goal_request_failed", exc.status_code, exc) from exc
     await EVENT_BUS.broadcast("agentQuestions", {"questions": [payload["question"]]})
     if payload.get("goalDelivery") is not None:
@@ -21353,6 +21368,8 @@ def runtime_http_error(
     """
     if exc is not None and not message:
         message = str(exc)
+    if getattr(exc, "cause_code", None) == "session_context_read_only":
+        code = "session_context_read_only"
     error = (
         runtime_error_from_exception(code, exc, message=message)
         if exc is not None

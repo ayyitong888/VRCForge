@@ -23,6 +23,15 @@ export class ApiError extends Error {
   }
 }
 
+export function isReadOnlySessionError(cause: unknown): boolean {
+  const code = "session_context_read_only";
+  if (cause === code) return true;
+  if (!(cause instanceof ApiError) || cause.status !== 409) return false;
+  const detail = cause.detail;
+  return cause.code === code || cause.message === code || Boolean(detail && typeof detail === "object"
+    && "causeCode" in detail && detail.causeCode === code);
+}
+
 type RuntimeErrorSchema = { schema: string; code: string; message: string };
 
 /** Detect the unified runtime error schema in an HTTP error detail. */

@@ -161,6 +161,7 @@ import {
 import { ingestChatAttachment } from "./lib/attachment-ingest";
 import { serializeChatAttachments } from "./lib/conversation-utils";
 import { resolveContextLimit } from "./lib/context-compaction";
+import { applyReadOnlyCompactionReceipt } from "./lib/chat-compaction-state";
 import { thinkingTraceLabel } from "./lib/provider-ui";
 import { questionAnswerItem } from "./lib/question-answer";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem } from "./lib/chat-types";
@@ -911,7 +912,7 @@ export default function App() {
   const handoffTargetChats = useMemo(() => {
     const sourceScope = normalizeProjectPathKey(displayChat?.projectPath || "");
     return sidebarChats
-      .filter((chat) => chat.id !== activeChatId && normalizeProjectPathKey(chat.projectPath || "") === sourceScope)
+      .filter((chat) => !chat.sessionReadOnly && chat.id !== activeChatId && normalizeProjectPathKey(chat.projectPath || "") === sourceScope)
       .map((chat) => ({ id: chat.id, title: chat.title || t("header.currentSession") }));
   }, [displayChat?.projectPath, activeChatId, sidebarChats, t]);
   const updateHandoffCardStatus = async (handoffId: string, status: string) => {
@@ -1011,6 +1012,7 @@ export default function App() {
 
   const conversation = displayChat?.items ?? [];
   const visibleChat = displayChat ?? previewChat;
+  const sessionReadOnly = visibleChat?.sessionReadOnly === true;
   const conversationScroll = useConversationScroll({
     chatKey: `${endpoint}\n${activeChatId || ""}`,
     endRef: conversationEndRef,
@@ -1025,7 +1027,8 @@ export default function App() {
   const latestEditableUserItemId = latestConversationItemId(conversation, (item) => item.type === "user");
   const runtimeScope = { sessionId, projectRoot: activeRuntimeProjectPath };
   const projectPendingApprovalItems = (agentApprovals ?? []).filter(
-    (item) => item.status === "pending" && approvalBelongsToRuntimeScope(item, runtimeScope),
+    (item) => item.status === "pending" && approvalBelongsToRuntimeScope(item, runtimeScope)
+      && !pendingApprovalOwner(item, activityOwners)?.sessionReadOnly,
   );
   const pendingApprovalItems = projectPendingApprovalItems.filter(
     (item) => displayChat && pendingApprovalOwner(item, activityOwners)?.id === displayChat.id,
@@ -1040,7 +1043,7 @@ export default function App() {
   }, [openChat]);
   const openPendingApprovalOwner = useCallback((approval: AgentApproval) => {
     const owner = pendingApprovalOwner(approval, activityOwners);
-    if (!owner) return false;
+    if (!owner || owner.sessionReadOnly) return false;
     openRuntimeChat(owner);
     setRightSidebarCollapsed(false);
     setPendingApprovalPanelOpen(true);
@@ -1220,7 +1223,7 @@ export default function App() {
     setReviewQuestionReveal({ chatId: chat.id, questionId });
   };
   const openQuestionFromChat = (questionId: string) => {
-    if (displayChat && scopedAgentQuestions.some((question) => question.questionId === questionId && question.status === "pending")) {
+    if (displayChat && !sessionReadOnly && scopedAgentQuestions.some((question) => question.questionId === questionId && question.status === "pending")) {
       openQuestionReview(displayChat, questionId);
     }
   };
@@ -1242,7 +1245,7 @@ export default function App() {
   }
   for (const approval of agentApprovals ?? []) {
     const owner = pendingApprovalOwner(approval, activityOwners);
-    if (owner && !owner.archived) addPendingItem(owner, {
+    if (owner && !owner.archived && !owner.sessionReadOnly) addPendingItem(owner, {
       id: `approval:${approval.id}`, kind: "approval", title: presentApproval(approval, t).title,
       onOpen: () => openPendingApprovalOwner(approval),
     });
@@ -1277,7 +1280,7 @@ export default function App() {
     provider: providerSnapshot.provider,
     model: effectivePredictionModel,
     reasoningEffort: predictionReasoningEffort,
-    eligible: inputPredictionEnabled && activeView === "chat" && runtimeConnected && providerConfigured
+    eligible: inputPredictionEnabled && !sessionReadOnly && activeView === "chat" && runtimeConnected && providerConfigured
       && Boolean(predictionChat?.sessionId) && !visibleQueued.length
       && !attachments.length && !attachmentsLoading && !pendingReplyQuestionId && !editingMessage,
     busy: Boolean(activeChatPending || sending),
@@ -1285,7 +1288,7 @@ export default function App() {
     latestReply: latestPredictionReply,
   });
   onPredictionResumeRef.current = (event, chatId) => {
-    if (!inputPredictionEnabled || activeView !== "chat" || activeChatId !== chatId) return;
+    if (!inputPredictionEnabled || sessionReadOnly || activeView !== "chat" || activeChatId !== chatId) return;
     void inputPrediction.offerAfterResume(event, {
       chatId, getChatById,
       refreshRuntime: () => Promise.all([refresh(endpoint), refreshRuntimeRuns(false, endpoint)]),
@@ -1377,7 +1380,7 @@ export default function App() {
       if (delivery.response) {
         const response = delivery.response;
         const completedAt = delivery.completedAt || response.completedAt;
-        updateChat(targetChat.id, (chat) => ({
+        updateChat(targetChat.id, (chat) => applyReadOnlyCompactionReceipt({
           ...touchChat(chat, completedAt),
           sessionId: response.sessionId || response.session_id || chat.sessionId,
           title: chat.title || resumePrompt,
@@ -1403,7 +1406,7 @@ export default function App() {
               ...(completedAt ? { completedAt } : {}),
             },
           ],
-        }));
+        }, response.contextCompaction, response.turnId || response.turn_id || delivery.clientTurnId, response.sessionReadOnly));
         try {
           await persistChatsNow();
           return "persisted";
@@ -1602,7 +1605,7 @@ export default function App() {
         }
         if (question.status === "pending") {
           const owner = questionContinuationOwner(activityOwners, question) ?? await loadQuestionOwner(question);
-          if (active && owner && !owner.archived) openQuestionReview(owner, question.questionId);
+          if (active && owner && !owner.archived && !owner.sessionReadOnly) openQuestionReview(owner, question.questionId);
         }
       })().catch((cause) => active && setError(actionErrorMessage("appActionError.openQuestion", cause)));
     })
@@ -1949,6 +1952,7 @@ export default function App() {
     if (!answeredQuestion) return;
     try {
       const answerChat = await loadQuestionOwner(answeredQuestion);
+      if (answerChat?.sessionReadOnly) return;
       const payload = await answerAgentQuestion(endpoint, questionId, {
         answer: value,
         selectedOptionId: optionId,
@@ -1973,7 +1977,7 @@ export default function App() {
     }
   };
   const replyToAgentQuestionInComposer = (questionId: string) => {
-    if (!displayChat || !scopedAgentQuestions.some((question) => question.questionId === questionId && question.status === "pending")) return;
+    if (!displayChat || sessionReadOnly || !scopedAgentQuestions.some((question) => question.questionId === questionId && question.status === "pending")) return;
     setPendingQuestionReply({ chatId: displayChat.id, questionId });
     setActiveView("chat");
   };
@@ -3004,7 +3008,7 @@ export default function App() {
 
   async function editConversationMessage(itemId: string) {
     const chat = await loadChat(activeChatId).catch(() => undefined);
-    if (!chat) {
+    if (!chat || chat.sessionReadOnly) {
       return;
     }
     if (latestConversationItemId(chat.items, (item) => item.type === "user") !== itemId) {
@@ -3077,7 +3081,7 @@ export default function App() {
       return true;
     }
     const originalChat = getChatById(draft.chatId);
-    if (!originalChat || originalChat.id !== activeChatId) {
+    if (!originalChat || originalChat.sessionReadOnly || originalChat.id !== activeChatId) {
       discardMessageEdit();
       return true;
     }
@@ -3107,7 +3111,7 @@ export default function App() {
       const current = messageEditSnapshotRef.current;
       if (current.draft !== draft || current.chatId !== draft.chatId || current.busy || isChatRunActive(draft.chatId)) return true;
       const chat = getChatById(draft.chatId);
-      if (!chat || chat.sessionId !== originalChat.sessionId) return true;
+      if (!chat || chat.sessionReadOnly || chat.sessionId !== originalChat.sessionId) return true;
       const index = chat.items.findIndex((item) => item.id === draft.itemId);
       const item = index >= 0 ? chat.items[index] : null;
       if (!item || item.type !== "user") return true;
@@ -3157,6 +3161,7 @@ export default function App() {
     const state = retryStateRef.current;
     if (!loaded || state.chatId !== activeChatId) return;
     const chat = getChatById(activeChatId) || loaded;
+    if (chat.sessionReadOnly) return;
     if (state.busy || isChatRunActive(chat.id) || pendingConversationRetry(chat, itemId, subAgentTasksRef.current, state.runs)) {
       setError(t("chat.cannotActionWhileRunning"));
       return;
@@ -3207,6 +3212,7 @@ export default function App() {
   }
 
   async function runExplicitWorkspaceAction(actionId: ComposerActionId) {
+    if (sessionReadOnly) return;
     const action = composerActions.find((item) => item.id === actionId);
     setRuntimeNotice("");
     if (!action) {
@@ -3271,6 +3277,7 @@ export default function App() {
       return;
     }
     const owner = await loadChat(activeChatId).catch(() => undefined);
+    if (owner?.sessionReadOnly) return;
     if (!owner || (!owner.items.length && !owner.sessionId)) {
       setError(t("compact.noContent"));
       return;
@@ -3417,6 +3424,7 @@ export default function App() {
 
   async function submitMessage(event?: FormEvent, deliveryMode: "steer" | "queue" = "steer") {
     event?.preventDefault();
+    if (sessionReadOnly) return;
     if (activeChatPending) {
       setRuntimeNotice(t("common.loading"));
       return;
@@ -3433,6 +3441,7 @@ export default function App() {
     setError("");
     setChatRunError("", activeChatId);
     const owner = activeChatId ? await loadChat(activeChatId).catch(() => undefined) : undefined;
+    if (owner?.sessionReadOnly) return;
     if (activeChatId && !owner) {
       setError(t("chat.sessionRestoreFailed"));
       return;
@@ -3447,6 +3456,7 @@ export default function App() {
       replySubmitInFlightRef.current = true;
       try {
         const answerChat = await loadQuestionOwner(question);
+        if (answerChat?.sessionReadOnly) return;
         const payload = await answerAgentQuestion(endpoint, pendingReplyQuestionId, {
           answer: composerMessage,
           selectedOptionId: "custom",
@@ -4699,6 +4709,7 @@ export default function App() {
               onBindProject={bindProject}
               conversation={previewChat?.items ?? conversation}
               readOnlyHistory={Boolean(previewChat)}
+              sessionReadOnly={sessionReadOnly}
               attachmentPayloads={displayChat?.attachmentPayloads}
               queued={visibleQueued}
               agentQuestions={scopedAgentQuestions}
@@ -4976,7 +4987,7 @@ export default function App() {
       <SidebarMenus
         projectMenu={projectMenu}
         chatMenu={chatMenu}
-        selectionMenu={activeView === "chat" && !selectedSubAgentPanelOpen && !showProjectModal ? selectionMenu : null}
+        selectionMenu={activeView === "chat" && !sessionReadOnly && !selectedSubAgentPanelOpen && !showProjectModal ? selectionMenu : null}
         deleteTargetId={deleteTargetId}
         chats={sidebarChats}
         customPathSet={customPathSet}

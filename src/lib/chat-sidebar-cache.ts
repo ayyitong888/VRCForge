@@ -4,7 +4,7 @@ export const CHAT_SIDEBAR_CACHE_KEY = "vrcforge_chat_sidebar_cache";
 
 export type ChatSidebarCacheEntry = Pick<
   ChatThread,
-  "id" | "sessionId" | "title" | "projectPath" | "projectType" | "pinned" | "archived" | "isTestChat" | "createdAt" | "updatedAt" | "lastViewedAt"
+  "id" | "sessionId" | "title" | "projectPath" | "projectType" | "pinned" | "archived" | "isTestChat" | "createdAt" | "updatedAt" | "lastViewedAt" | "sessionReadOnly"
 > & { sourceProjectPath?: string };
 
 function toEntry(value: unknown): ChatSidebarCacheEntry | null {
@@ -24,6 +24,7 @@ function toEntry(value: unknown): ChatSidebarCacheEntry | null {
     createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : "",
     updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : "",
     lastViewedAt: typeof candidate.lastViewedAt === "string" ? candidate.lastViewedAt : undefined,
+    sessionReadOnly: candidate.sessionReadOnly === true ? true : undefined,
     sourceProjectPath: typeof candidate.sourceProjectPath === "string" ? candidate.sourceProjectPath : undefined,
   };
 }
@@ -44,7 +45,7 @@ export function saveChatSidebarCache(
 ): void {
   try {
     const sourcePaths = new Map(catalog.map((entry) => [entry.id, entry.sourceProjectPath]));
-    const entries: ChatSidebarCacheEntry[] = chats.map(({ id, sessionId, title, projectPath, projectType, pinned, archived, isTestChat, createdAt, updatedAt, lastViewedAt }) => ({
+    const entries: ChatSidebarCacheEntry[] = chats.map(({ id, sessionId, title, projectPath, projectType, pinned, archived, isTestChat, createdAt, updatedAt, lastViewedAt, sessionReadOnly }) => ({
       id,
       sessionId,
       title,
@@ -56,6 +57,7 @@ export function saveChatSidebarCache(
       createdAt,
       updatedAt,
       lastViewedAt,
+      sessionReadOnly,
       sourceProjectPath: sourcePaths.get(id),
     }));
     window.localStorage.setItem(CHAT_SIDEBAR_CACHE_KEY, JSON.stringify(entries));

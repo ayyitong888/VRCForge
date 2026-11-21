@@ -1595,6 +1595,7 @@ def runtime_compaction_audit_view(value: dict[str, object] | None) -> dict[str, 
             "triggerTokens",
             "hardLimitTokens",
             "targetAfterTokens",
+            "sessionReadOnly",
             "entryCount",
             "retainedEntryCount",
             "summaryDigest",
@@ -1612,7 +1613,7 @@ def runtime_compaction_audit_view(value: dict[str, object] | None) -> dict[str, 
 def runtime_compaction_cancelled_view(value: dict[str, object] | None) -> dict[str, object]:
     source = ensure_dict(value)
     return {
-        **{key: item for key, item in source.items() if key not in {"summary", "suppressionReason"}},
+        **{key: item for key, item in source.items() if key not in {"summary", "suppressionReason", "sessionReadOnly"}},
         "applied": False,
         "failureClass": "cancelled",
         "blocked": False,
@@ -2629,7 +2630,7 @@ class RuntimePlannerService:
             view_snapshot = None
         guard = self.native_context_guard(request, context_usage=context_usage, handoff_snapshot=view_snapshot,
                                          resume_read_projection=resume_read_projection)
-        if guard is None or (not force and
+        if guard is None or native_turn.session_is_read_only() or (not force and
             not guard["blocked"]
             and guard.get("softProjectedTokens", guard["beforeTokens"]) < guard["triggerTokens"]
         ):
@@ -2803,10 +2804,12 @@ class RuntimePlannerService:
             blocked = after_tokens >= guard["hardLimitTokens"]
             if not graph_valid and blocked:
                 raise ValueError("still_over_threshold")
+            session_read_only = after_tokens >= guard["triggerTokens"]
             # The facade checks cancellation and exact snapshot identity inside
             # the owner's existing lock. No mutation precedes this commit.
             native_turn.replace_compacted_history(snapshot, MODEL_HANDOFF_PREFIX + summary, recovery=recovery,
-                                                  current_context=current_context, handoff_blocks=blocks)
+                                                  current_context=current_context, handoff_blocks=blocks,
+                                                  session_read_only=session_read_only)
             runtime_messages = candidate_runtime_messages
             saved = native_turn.snapshot()
             native_turn.compaction_attempted_snapshot = (compaction_source(saved)
@@ -2814,6 +2817,7 @@ class RuntimePlannerService:
             summary_digest = (hashlib.sha256(summary.encode("utf-8")).hexdigest() if summary != full_summary
                               else result.get("summaryDigest"))
             metadata.update({"applied": True, "blocked": blocked, "afterTokens": after_tokens,
+                             "sessionReadOnly": session_read_only,
                              "entryCount": result.get("entryCount"), "retainedEntryCount": result.get("retainedEntryCount"),
                              "summaryDigest": summary_digest, "fidelity": result.get("fidelity"),
                              "failureClass": "still_over_threshold" if blocked else result.get("fallbackReason"),
@@ -3406,18 +3410,19 @@ class RuntimePlannerService:
                     if native_guard is not None and context_usage is not None:
                         context_usage["nativeContextGuard"] = native_guard
                     last_compaction = native_turn.compaction or {}
-                    if (native_turn.cancelled() or native_guard is not None and native_guard.get("blocked")
+                    session_read_only = native_turn.session_is_read_only()
+                    if (native_turn.cancelled() or session_read_only or native_guard is not None and native_guard.get("blocked")
                             or last_compaction.get("applied") and last_compaction.get("blocked")
                             and last_compaction.get("contextLimit") == metadata.verified_context_limit):
                         cancelled = native_turn.cancelled()
-                        if not cancelled and self._refresh_request_metadata() != metadata:
+                        if not cancelled and not session_read_only and self._refresh_request_metadata() != metadata:
                             raise _RequestRouteChanged(retry_attempts)
                         blocked_plan = self._planner_failure_plan(
                             cause_code="context_compaction_required", phase=phase, planner_label=planner_label,
                         )
                         blocked_plan.update({
                             "summary": "Cancelled." if cancelled else "Native context could not create enough safe headroom.",
-                            "reply": "Request cancelled." if cancelled else "This conversation is too long to send safely. Start a new conversation with the relevant details to continue.",
+                            "reply": "Request cancelled." if cancelled else "" if session_read_only else "This conversation is too long to send safely. Start a new conversation with the relevant details to continue.",
                             "nextStep": "cancelled" if cancelled else "context_compaction_required",
                             "contextCompaction": native_turn.compaction or native_guard,
                         })
@@ -4582,6 +4587,7 @@ class RuntimePlannerService:
                         "applied": True,
                         "summary": summary,
                         "afterTokens": after_tokens,
+                        "sessionReadOnly": after_tokens >= trigger_tokens,
                         "compactedLoopStepCount": compacted_loop_steps,
                         "entryCount": result.get("entryCount"),
                         "retainedEntryCount": result.get("retainedEntryCount"),

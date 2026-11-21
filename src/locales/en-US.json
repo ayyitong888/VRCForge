@@ -1488,6 +1488,8 @@
     "newSessionReminderTitle": "This conversation is getting long",
     "newSessionReminderDescription": "Consider continuing in a new conversation.",
     "newSessionReminderButton": "Got it",
+    "sessionReadOnlyTitle": "This conversation is now read-only",
+    "sessionReadOnlyDescription": "The context is still at or above the automatic compaction threshold. You can view the history and start a new conversation to continue.",
     "usageChange": "{{before}} → {{after}} tokens",
     "failed": "Context compression failed; the original chat was kept.",
     "cancelled": "Context compression cancelled; the original chat was kept.",

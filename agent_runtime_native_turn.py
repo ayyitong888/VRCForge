@@ -357,6 +357,9 @@ class NativeRuntimeTurn:
     def session_id(self) -> str:
         return self._session_id
 
+    def session_is_read_only(self) -> bool:
+        return self._state.session_is_read_only(self._session_id)
+
     @property
     def consumed_steer_input_ids(self) -> list[str]:
         """Exact receipts from successful insertion before a model boundary."""
@@ -494,7 +497,8 @@ class NativeRuntimeTurn:
                                  *, recovery: dict[str, Any] | None = None,
                                  current_context: list[dict[str, Any]] | None = None,
                                  tail_from: int | None = None,
-                                 handoff_blocks: dict[str, Any] | None = None) -> None:
+                                 handoff_blocks: dict[str, Any] | None = None,
+                                 session_read_only: bool = False) -> None:
         # Check Stop and compare-and-replace under the same existing state lock.
         with self._state.shared_state_lock:
             if self.cancelled():
@@ -502,7 +506,7 @@ class NativeRuntimeTurn:
             compacted = self._state.replace_native_compacted_history(
                 self._session_id, binding=self._binding,
                 expected_snapshot=expected_snapshot, summary=summary, recovery=recovery, current_context=current_context,
-                tail_from=tail_from, handoff_blocks=handoff_blocks,
+                tail_from=tail_from, handoff_blocks=handoff_blocks, session_read_only=session_read_only,
             )
             if handoff_blocks is not None:
                 # Any steer already consumed by this history enters the handoff

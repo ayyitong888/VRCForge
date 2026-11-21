@@ -24,6 +24,7 @@ def sidebar_entry(chat: dict[str, Any]) -> dict[str, Any]:
         "projectPath": project_path,
         "projectType": project_type,
         **{key: chat[key] for key in ("pinned", "archived", "isTestChat") if key in chat},
+        **({"sessionReadOnly": True} if chat.get("sessionReadOnly") is True else {}),
         **{key: chat[key] for key in ("createdAt", "updatedAt", "lastViewedAt") if isinstance(chat.get(key), str)},
     }
 

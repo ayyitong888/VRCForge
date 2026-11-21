@@ -1481,6 +1481,8 @@
     "newSessionReminderTitle": "這段對話已經很長",
     "newSessionReminderDescription": "可以開啟新對話繼續。",
     "newSessionReminderButton": "知道了",
+    "sessionReadOnlyTitle": "此對話已轉為唯讀",
+    "sessionReadOnlyDescription": "壓縮後仍達到自動壓縮門檻。你可以查看記錄，請建立新對話繼續。",
     "usageChange": "{{before}} → {{after}} Token",
     "failed": "上下文壓縮失敗，原對話已保留。",
     "cancelled": "已取消上下文壓縮，原對話已保留。",

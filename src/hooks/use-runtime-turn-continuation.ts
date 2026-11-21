@@ -10,6 +10,7 @@ import { questionContinuationOwner } from "../lib/runtime-scope";
 import { runtimeParentOwner, runtimeTurnLineage } from "../lib/runtime-turn-lineage";
 import type { RuntimeTurnLineage } from "../lib/api/types";
 import { isInterruptedRuntimeTurn } from "../lib/runtime-run-status";
+import { applyReadOnlyCompactionReceipt } from "../lib/chat-compaction-state";
 
 export { RUNTIME_ACTIVITY_STREAM_PREFIX } from "../lib/runtime-stream-owner";
 
@@ -75,6 +76,7 @@ export type RuntimeTurnEvent = RuntimeTurnLineage & {
   schema?: string;
   ok?: boolean;
   status?: string;
+  sessionReadOnly?: boolean;
   dispatchStopped?: boolean;
   unityWriteMayHaveExecuted?: boolean;
   sessionId?: string;
@@ -86,6 +88,7 @@ export type RuntimeTurnEvent = RuntimeTurnLineage & {
   model?: string;
   consumedSteerInputIds?: string[];
   contextUsage?: AgentRuntimeResponse["contextUsage"];
+  contextCompaction?: AgentRuntimeResponse["contextCompaction"];
   memoryUsage?: AgentRuntimeResponse["memoryUsage"];
   plan?: {
     summary?: string;
@@ -408,6 +411,7 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
   return {
     ok: event.ok ?? true,
     ...(event.status ? { status: event.status } : {}),
+    ...(event.sessionReadOnly === true ? { sessionReadOnly: true } : {}),
     ...(event.continuationSource === "foreground_interrupted" ? { status: isInterruptedRuntimeTurn(event) ? "interrupted" : "blocked" } : {}),
     ...runtimeTurnLineage(event),
     ...(event.dispatchStopped && { dispatchStopped: true }),
@@ -420,6 +424,7 @@ export function responseFromRuntimeTurnEvent(event: RuntimeTurnEvent): AgentRunt
     model: event.model?.trim() || undefined,
     consumedSteerInputIds: event.consumedSteerInputIds?.filter((id) => typeof id === "string" && /^[A-Za-z0-9_.:-]{1,240}$/.test(id)).slice(0, 256),
     contextUsage: event.contextUsage,
+    ...(event.contextCompaction ? { contextCompaction: event.contextCompaction } : {}),
     memoryUsage: event.memoryUsage,
     observe: {},
     plan: {
@@ -521,6 +526,10 @@ export function useRuntimeTurnContinuationDelivery({
       }
     }
     pendingRef.current.delete(key);
+    if (event.sessionReadOnly === true || event.contextCompaction?.sessionReadOnly) {
+      updateChatRef.current?.(ownerChat.id, (chat) => chat.sessionId === event.sessionId
+        ? applyReadOnlyCompactionReceipt(chat, event.contextCompaction, event.turnId!, event.sessionReadOnly) : chat);
+    }
     const finish = () => {
       onContinuationRef.current?.(event, ownerChat);
       return true;

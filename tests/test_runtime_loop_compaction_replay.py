@@ -2,6 +2,11 @@ import json
 import re
 from unittest.mock import patch
 
+import pytest
+
+import runtime_planner_service
+from agent_gateway import AgentGateway, AgentGatewayError
+from agent_handoff_graph import HANDOFF_GRAPH_SCHEMA
 from context_compaction import MODEL_HANDOFF_PREFIX
 from runtime_planner_service import PlannerModelResult, PlannerTurnMetadata, estimate_runtime_context_tokens
 from test_agent_loop_p0 import AgentLoopP0Tests
@@ -32,20 +37,22 @@ class SequentialLegacyModel:
 
 
 class DeterministicLegacyCompactor:
-    def __init__(self):
+    def __init__(self, summary="COMPACTED_LEGACY_PREFIX_SUMMARY"):
         self.calls = []
+        self.summary = summary
 
     def compact(self, history, request):
         self.calls.append((tuple(dict(item) for item in history), dict(request)))
         return {
-            "summary": "COMPACTED_LEGACY_PREFIX_SUMMARY",
+            "summary": self.summary,
             "entryCount": len(history),
             "retainedEntryCount": 1,
             "providerAttempts": 0,
         }
 
 
-def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execution_ledger():
+@pytest.mark.parametrize("at_trigger", [False, True])
+def test_legacy_runtime_compaction_offsets_prompt_or_retires_at_trigger(monkeypatch, at_trigger):
     fixture = AgentLoopP0Tests("test_loaded_skill_policy_blocks_disallowed_tool_then_allows_real_evidence")
     fixture.setUp()
     gateway = fixture.gateway
@@ -53,6 +60,17 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
     original = (planner._model, planner._compactor, planner._turn, planner._desktop)
     model = SequentialLegacyModel()
     compactor = DeterministicLegacyCompactor()
+    if at_trigger:
+        compactor.summary = json.dumps({"schema": HANDOFF_GRAPH_SCHEMA, "nodes": {
+            "next": {"kind": "task", "text": "Keep the remaining task visible.", "status": "pending"},
+        }, "edges": []})
+        real_fit = runtime_planner_service.fit_handoff_post_context
+
+        def fit_at_trigger(summary, blocks, fit_limit, measure):
+            summary, blocks, _ = real_fit(summary, blocks, fit_limit, measure)
+            return summary, blocks, fit_limit + 1
+
+        monkeypatch.setattr(runtime_planner_service, "fit_handoff_post_context", fit_at_trigger)
     original_maybe_compact = planner.maybe_compact_runtime_history
     compaction_inputs = []
 
@@ -118,6 +136,20 @@ def test_legacy_runtime_compaction_offsets_prompt_only_and_preserves_full_execut
         source = "\n".join(item["text"] for item in compaction_input)
         assert all(marker in source for marker in ("LONG_PRIOR_HISTORY_MARKER", "FIRST_OBSERVATION_MARKER", "LATEST_OBSERVATION_MARKER"))
         assert any(row["text"] == "VERBATIM_ORIGINAL_REQUEST" for row in compaction_request["_handoffTaskInputs"])
+        if at_trigger:
+            session_id, client_turn_id = "legacy-compaction-replay-session", "legacy-compaction-replay-client"
+            receipt = result["contextCompaction"]
+            assert receipt["applied"] and receipt["sessionReadOnly"] and not receipt["blocked"]
+            assert receipt["afterTokens"] == receipt["triggerTokens"] == 27_880
+            assert result["plan"]["nextStep"] == "context_compaction_required"
+            assert len(model.prompts) == shell_execute.call_count == 4
+            restarted = AgentGateway(gateway.config_path, gateway.audit_dir)
+            assert restarted.get_runtime_session(session_id)["session"]["sessionReadOnly"] is True
+            assert restarted.get_runtime_session(session_id, client_turn_id=client_turn_id)["sessionReadOnly"] is True
+            with pytest.raises(AgentGatewayError, match="session_context_read_only") as rejected:
+                restarted.runtime_message({"sessionId": session_id, "message": "Continue"})
+            assert rejected.value.status_code == 409
+            return
         assert shell_execute.call_count == 5
 
         compacted_prompts = [prompt for prompt in model.prompts if "COMPACTED_LEGACY_PREFIX_SUMMARY" in prompt]

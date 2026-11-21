@@ -80,7 +80,8 @@ const mergeCompactionProviderUsage = (prior, current) => {
   if (!result.exact) result.unavailableReason = prior.unavailableReason || current.unavailableReason || "provider_usage_incomplete";
   return result;
 };
-const evaluateCompactionBudget = () => globalThis.__compactionHarness.budget || ({ shouldCompact: true, level: "hard-limit", reason: "test", projectedTokens: 120, minimumReductionTokens: 1 });
+const evaluateCompactionBudget = () => ({ policy: { triggerRatio: 0.85 }, ...(globalThis.__compactionHarness.budget || { shouldCompact: true, level: "hard-limit", reason: "test", projectedTokens: 120, minimumReductionTokens: 1 }) });
+const isReadOnlySessionError = (cause) => cause === "session_context_read_only";
 ${implementation}
 `;
 const compiled = ts.transpileModule(harness, {
@@ -174,6 +175,36 @@ function makeHarness(chat, persistChatsNow) {
 function request() {
   return { chatId: "chat-1", endpoint: "http://test", trigger: "manual", phase: "standalone", provider: "test", model: "test" };
 }
+
+test("a successful native compact at the auto threshold retires the session and preserves the transcript", async () => {
+  const chat = makeChat();
+  let calls = 0;
+  const h = makeHarness(chat, async () => {});
+  h.compactAgentHistoryState.promise = async () => {
+    calls += 1;
+    return { ok: true, nativeApplied: true, sessionReadOnly: true, summary: "handoff", afterTokens: 850, triggerTokens: 850 };
+  };
+  const controller = h.render();
+  assert.equal((await controller.compactChat(request())).status, "applied");
+  assert.equal(chat.sessionReadOnly, true);
+  assert.equal(chat.sessionId, "session-old");
+  assert.equal(chat.compaction.afterTokens, 850);
+  assert.deepEqual(chat.items.filter((item) => item.type !== "compact").map((item) => item.id), rawIds);
+  assert.equal(await controller.prepareTurnContext({ chatId: chat.id }), null);
+  assert.equal((await controller.compactChat(request())).status, "skipped");
+  assert.equal(calls, 1);
+});
+
+test("a missed native retirement is restored from the read-only denial", async () => {
+  const chat = makeChat();
+  const h = makeHarness(chat, async () => {});
+  h.compactAgentHistoryState.promise = async () => { throw "session_context_read_only"; };
+  const outcome = await h.render().compactChat(request());
+  assert.equal(outcome.status, "skipped");
+  assert.equal(chat.sessionReadOnly, true);
+  assert.equal(chat.compaction, undefined);
+  assert.deepEqual(chat.items.map((item) => item.id), rawIds);
+});
 
 test("manual native compaction keeps the pending approval on its original session and sends all user statements", async () => {
   const chat = makeChat(true);
@@ -391,6 +422,8 @@ test("a returned handoff is retained even when the active projection grows", asy
   });
   const result = await harness.render(() => false).compactChat(request());
   assert.equal(result.status, "applied");
+  assert.equal(chat.sessionReadOnly, true);
+  assert.equal(chat.sessionId, "session-old");
   assert.equal(chat.compaction.failureClass, undefined);
   assert.equal(typeof chat.compaction.beforeTokens, "number");
   assert.equal(typeof chat.compaction.afterTokens, "number");
