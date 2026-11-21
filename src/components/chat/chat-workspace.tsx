@@ -39,6 +39,7 @@ import { ChatPositionRail, type ChatPositionMarker } from "./chat-position-rail"
 import { isExternalRuntimeStream } from "../../lib/runtime-stream-owner";
 import { automaticTurnWaitStage, runtimeTurnActivityStatus } from "../../lib/runtime-run-status";
 import { chatCompactionStatusForDisplay } from "../../lib/chat-compaction-state";
+import { useQuestionDockPresentation } from "../../lib/chat-question-dock";
 
 function formatGoalElapsed(totalSeconds: number): string {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -198,6 +199,7 @@ export function ChatWorkspace({
   onBackgroundGoalCatchUpDismiss,
   onAnswerQuestion,
   onDismissQuestion,
+  onQuestionSpeechDismissed,
   onReopenQuestion,
   reviewQuestionReveal,
   onReplyInChat,
@@ -313,6 +315,7 @@ export function ChatWorkspace({
   onBackgroundGoalCatchUpDismiss: () => void;
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   onDismissQuestion: (questionId: string) => void;
+  onQuestionSpeechDismissed?: (questionId: string) => void;
   onReopenQuestion?: (questionId: string) => void;
   reviewQuestionReveal?: { questionId: string } | null;
   onReplyInChat?: (questionId: string) => void;
@@ -452,7 +455,7 @@ export function ChatWorkspace({
   };
   const liveQuestions = pendingQuestionPrompts.filter(question => isLiveTurn(questionOrigin(question)));
   const pendingQuestionsByOrigin = new Map<ConversationItem, AgentQuestion[]>();
-  for (const question of liveQuestions) {
+  for (const question of pendingQuestionPrompts) {
     const origin = questionOrigin(question);
     if (!origin) continue;
     const questions = pendingQuestionsByOrigin.get(origin) || [];
@@ -552,11 +555,11 @@ export function ChatWorkspace({
       clientTurnId: ownerTurn,
     };
   };
-  const questionDockQuestions = dockQuestions.some((question) => question.questionId === questionReveal?.questionId)
-    ? dockQuestions : liveQuestions.filter((question) => !dismissedQuestionIds?.has(question.questionId));
-  const questionDock = questionDockQuestions.length > 0 && !pendingReplyQuestion ? (
+  const openQuestion = useQuestionDockPresentation({ chatId: sessionHandoffSourceChatId, sessionId: runtimeSessionId || "",
+    conversation, questions: dockQuestions, liveQuestions, reveal: questionReveal, onSpeechDismissed: onQuestionSpeechDismissed });
+  const questionDock = (
     <AgentQuestionCard
-      questions={questionDockQuestions}
+      questions={openQuestion && !pendingReplyQuestion ? [openQuestion] : []}
       reveal={questionReveal}
       onAnswerQuestion={onAnswerQuestion}
       onDismissQuestion={onDismissQuestion}
@@ -565,7 +568,7 @@ export function ChatWorkspace({
       capturePreviewsForQuestion={questionCapturePreviews}
       resourceImageContextForQuestion={questionResourceImageContext}
     />
-  ) : null;
+  );
   const taskProjection = projectConversationTasks(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions, processRounds);
   const roundDateSeparators = conversationRoundDateSeparators(conversationItems, steeringProjection.initialUsersByTurnId, projectedAgentQuestions, taskProjection);
   const activeStreamingItems = conversationItems.filter((item): item is Extract<ConversationItem, { type: "streaming" }> => item.type === "streaming");

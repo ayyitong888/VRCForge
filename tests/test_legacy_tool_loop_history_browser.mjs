@@ -35,7 +35,7 @@ const bundle = await build({
     import React, { useState } from "react";
     import { createRoot } from "react-dom/client";
     import { ChatWorkspace } from "./src/components/chat/chat-workspace";
-    import { RuntimeAttentionRows } from "./src/components/runtime/runtime-sidebar-ui";
+    import { RuntimePendingItems } from "./src/components/runtime/runtime-pending-items";
     import { pendingQuestionReviewTargets } from "./src/lib/runtime-scope";
     import { projectRuntimeResponseForDisplay } from "./src/lib/chat-timeline-presentation";
     import { initializeI18n, setLocale } from "./src/i18n";
@@ -55,7 +55,9 @@ const bundle = await build({
         id: chatId, items, sessionId: response.sessionId, projectPath: realQuestion.projectRoot,
       }], questions, chatId);
       return <>
-        <div id="right-sidebar"><RuntimeAttentionRows pendingQuestions={{ count: answers.questionIds.size, onOpen: noop }} /></div>
+        <div id="right-sidebar"><RuntimePendingItems items={answers.targets.map(({chat, question}) => ({
+          id:question.questionId, kind:"question", title:question.question, chatTitle:chat.id, onOpen:noop,
+        }))} /></div>
         <ChatWorkspace input={input} setInput={setInput} sending={false} queueAllowed={false}
           onSubmit={event => { event?.preventDefault(); window.chatRequests.push(input); }}
           onSwitchMode={noop} commands={[]} actions={[]} attachments={[]} projects={[]}

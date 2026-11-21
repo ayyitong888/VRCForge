@@ -39,8 +39,6 @@ export function AgentQuestionCard({
   const [index, setIndex] = useState(0);
   const [customValues, setCustomValues] = useState<Record<string, string>>({});
   const [busyChoice, setBusyChoice] = useState("");
-  const [editing, setEditing] = useState(false);
-  const [collapsedQuestionId, setCollapsedQuestionId] = useState("");
   const [capturePreview, setCapturePreview] = useState<(ChatImageSource & { questionId: string }) | null>(null);
   const submittingRef = useRef(false);
   const cardRef = useRef<HTMLElement>(null);
@@ -55,22 +53,16 @@ export function AgentQuestionCard({
   useEffect(() => {
     if (revealIndex < 0) return;
     setIndex(revealIndex);
-    setCollapsedQuestionId("");
     const frame = window.requestAnimationFrame(() => cardRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
   }, [reveal, revealIndex]);
 
-  const question = pendingQuestions[index];
-  const visible = Boolean(question && (collapsedQuestionId !== question.questionId || busyChoice));
+  const question = pendingQuestions[Math.min(index, pendingQuestions.length - 1)];
+  const visible = Boolean(question);
   useLayoutEffect(() => {
     onVisibilityChange?.(visible);
   }, [onVisibilityChange, visible]);
   const activeCapturePreview = capturePreview?.questionId === question?.questionId ? capturePreview : null;
-  useEffect(() => {
-    if (!question || busyChoice || editing || activeCapturePreview) return undefined;
-    const timer = window.setTimeout(() => setCollapsedQuestionId(question.questionId), 30_000);
-    return () => window.clearTimeout(timer);
-  }, [question?.questionId, busyChoice, editing, activeCapturePreview]);
   if (!question || !visible) {
     return null;
   }
@@ -253,8 +245,6 @@ export function AgentQuestionCard({
               type="text"
               value={customValue}
               onChange={(event) => setCustomValues((current) => ({ ...current, [question.questionId]: event.target.value.slice(0, 2000) }))}
-              onFocus={() => setEditing(true)}
-              onBlur={() => setEditing(false)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.nativeEvent.isComposing) {
                   event.preventDefault();

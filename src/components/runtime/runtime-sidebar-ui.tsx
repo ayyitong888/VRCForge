@@ -1,4 +1,4 @@
-import { Archive, ChevronDown, ChevronRight, FilePlus2, FileText, HelpCircle, History, ListChecks } from "lucide-react";
+import { Archive, ChevronDown, ChevronRight, FilePlus2, FileText, History, ListChecks } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -46,7 +46,6 @@ export function StatusDot({ status }: { status: "ok" | "warning" | "error" | "un
 }
 
 export type RuntimeAttentionRowsProps = {
-  pendingQuestions?: { count: number; onOpen: () => void };
   runtimeReview?: { kind: ReturnType<typeof runtimeReviewKind>; onOpen: () => void };
 };
 
@@ -57,22 +56,12 @@ const REVIEW_COPY = {
   verificationFailed: ["workspace.runtimeVerificationFailedTitle", "workspace.runtimeVerificationFailedBody"],
 } as const;
 
-export function RuntimeAttentionRows({ pendingQuestions, runtimeReview }: RuntimeAttentionRowsProps) {
+export function RuntimeAttentionRows({ runtimeReview }: RuntimeAttentionRowsProps) {
   const { t } = useTranslation();
   const reviewCopy = runtimeReview ? REVIEW_COPY[runtimeReview.kind] : undefined;
   const buttonClass = "w-full rounded-md px-1 text-left hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
   return (
     <>
-      {pendingQuestions?.count ? (
-        <button type="button" data-vrcforge-status="runtime-question" onClick={pendingQuestions.onOpen} className={buttonClass}>
-          <RuntimeInfoRow
-            icon={<HelpCircle className="h-4 w-4" />}
-            label={t("workspace.runtimeQuestionTitle")}
-            value={t("workspace.runtimeQuestionCount", { count: pendingQuestions.count })}
-            suffix={<StatusDot status="warning" />}
-          />
-        </button>
-      ) : null}
       {runtimeReview && reviewCopy ? (
         <button type="button" data-vrcforge-status="runtime-attention" onClick={runtimeReview.onOpen} className={buttonClass}>
           <RuntimeInfoRow

@@ -159,6 +159,7 @@
     "notificationStoppedBody": "任务已停止运行，请打开对话查看保留的进度。",
     "notificationReadFailed": "读取通知状态失败：",
     "notificationSendFailed": "发送 Windows 通知失败：",
+    "runtimePendingItems": "待处理",
     "runtimeQuestionTitle": "有问题待回答",
     "runtimeQuestionCount": "{{count}} 个问题等待你回答",
     "runtimeReviewTitle": "任务需要查看",

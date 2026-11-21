@@ -25,8 +25,9 @@ function writeDraftText(scope: string, input: string) {
   }
 }
 
-export function useComposerDraft(chatId: string, projectPath: string, chatStarted: boolean) {
-  const scope = chatId && chatStarted ? chatScope(chatId) : `new:${normalizeProjectPathKey(projectPath)}`;
+export function useComposerDraft(chatId: string, projectPath: string, chatStarted: boolean, questionId = "") {
+  const conversationScope = chatId && chatStarted ? chatScope(chatId) : `new:${normalizeProjectPathKey(projectPath)}`;
+  const scope = questionId ? `question:${chatId}:${questionId}` : conversationScope;
   const drafts = useRef(new Map<string, ComposerDraft>());
   const submissions = useRef(new Map<string, symbol>());
   const retainedSubmissions = useRef(new WeakSet<ComposerDraft>());
@@ -49,7 +50,7 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
   useLayoutEffect(() => {
     const previous = lastScope.current;
     lastScope.current = { chatId, scope };
-    if (!chatId || previous.chatId !== chatId || previous.scope === scope
+    if (questionId || !chatId || previous.chatId !== chatId || previous.scope === scope
       || !previous.scope.startsWith("new:") || !chatStarted) return;
     const pending = read(previous.scope);
     const target = read(scope);
@@ -60,7 +61,7 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
     }
     drafts.current.set(previous.scope, { input: "", attachments: [] });
     update(scope, pending);
-  }, [chatId, chatStarted, scope]);
+  }, [chatId, chatStarted, questionId, scope]);
 
   function setInput(value: SetStateAction<string>) {
     const draft = read(scope);

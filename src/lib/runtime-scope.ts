@@ -117,7 +117,13 @@ export function pendingQuestionReviewTargets(chats: ChatThread[], questions: Age
     return [{ chat, question }];
   });
   const questionIds = new Set(targets.map(({ question }) => question.questionId));
-  return { questionIds, target: targets.find(({ chat }) => chat.id === activeChatId) || targets[0] };
+  return {
+    questionIds,
+    targets: [
+      ...targets.filter(({ chat }) => chat.id === activeChatId),
+      ...targets.filter(({ chat }) => chat.id !== activeChatId),
+    ],
+  };
 }
 
 export function runtimeReviewItemForChat(

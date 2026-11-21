@@ -37,7 +37,8 @@ function Fixture() {
       resourceImageContextForQuestion: () => ({ endpoint: location.origin, chatId: "fixture", sessionId: "session-fixture", clientTurnId: "turn-fixture" }) }),
     React.createElement(RightRuntimeSidebar, { workspaceProjectType: "general", projectWorkspace: false,
       agentProgress: [], activeDesktopActions: [], userAttachmentSources: [], authorizationStatus: { status: "ok" },
-      localizeHealthMessage: () => "", dismissedQuestion: dismissed ? { label: question.question, onReopen: () => setDismissed(false) } : undefined }),
+      localizeHealthMessage: () => "", pendingItems: question.status === "pending" ? [{ id: question.questionId, kind: "question",
+        title: question.question, chatTitle: "Checkpoint chat", onOpen: () => setDismissed(false) }] : [] }),
   );
 }
 createRoot(document.getElementById("root")).render(React.createElement(Fixture));
@@ -84,7 +85,7 @@ try {
   assert.equal(await page.getByRole("region", { name: "questionCard.label" }).count(), 0, "X hides the question card");
   assert.equal(await page.locator("[data-question-reopen='visual-1']").count(), 0, "X does not leave a collapsed card in the dock");
   assert.equal(await page.locator("[data-answer]").textContent(), "", "X never submits an answer");
-  await page.locator("[data-vrcforge-status='dismissed-question']").click();
+  await page.locator("[data-runtime-pending-kind='question']").click();
   await page.getByRole("button", { name: "Reply in chat" }).click();
   assert.equal(await page.locator("[data-reply-question]").textContent(), "visual-1", "reply-in-chat keeps the question id");
   assert.equal(await page.getByText("Recommended", { exact: true }).count(), 0, "visual checkpoints do not recommend Pass");

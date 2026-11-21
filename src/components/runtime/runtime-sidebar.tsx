@@ -1,4 +1,4 @@
-import { Bot, Box, Folder, HelpCircle, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
+import { Bot, Box, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -9,6 +9,7 @@ import { cn } from "../../lib/utils";
 import { AgentTodoPanel } from "./agent-todo-panel";
 import { CoreVersionNotice } from "./core-version-notice";
 import { RuntimeAttentionRows, RuntimeInfoRow, StatusDot, type RuntimeAttentionRowsProps } from "./runtime-sidebar-ui";
+import { RuntimePendingItems, type RuntimePendingItem } from "./runtime-pending-items";
 import { ProjectWorkbenchSections, type UserAttachmentSource } from "./project-workbench-sections";
 
 type ComponentStatus = { status: string; message?: string; detail?: unknown } | null | undefined;
@@ -46,9 +47,8 @@ export function RightRuntimeSidebar({
   approvalsLoaded,
   pendingApprovals,
   approvalPanel,
-  pendingQuestions,
+  pendingItems = [],
   runtimeReview,
-  dismissedQuestion,
   workspaceSummary,
   activeDesktopActions,
   refreshUnityStatus,
@@ -83,7 +83,7 @@ export function RightRuntimeSidebar({
   pendingApprovals: number;
   hasExternalPendingApprovals?: boolean;
   approvalPanel?: ReactNode;
-  dismissedQuestion?: { label: string; onReopen: () => void };
+  pendingItems?: RuntimePendingItem[];
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
   refreshUnityStatus: () => void | Promise<void>;
@@ -142,17 +142,7 @@ export function RightRuntimeSidebar({
         <p role="alert" className="px-3 pt-2 text-xs text-muted-foreground" data-unity-refresh-error>{unityRefreshError}</p>
       ) : null}
       <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        {dismissedQuestion ? (
-          <button type="button" className="mb-3 w-full rounded-xl border border-border/80 px-2 text-left hover:bg-muted/50"
-            data-vrcforge-status="dismissed-question" onClick={dismissedQuestion.onReopen}>
-            <RuntimeInfoRow
-              icon={<HelpCircle className="h-4 w-4" />}
-              label={t("questionCard.title")}
-              value={dismissedQuestion.label}
-              suffix={<StatusDot status="warning" />}
-            />
-          </button>
-        ) : null}
+        <RuntimePendingItems items={pendingItems} />
         {approvalPanel}
         {workspaceProjectType === "unity" ? (
           <CoreVersionNotice
@@ -183,7 +173,6 @@ export function RightRuntimeSidebar({
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
             onOpenUserAttachmentSource={onOpenUserAttachmentSource}
             pendingApprovals={pendingApprovals}
-            pendingQuestions={pendingQuestions}
             runtimeReview={runtimeReview}
             workspaceSummary={workspaceSummary}
             activeDesktopActions={activeDesktopActions}
@@ -267,7 +256,7 @@ export function RightRuntimeSidebar({
                   </div>
                 </>
               ) : null}
-              <RuntimeAttentionRows pendingQuestions={pendingQuestions} runtimeReview={runtimeReview} />
+              <RuntimeAttentionRows runtimeReview={runtimeReview} />
               <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
                 <RuntimeInfoRow
                   icon={<ListChecks className="h-4 w-4" />}

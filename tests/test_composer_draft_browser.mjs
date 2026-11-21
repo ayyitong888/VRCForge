@@ -19,15 +19,19 @@ function Fixture() {
   const initial = new URLSearchParams(location.search).get("chat") ?? "a";
   const [activeChatId,setChatId] = useState(initial);
   const [activeProjectPath,setProject] = useState("D:/project/a");
+  const [pendingReplyQuestionId,setQuestion] = useState("");
   const chats = useRef(new Map(["a","b"].map(id=>[id,{id,sessionId:id,items:[]}]))).current;
   const nextChatId = useRef(0);
   const getChatById = id => chats.get(id);
   const activeChat = getChatById(activeChatId);
   const {input,setInput,attachments,setAttachments,beginSubmission} = useComposerDraft(
-    activeChatId, activeProjectPath, !activeChat || !isUnstartedChat(activeChat)
+    activeChatId, activeProjectPath, !activeChat || !isUnstartedChat(activeChat), pendingReplyQuestionId
   );
-  const activeChatPending = false, chatAvailable = true, pendingReplyQuestionId = "";
-  const attachmentLoadsRef = useRef(0), setError = ()=>{};
+  const activeChatPending = false, chatAvailable = true;
+  const attachmentLoadsRef = useRef(0), setError = ()=>{}, setChatRunError = ()=>{};
+  const validateMessageAttachmentCounts = () => true;
+  const inputPrediction = { dismiss: () => 0 }, inputPredictionEnabled = false;
+  const loadChat = async (id) => getChatById(id);
   const sessionHandoff = {consume: async()=>({context:null})};
   const resolveContextLimit = ()=>({known:false}), providerSnapshot = {}, currentModelInfo = null, apiConfig = null;
   function ensureActiveChat() {
@@ -48,6 +52,7 @@ function Fixture() {
   window.select = (id, project="D:/project/a")=>{setChatId(id);setProject(project);};
   window.submit = ()=>void submitMessage();
   window.attach = id=>setAttachments([{id}]);
+  window.questionMode = setQuestion;
   return <><textarea aria-label="Draft" value={input} onChange={e=>setInput(e.target.value)}/>
     <output id="attachments">{attachments.map(a=>a.id).join(",")}</output></>;
 }
@@ -80,7 +85,16 @@ try {
   await expectDraft("");
   assert.equal(await page.locator("#attachments").textContent(), "");
   await draft().fill("B 的输入");
-  await page.evaluate(()=>window.select("a"));
+  await page.evaluate(()=>window.questionMode("question-1"));
+  await expectDraft("");
+  await draft().fill("给问题的草稿");
+  await page.evaluate(()=>{window.attach("question-attachment");window.questionMode("");});
+  await expectDraft("B 的输入");
+  assert.equal(await page.locator("#attachments").textContent(), "");
+  await page.evaluate(()=>window.questionMode("question-1"));
+  await expectDraft("给问题的草稿");
+  assert.equal(await page.locator("#attachments").textContent(), "question-attachment");
+  await page.evaluate(()=>{window.questionMode("");window.select("a");});
   await expectDraft("A 继续改模");
   assert.equal(await page.locator("#attachments").textContent(), "a");
   await page.evaluate(()=>window.submit());

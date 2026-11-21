@@ -12,6 +12,7 @@ const entry = `
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AgentQuestionCard } from ${JSON.stringify(path.join(root, "src/components/chat/agent-question-card.tsx"))};
+import { useQuestionDockPresentation } from ${JSON.stringify(path.join(root, "src/lib/chat-question-dock.ts"))};
 
 const initialQuestions = [
   { questionId: "q-one", header: "First question", status: "pending", question: "Choose or write the first answer", options: [
@@ -51,7 +52,31 @@ function Fixture() {
   );
 }
 
-createRoot(document.getElementById("root")).render(React.createElement(Fixture));
+function SpeechFixture() {
+  const [question] = useState(() => ({ ...initialQuestions[0], createdAt: new Date().toISOString() }));
+  const [reveal, setReveal] = useState();
+  const [conversation, setConversation] = useState([]);
+  const [dismissed, setDismissed] = useState(0);
+  const selected = useQuestionDockPresentation({
+    chatId: "owner", sessionId: "owner-session", questions: [question], liveQuestions: [question],
+    reveal, conversation, onSpeechDismissed: () => setDismissed((count) => count + 1),
+  });
+  window.speechEvent = (event) => setConversation((items) => [...items, { id: event.id, type: "timeline_event", event: {
+    timestamp: new Date(Date.now() + 500).toISOString(), clientTurnId: "turn-owner", sessionId: "owner-session", ...event,
+  } }]);
+  window.speechStream = (text) => setConversation((items) => [...items, { id: "live-text", type: "streaming",
+    clientTurnId: "turn-new", sessionId: "owner-session", text,
+  }]);
+  return React.createElement("main", null,
+    React.createElement("output", { "data-speech-dismissals": true }, dismissed),
+    React.createElement("button", { onClick: () => setReveal({ questionId: question.questionId }) }, "Open same question"),
+    React.createElement(AgentQuestionCard, { questions: selected ? [selected] : [], reveal, onAnswerQuestion: () => {} }),
+  );
+}
+
+const app = createRoot(document.getElementById("root"));
+app.render(React.createElement(Fixture));
+window.startSpeechFixture = () => app.render(React.createElement(SpeechFixture));
 `;
 
 await build({
@@ -86,8 +111,7 @@ try {
   page.setDefaultTimeout(5000);
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.clock.runFor(30_000);
-  assert.equal(await page.getByPlaceholder("Type another answer...").count(), 0, "idle question prompt collapses after 30 seconds");
-  assert.equal(await page.locator("[data-chat-question-dock]").count(), 0, "the collapsed card leaves the dock empty");
+  assert.equal(await page.getByPlaceholder("Type another answer...").count(), 1, "idle time does not close a pending question");
   await page.getByRole("button", { name: "Open from conversation" }).click();
   const custom = page.getByPlaceholder("Type another answer...");
   assert.equal(await custom.evaluate((element) => element.tagName), "INPUT", "custom replies use one line");
@@ -128,7 +152,25 @@ try {
   const skipped = JSON.parse(await page.locator("[data-action]").textContent());
   assert.deepEqual(skipped, { questionId: "q-two", optionId: "skip", value: "Skipped" }, "Skip answers the remaining question");
   assert.equal(await page.getByRole("button", { name: "Skip", exact: true }).count(), 0, "answered questions leave the pending card");
-  console.log("compact question card browser regression: text draft isolation, failed retry, skip, neutral options, and text-only input passed");
+
+  await page.evaluate(() => window.startSpeechFixture());
+  const dock = page.locator("[data-chat-question-dock]");
+  const pendingDraft = dock.getByPlaceholder("Type another answer...");
+  await dock.waitFor();
+  await pendingDraft.fill("A pending draft");
+  await page.evaluate(() => window.speechEvent({ id: "tool", kind: "tool_call", payload: { summary: "Tool activity" } }));
+  await page.evaluate(() => window.speechEvent({ id: "repeat", kind: "assistant", payload: { summary: "Choose or write the first answer" } }));
+  await page.evaluate(() => window.speechEvent({ id: "other", kind: "assistant", sessionId: "other-session", payload: { summary: "Another conversation speaks" } }));
+  assert.equal(await pendingDraft.inputValue(), "A pending draft", "tools, the same prompt, and other chats do not close the question");
+  await page.evaluate(() => window.speechEvent({ id: "speech", kind: "assistant", payload: { summary: "I will continue with the preliminary checks" } }));
+  await dock.waitFor({ state: "hidden" });
+  assert.equal(await page.locator("[data-speech-dismissals]").textContent(), "1");
+  await page.getByRole("button", { name: "Open same question" }).click();
+  assert.equal(await pendingDraft.inputValue(), "A pending draft", "manual reveal resets the speech baseline and restores that question's draft");
+  await page.evaluate(() => window.speechStream("The next live reply has begun"));
+  await dock.waitFor({ state: "hidden" });
+  assert.equal(await page.locator("[data-speech-dismissals]").textContent(), "2");
+  console.log("question card browser regression: draft isolation, retries, explicit reveal, and owning Agent speech passed");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

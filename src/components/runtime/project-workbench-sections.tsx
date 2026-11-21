@@ -135,7 +135,6 @@ export function ProjectWorkbenchSections({
   onLocateUserAttachmentSource,
   onOpenUserAttachmentSource,
   pendingApprovals,
-  pendingQuestions,
   runtimeReview,
   workspaceSummary,
   activeDesktopActions,
@@ -262,7 +261,7 @@ export function ProjectWorkbenchSections({
           />
         </button>
       ) : null}
-      <RuntimeAttentionRows pendingQuestions={pendingQuestions} runtimeReview={runtimeReview} />
+      <RuntimeAttentionRows runtimeReview={runtimeReview} />
       <RuntimeSection
         title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}
         collapsed={Boolean(collapsedSections.todo)}

@@ -97,6 +97,7 @@ import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice"
 import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
+import type { RuntimePendingItem } from "./components/runtime/runtime-pending-items";
 import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingApprovalReviewTarget, pendingQuestionReviewTargets, questionBelongsToRuntimeScope, questionContinuationOwner, runtimeProgressOwner, runtimeReviewItemForChat, runtimeReviewKind } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
@@ -884,6 +885,7 @@ export default function App() {
     activeChatId,
     activeProjectPath,
     !activeChat || !isUnstartedChat(activeChat),
+    pendingReplyQuestionId,
   );
   persistChatsNowRef.current = persistChatsNow;
   const openChatById = (chatId: string) => {
@@ -1200,12 +1202,10 @@ export default function App() {
     ? filterQuestionsForRuntimeScope(agentQuestions, runtimeScope).filter((question) =>
         questionContinuationOwner(activityOwners, question)?.id === displayChat?.id)
     : [];
-  const dismissedAgentQuestion = scopedAgentQuestions.find((question) => question.status === "pending" && dismissedQuestionIds.has(question.questionId));
   const questionReview = useMemo(
     () => pendingQuestionReviewTargets(activityOwners, runtimeConnected ? agentQuestions : [], activeChatId),
     [activityOwners, runtimeConnected, agentQuestions, activeChatId],
   );
-  const reviewQuestionTarget = questionReview.target;
   const runtimeReviewChat = activeChat ?? displayChat;
   const runtimeReviewItem = runtimeReviewItemForChat(runtimeReviewChat || undefined, runtimeAttention, scopedAgentQuestions);
   const openQuestionReview = (chat: ChatThread, questionId: string) => {
@@ -1228,6 +1228,33 @@ export default function App() {
     const owner = runtimeProgressOwner(progress, activityOwners);
     if (owner) openRuntimeChat(owner);
   };
+  const pendingItemsByChat = new Map<string, RuntimePendingItem[]>();
+  const addPendingItem = (chat: ChatThread, item: Omit<RuntimePendingItem, "chatTitle">) => {
+    const items = pendingItemsByChat.get(chat.id) ?? [];
+    items.push({ ...item, chatTitle: chat.title || t("header.currentSession") });
+    pendingItemsByChat.set(chat.id, items);
+  };
+  for (const { chat, question } of questionReview.targets) {
+    addPendingItem(chat, {
+      id: `question:${question.questionId}`, kind: "question", title: question.question || question.header || t("questionCard.label"),
+      onOpen: () => openQuestionReview(chat, question.questionId),
+    });
+  }
+  for (const approval of agentApprovals ?? []) {
+    const owner = pendingApprovalOwner(approval, activityOwners);
+    if (owner && !owner.archived) addPendingItem(owner, {
+      id: `approval:${approval.id}`, kind: "approval", title: presentApproval(approval, t).title,
+      onOpen: () => openPendingApprovalOwner(approval),
+    });
+  }
+  for (const todo of agentProgress) {
+    const owner = runtimeProgressOwner(todo, activityOwners);
+    if (owner && !["completed", "cancelled", "deleted"].includes(todo.status || "")) addPendingItem(owner, {
+      id: `todo:${owner.id}:${todo.progressId}`, kind: "todo", title: todo.title || todo.progressId,
+      onOpen: () => openRuntimeChat(owner),
+    });
+  }
+  const pendingRuntimeItems = [...pendingItemsByChat.values()].flat();
   const selectedForeground = foreground.find(({ turn }) => turn.chatId === activeChatId);
   const selectedForegroundTurn = selectedForeground?.turn;
   const activeTodoIds = useMemo(() => runtimeConnected
@@ -3435,7 +3462,7 @@ export default function App() {
           const answerItem = questionAnswerItem(payload.question, payload.question.answer || composerMessage, attachments);
           persistQuestionAnswer(answerChat.id, answerItem);
         }
-        setPendingQuestionReply(null);
+        setPendingQuestionReply((current) => current?.questionId === pendingReplyQuestionId ? null : current);
         setInput("");
         setAttachments([]);
         void refreshRuntimeRuns(false);
@@ -4695,8 +4722,9 @@ export default function App() {
               onReplyInChat={replyToAgentQuestionInComposer}
               focusInput={Boolean(pendingReplyQuestionId)}
               pendingReplyQuestionId={pendingReplyQuestionId}
-              onCancelReply={() => {
-                setPendingQuestionReply(null);
+              onCancelReply={() => setPendingQuestionReply(null)}
+              onQuestionSpeechDismissed={(questionId) => {
+                setPendingQuestionReply((current) => current?.chatId === activeChatId && current.questionId === questionId ? null : current);
               }}
               onStopQuestionContinuation={stopRuntimeQuestionContinuation}
               conversationEndRef={conversationEndRef}
@@ -4810,10 +4838,7 @@ export default function App() {
                   onClose={() => setPendingApprovalPanelOpen(false)}
                 />
               ) : undefined}
-              pendingQuestions={reviewQuestionTarget ? {
-                count: questionReview.questionIds.size,
-                onOpen: () => openQuestionReview(reviewQuestionTarget.chat, reviewQuestionTarget.question.questionId),
-              } : undefined}
+              pendingItems={pendingRuntimeItems}
               runtimeReview={runtimeReviewItem && runtimeReviewChat ? {
                 kind: runtimeReviewKind(runtimeReviewItem),
                 onOpen: () => {
@@ -4821,10 +4846,6 @@ export default function App() {
                   window.requestAnimationFrame(() => document.querySelector(`[data-conversation-item-id="${CSS.escape(runtimeReviewItem.id)}"]`)
                     ?.scrollIntoView({ block: "center" }));
                 },
-              } : undefined}
-              dismissedQuestion={dismissedAgentQuestion ? {
-                label: dismissedAgentQuestion.header || dismissedAgentQuestion.question || dismissedAgentQuestion.questionId,
-                onReopen: () => openQuestionFromChat(dismissedAgentQuestion.questionId),
               } : undefined}
               workspaceSummary={workspaceDiff}
               activeDesktopActions={activeDesktopActions}

@@ -42,10 +42,11 @@ const bundle = await build({
         subAgentTaskCount={0} subAgentRunningTaskCount={0} subAgentCompletedTaskCount={0}
         userAttachmentSources={[]} approvalsLoaded pendingApprovals={pendingApprovals} workspaceSummary={null}
         hasExternalPendingApprovals={hasExternalPendingApprovals}
-        pendingQuestions={review.target && { count: review.questionIds.size, onOpen: () => {
-          setActive(review.target.chat.id);
-          setReveal({ questionId: review.target.question.questionId });
-        } }}
+        pendingItems={review.targets.map(({chat, question}) => ({id:question.questionId, kind:"question",
+          title:question.question, chatTitle:chat.title || chat.id, onOpen: () => {
+            setActive(chat.id);
+            setReveal({questionId:question.questionId});
+          }}))}
         runtimeReview={runtimeReview && { kind: runtimeReviewKind(runtimeReview),
           onOpen: () => { window.reviewItemOpened = runtimeReview.id; } }}
         activeDesktopActions={[]} refreshUnityStatus={() => {}} providerTestAttempted={false}

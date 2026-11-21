@@ -56,6 +56,10 @@ const bundle = await build({
           : [{ id: "question-settled", type: "agent", response: { ok: true, status: "blocked", sessionId: chat.sessionId,
             clientTurnId: "question-turn", turnId: "question-backend-turn", plan: { summary: "", nextStep: "needs_user_action" } } }]);
       };
+      window.showNextSpeech = () => setHistory((items) => [...items, {
+        id:"next-speech", type:"streaming", clientTurnId:"later-agent-turn", sessionId:chat.sessionId,
+        text:"I checked the scene and will review the assets next.",
+      }]);
       window.setTestHistory = (hasHistory) => setHistory(hasHistory ? chat.items : []);
       window.showTestApproval = () => setApprovals([approval]);
       const execution = useApprovalExecution({
@@ -88,8 +92,8 @@ const bundle = await build({
         <div style={{width:320,flexShrink:0}}><RightRuntimeSidebar runtimeConnected loadingUnityStatus={false} workspaceProjectLabel="Fixture"
           workspaceProjectType="general" projectWorkspace authorizationStatus={{source:"none",status:"unknown"}}
           agentProgress={[]} userAttachmentSources={[]} approvalsLoaded pendingApprovals={approvals.length}
-          pendingQuestions={questions.length ? {count:questions.length,
-            onOpen:() => setReviewQuestionReveal({questionId:questions[0].questionId})} : undefined}
+          pendingItems={questions.map((question) => ({id:question.questionId, kind:"question", title:question.question,
+            chatTitle:"Fixture", onOpen:() => setReviewQuestionReveal({questionId:question.questionId})}))}
           approvalPanel={approvalOpen ? <PendingApprovalsStrip approvals={approvals} actions={execution.approvalActions}
             loading={false} onApprove={execution.approveShell} onReject={execution.rejectShell} /> : undefined}
           workspaceSummary={null} activeDesktopActions={[]} refreshUnityStatus={noop} providerTestAttempted={false}
@@ -98,7 +102,7 @@ const bundle = await build({
       </div>;
     }
     function NavigationFixture() {
-      const chats = ["different", "todo", "approval", "otherApproval", "question"].map((id) => ({
+      const chats = ["different", "todo", "approval", "otherApproval", "question", "otherQuestion"].map((id) => ({
         id, sessionId: id + "-session", projectPath: "D:/NavigationFixture", items: [],
       }));
       const [active, setActive] = useState(chats[0].id);
@@ -108,9 +112,10 @@ const bundle = await build({
       const approvals = chats.slice(2, 4).map(({ id, sessionId, projectPath }) => ({
         id, status: "pending", projectRoot: projectPath, targetTool: "vrcforge_restore_checkpoint", taskContext: { sessionId },
       }));
-      const {sessionId, projectPath} = chats[4];
-      const questions = [{ questionId: "pending", status: "pending", sessionId, projectRoot: projectPath,
-        question: "Question in a different conversation?", options: [{ id: "continue", label: "Continue" }] }];
+      const questions = [chats[4], chats[4], chats[5], chats[5]].map((chat, index) => ({
+        questionId: "pending-" + index, status: "pending", sessionId: chat.sessionId, projectRoot: chat.projectPath,
+        question: "Question " + (index+1) + " in " + chat.id + "?", options: [{ id: "continue", label: "Continue" }],
+      }));
       const questionReview = pendingQuestionReviewTargets(chats, questions, active);
       const openApproval = (approval) => {
         const owner = pendingApprovalOwner(approval, chats);
@@ -143,11 +148,13 @@ const bundle = await build({
           onOpenPendingApprovals={() => openApproval(pendingApprovalReviewTarget(approvals, chats, active))}
           approvalPanel={approvalOpen ? <PendingApprovalsStrip approvals={approvals} actions={{}} loading={false}
             onApprove={noop} onReject={noop} onOpenConversation={openApproval} reveal={approvalReveal} /> : undefined}
-          pendingQuestions={questionReview.target ? {count: questionReview.questionIds.size, onOpen: () => {
-            const {chat, question} = questionReview.target;
-            setActive(chat.id);
-            setReviewQuestionReveal({ chatId: chat.id, questionId: question.questionId });
-          }} : undefined}
+          pendingItems={questionReview.targets.map(({chat, question}) => ({
+            id: question.questionId, kind: "question", title: question.question, chatTitle: chat.id,
+            onOpen: () => {
+              setActive(chat.id);
+              setReviewQuestionReveal({ chatId: chat.id, questionId: question.questionId });
+            },
+          }))}
           workspaceSummary={null} activeDesktopActions={[]} refreshUnityStatus={noop} providerTestAttempted={false}
           onHideSidebar={noop} localizeHealthMessage={() => ""} /></div>
       </div>;
@@ -157,7 +164,7 @@ const bundle = await build({
   bundle: true, write: false, platform: "browser", format: "iife", jsx: "automatic",
 });
 const css = (await postcss([tailwind("tailwind.config.ts")]).process(
-  "@tailwind base; @tailwind utilities;", { from: "src/styles.css" },
+  "@tailwind base; @tailwind utilities; " + readFileSync("src/theme.css", "utf8"), { from: "src/styles.css" },
 )).css;
 const browser = await chromium.launch({
   headless: true,
@@ -243,10 +250,9 @@ try {
       await page.locator("[data-chat-answer-question]").click();
       await questionCard.waitFor({ timeout: 1500 });
       assert.equal(await page.locator("aside [data-chat-question-dock]").count(), 0);
-      await page.evaluate(() => window.showTestQuestion(false));
-      await page.locator('[data-conversation-item-id="question-settled"]').waitFor({ state: "attached" });
-      assert.equal(await page.locator("[data-chat-question-dock]").count(), 0);
-      assert.equal(await page.locator("[data-chat-answer-question]").count(), 0);
+      await page.evaluate(() => window.showNextSpeech());
+      await questionCard.waitFor({ state: "detached" });
+      assert.equal(await page.locator("[data-chat-answer-question]").count(), 1);
       await page.locator('[data-vrcforge-status="runtime-question"]').click();
       await questionCard.waitFor({ timeout: 1500 });
       assert.equal(await page.locator("aside [data-chat-question-dock]").count(), 0);
@@ -282,9 +288,27 @@ try {
   await waitForChat("approval");
   await navigation.locator('[data-approval-id="otherApproval"] [data-app-tooltip="Open conversation"]').click();
   await waitForChat("otherApproval");
-  await navigation.locator('[data-vrcforge-status="runtime-question"]').click();
+  const list = navigation.locator("[data-runtime-pending-list]");
+  const geometry = await list.evaluate((node) => ({
+    fullHeight: node.scrollHeight,
+    viewportHeight: node.clientHeight,
+    rowHeight: node.querySelector("button").getBoundingClientRect().height,
+    thumb: getComputedStyle(node, "::-webkit-scrollbar-thumb").backgroundColor,
+  }));
+  assert.equal(await list.locator("[data-runtime-pending-kind=question]").count(),4);
+  assert.equal(geometry.viewportHeight,geometry.rowHeight*3);
+  assert.equal(geometry.fullHeight,geometry.rowHeight*4);
+  await navigation.evaluate(() => document.documentElement.style.setProperty("--primary", "290 70% 44%"));
+  const customThumb = await list.evaluate((node) => getComputedStyle(node, "::-webkit-scrollbar-thumb").backgroundColor);
+  assert.notEqual(geometry.thumb,"rgba(0, 0, 0, 0)");
+  assert.notEqual(customThumb,geometry.thumb, "scrollbar follows the active theme");
+  await list.getByRole("button", {name:/Question 4 in otherQuestion/}).click();
+  await waitForChat("otherQuestion");
+  const reviewed = navigation.locator("[data-chat-composer-dock] [data-chat-question-dock]");
+  await reviewed.getByText("Question 4 in otherQuestion?",{exact:true}).waitFor();
+  await list.getByRole("button", {name:/Question 1 in question/}).click();
   await waitForChat("question");
-  await navigation.locator("[data-chat-composer-dock] [data-chat-question-dock]").waitFor();
+  await reviewed.getByText("Question 1 in question?",{exact:true}).waitFor();
   assert.equal(await navigation.locator("aside [data-chat-question-dock]").count(), 0);
   assert.equal(await navigation.locator("[data-chat-composer-dock] [data-scoped-pending-approval]").count(), 0);
   await navigation.getByRole("button", { name: /^Todo$/i }).click();

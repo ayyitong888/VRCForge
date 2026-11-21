@@ -235,13 +235,12 @@ try {
   const questionEntry = page.locator('[data-chat-answer-question="reference-q"]');
   const questionButton = page.locator("[data-open-sidebar-questions]");
   assert.equal(await page.locator("[data-chat-question-dock]").count(), 0, "settled questions stay collapsed until opened");
-  assert.equal(await questionEntry.count(), 0, "a settled question has no inline action");
+  assert.equal(await questionEntry.count(), 1, "the original unanswered prompt retains its inline action");
   await questionButton.click();
   await questionDock.waitFor();
   assert.equal(await page.locator("aside [data-chat-question-dock]").count(), 0);
   await page.clock.runFor(30_000);
-  assert.equal(await questionDock.count(), 0, "the question card can collapse");
-  await questionButton.click();
+  assert.equal(await questionDock.count(), 1, "idle time does not close an explicitly opened question");
   await questionDock.getByRole("button", { name: /close|关闭/i }).click();
   assert.equal(await questionDock.count(), 0, "close hides the question card");
   await questionButton.click();

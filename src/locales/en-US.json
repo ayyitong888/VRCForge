@@ -159,6 +159,7 @@
     "notificationStoppedBody": "The task has stopped. Open the conversation for saved progress.",
     "notificationReadFailed": "Unable to read notification state: ",
     "notificationSendFailed": "Unable to send Windows notification: ",
+    "runtimePendingItems": "Needs attention",
     "runtimeQuestionTitle": "Question awaiting your answer",
     "runtimeQuestionCount_one": "{{count}} question to answer",
     "runtimeQuestionCount_other": "{{count}} questions to answer",
