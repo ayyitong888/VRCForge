@@ -214,14 +214,6 @@ def project_native_runtime_state_history(messages: list[dict[str, Any]]) -> list
 def native_model_history(messages: list[dict[str, Any]], *, handoff_snapshot=None, provider_route: str = "") -> list[dict[str, Any]]:
     """Translate saved authorship at the shared provider boundary, including older hidden host notes."""
     compacted = any(model_handoff_payload(item) is not None for item in messages)
-    if compacted:
-        # A compacted transcript has one authoritative runtime snapshot.
-        # Keep storage append-only and project the latest state before user
-        # history. Filtering only host system records preserves tool pairs,
-        # output continuation controls, and all later user messages.
-        latest_state = next((item for item in reversed(messages) if native_runtime_state_content(item)), None)
-        if latest_state is not None:
-            messages = [latest_state, *(item for item in messages if not native_runtime_state_content(item))]
     projected = []
     todos = None
     for item in reversed(messages):

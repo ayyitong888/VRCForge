@@ -102,7 +102,9 @@ def test_native_compaction_reuses_port_and_archives_already_consumed_receipts():
     assert [item["content"].split("\n", 1)[1] for item in model.requests[0]["messages"]
             if item["role"] == "user" and item["content"].startswith("[User message ")] == suffix
     assert not any(item["role"] == "tool" for item in model.requests[0]["messages"])
-    assert model.requests[0]["messages"][0]["role"] == "system"
+    runtime_state = model.requests[0]["messages"][-1]
+    assert runtime_state["role"] == "system"
+    assert runtime_state["content"].startswith("Current runtime state (data): ")
     compacted = state.native_conversation("s", binding="b")
     assert compacted["messages"][compacted["activeTurnStart"]]["content"] == "Continue checking"
     assert turn.compaction["applied"] is True and turn.compaction["afterTokens"] < turn.compaction["beforeTokens"]

@@ -74,28 +74,18 @@ def test_state_changes_and_user_turns_each_emit_their_current_permissions():
     assert current["allowedRuntimeActions"] == ["reply", "correct"]
 
 
-def test_compaction_does_not_duplicate_historical_runtime_states():
-    state, planner, model, turn = fixture(prior=False, limit=500_000)
-    plan(planner, turn)
-    old_state = deepcopy(model.requests[-1]["messages"][-1])
-    # A completed large old turn followed by a new active turn exercises real CAS.
-    state.append_native_user("s", binding="b", message="old recorded context " * 5000)
-    compactor = Compactor()
-    planner._compactor = compactor
+def test_compaction_preserves_sent_prefix_when_the_runtime_state_changes():
+    state, planner, model, current = fixture(Compactor())
     from runtime_planner_service import PlannerTurnMetadata
     from tests.test_native_context_guard import _Turn
-    planner._turn = _Turn(PlannerTurnMetadata(verified_context_limit=8000))
-    current = NativeRuntimeTurn(state, planner, "s", "next", "b", "Continue checking", [], None, None, None)
     result = plan(planner, current)
     assert result["nextStep"] == "done"
     assert current.compaction["applied"] is True
     states = [item for item in model.requests[-1]["messages"] if item["role"] == "system"
               and item["content"].startswith("Current runtime state (data): ")]
     assert len(states) == 1
-    assert old_state in state.native_conversation("s", binding="b")["messages"]
+    assert states[0] in state.native_conversation("s", binding="b")["messages"]
     first_after = wire(model.requests[-1])
-    assert first_after[1] == {"role": "developer", "content": states[0]["content"]}
-    assert first_after[2]["role"] == "user"
     plan(planner, current)
     assert wire(model.requests[-1])[:len(first_after)] == first_after
 
@@ -104,19 +94,20 @@ def test_compaction_does_not_duplicate_historical_runtime_states():
     state.settle_native_call("s", binding="b", call_id="after-compact", content='{"status":"ok"}')
     state.append_native_user("s", binding="b", message="Keep the newer instruction.")
     planner._turn = _Turn(PlannerTurnMetadata(verified_context_limit=500_000))
-    planner._llm_plan_agent_turn("Continue checking", {"runtime": {"executionMode": "auto"}}, [],
-                                 native_turn=current, project_context_active=False)
+    with planner.bind_turn({}):
+        planner.plan_agent_turn("Continue checking", {}, {"runtime": {"executionMode": "auto"}}, native_turn=current)
     changed = wire(model.requests[-1])
+    assert changed[:len(first_after)] == first_after
     states = [row for row in changed if row.get("role") == "developer" and
               str(row.get("content")).startswith("Current runtime state (data): ")]
-    assert states == [changed[1]]
-    assert json.loads(changed[1]["content"].split(": ", 1)[1])["executionMode"] == "auto"
-    assert changed[-1] == {"role": "user", "content": "Keep the newer instruction."}
-    assert [row["type"] for row in changed[-3:-1]] == ["function_call", "function_call_output"]
-    assert changed[-3]["call_id"] == changed[-2]["call_id"] == "after-compact"
+    assert states == [first_after[-1], changed[-1]]
+    assert json.loads(changed[-1]["content"].split(": ", 1)[1])["executionMode"] == "auto"
+    assert changed[-2] == {"role": "user", "content": "Keep the newer instruction."}
+    assert [row["type"] for row in changed[-4:-2]] == ["function_call", "function_call_output"]
+    assert changed[-4]["call_id"] == changed[-3]["call_id"] == "after-compact"
     saved = state.native_conversation("s", binding="b")["messages"]
     assert saved.index({"role": "user", "content": "Keep the newer instruction."}) < saved.index(
-        {"role": "system", "content": changed[1]["content"]})
+        {"role": "system", "content": changed[-1]["content"]})
 
 
 def test_retained_state_survives_native_store_reload(tmp_path):
