@@ -21,7 +21,7 @@ VRCForge は、Booth などでアバターや衣装を選ぶクリエイター�
 
 > Unity / VRChat Avatar プロジェクトを書き換える機能を使う前に、必ずバックアップしてください。
 
-[最新の安定版をダウンロード](https://github.com/ayyitong888/VRCForge/releases/latest) · [このソースの更新内容（v1.11.0）](docs/RELEASE_NOTES_1.11.0.md)
+[最新の安定版をダウンロード](https://github.com/ayyitong888/VRCForge/releases/latest) · [このソースの更新内容（v1.11.1）](docs/RELEASE_NOTES_1.11.1.md)
 
 ## ダウンロード：App と Unity プラグインの両方が必要
 

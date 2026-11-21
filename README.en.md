@@ -22,7 +22,7 @@ assistant can inspect your project, suggest a change, and apply it.
 
 > Back up your Unity / VRChat Avatar project before using any asset-writing feature.
 
-[Download the latest stable release](https://github.com/ayyitong888/VRCForge/releases/latest) · [Release notes for the current source (v1.11.0)](docs/RELEASE_NOTES_1.11.0.md)
+[Download the latest stable release](https://github.com/ayyitong888/VRCForge/releases/latest) · [Release notes for the current source (v1.11.1)](docs/RELEASE_NOTES_1.11.1.md)
 
 ## Download: install both the App and the Unity plugin
 

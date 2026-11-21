@@ -20,7 +20,7 @@ VRCForge 是给 VRChat Avatar 创作者使用的开源改模工具。你可以�
 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Unity / VRChat Avatar 工程。
 
-[下载最新正式版](https://github.com/ayyitong888/VRCForge/releases/latest) · [当前源码 v1.11.0 更新说明](docs/RELEASE_NOTES_1.11.0.md)
+[下载最新正式版](https://github.com/ayyitong888/VRCForge/releases/latest) · [当前源码 v1.11.1 更新说明](docs/RELEASE_NOTES_1.11.1.md)
 
 ## 下载：App 和 Unity 插件都要装
 
