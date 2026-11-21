@@ -882,7 +882,7 @@ export default function App() {
     initialChatState,
   });
   const pendingReplyQuestionId = pendingQuestionReply?.chatId === activeChatId ? pendingQuestionReply.questionId : "";
-  const { input, setInput, attachments, setAttachments, beginSubmission, beginRetainedSubmission } = useComposerDraft(
+  const { input, setInput, attachments, setAttachments, reserveAttachmentAppend, beginSubmission, beginRetainedSubmission } = useComposerDraft(
     activeChatId,
     activeProjectPath,
     !activeChat || !isUnstartedChat(activeChat),
@@ -3664,6 +3664,7 @@ export default function App() {
       : undefined;
     const chatId = replyQuestion?.sessionId || activeChatId || ensureActiveChat();
     const nextAttachments: ChatAttachment[] = [];
+    const appendAttachments = reserveAttachmentAppend();
     attachmentLoadsRef.current += selected.length;
     setAttachmentsLoading(true);
     try {
@@ -3675,9 +3676,9 @@ export default function App() {
           showTransientFailure("upload", actionErrorMessage("attachments.readFileFailed", cause));
         }
       }
-      setAttachments((current) => {
+      appendAttachments((current) => {
         const available = Math.max(0, MAX_FILES_PER_MESSAGE - messageAttachmentCounts(current).files);
-        return [...current, ...nextAttachments.slice(0, available)];
+        return nextAttachments.slice(0, available);
       });
     } finally {
       attachmentLoadsRef.current -= selected.length;
@@ -4012,9 +4013,9 @@ export default function App() {
       showTransientFailure("upload", t("attachments.quoteLimitReached", { max: MAX_QUOTES_PER_MESSAGE }));
     } else {
       const quote = selectedTextAttachment(text);
-      setAttachments((current) => messageAttachmentCounts(current).quotes < MAX_QUOTES_PER_MESSAGE
-        ? [...current, quote]
-        : current);
+      reserveAttachmentAppend()((current) => messageAttachmentCounts(current).quotes < MAX_QUOTES_PER_MESSAGE
+        ? [quote]
+        : []);
     }
     clearSelectionMenu();
   }
@@ -4649,10 +4650,11 @@ export default function App() {
               onResumeQueue={() => void resumeQueuedTurns(true, activeChatId)}
               onCancelQueue={() => void cancelQueuedTurns(activeChatId)}
               onEditQueuedTurn={async (turnId) => {
+                const appendAttachments = reserveAttachmentAppend();
                 const turn = await editQueuedTurn(turnId, activeChatId);
                 if (!turn) return;
                 setInput(current => current ? `${current}\n\n${turn.text}` : turn.text);
-                setAttachments(current => [...current, ...turn.attachments.filter(item => !current.some(existing => existing.id === item.id))]);
+                appendAttachments(current => turn.attachments.filter(item => !current.some(existing => existing.id === item.id)));
               }}
               onRemoveQueuedTurn={(turnId) => void removeQueuedTurn(turnId, activeChatId)}
               onSteerQueuedTurn={(turnId) => {

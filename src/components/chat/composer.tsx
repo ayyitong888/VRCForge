@@ -8,7 +8,7 @@ import type { RunningEnterAction } from "../../lib/app-preferences";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "../../lib/permission-ui";
 import { cn, formatCount } from "../../lib/utils";
 import { formatAttachmentSize } from "../../lib/chat-format";
-import { MAX_FILES_PER_MESSAGE, MAX_TEXT_ATTACHMENT_BYTES } from "../../lib/conversation-utils";
+import { MAX_FILES_PER_MESSAGE, MAX_TEXT_ATTACHMENT_BYTES, messageAttachmentCounts } from "../../lib/conversation-utils";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ComposerSlashCommand, ContextUsage } from "../../lib/chat-types";
 import { isSelectedTextAttachment } from "../../lib/chat-types";
 import type { AgentGoal, PermissionState, ExecutionMode } from "../../lib/api";
@@ -174,8 +174,7 @@ export function Composer({
     : primaryAction === "stop"
       ? t("chat.stop")
       : t("chat.send");
-  const selectedTextAttachments = attachments.filter(isSelectedTextAttachment);
-  const regularAttachments = attachments.filter((attachment) => !isSelectedTextAttachment(attachment));
+  const questionInputRow = attachments.length ? "row-start-2" : "row-start-1";
   const availableActions: ComposerAction[] = actions.length ? actions : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
   const commandActions: ComposerSlashCommand[] = [...availableActions, ...(onPlanModeChange && !editing ? [{
     id: "plan" as const,
@@ -293,7 +292,7 @@ export function Composer({
     if (files.length) {
       event.preventDefault();
       onAttachFiles?.(files);
-    } else if (onAttachFiles && event.target === inputRef.current && regularAttachments.length < MAX_FILES_PER_MESSAGE) {
+    } else if (onAttachFiles && event.target === inputRef.current && messageAttachmentCounts(attachments).files < MAX_FILES_PER_MESSAGE) {
       const text = event.clipboardData.getData("text/plain");
       if (!isLargeTextPaste(text) || text.includes("\0")) return;
       const file = new File([text], t("attachments.pastedTextFilename"), { type: "text/plain" });
@@ -367,12 +366,9 @@ export function Composer({
         !questionPromptVisible && (dragActive ? "border-primary/50 bg-primary/5" : "border-border"),
         !questionPromptVisible && (compact ? "px-2.5 py-2" : "px-3 py-2.5"),
       )}>
-        {selectedTextAttachments.length ? (
-          <div className={questionPromptVisible ? "col-span-full row-start-2" : ""}>
-            <SelectedTextQuoteChip
-              attachments={selectedTextAttachments}
-              onRemove={onRemoveAttachment}
-            />
+        {attachments.length ? (
+          <div className={questionPromptVisible ? "col-span-full row-start-1 min-w-0" : "mb-3"}>
+            <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} inComposer />
           </div>
         ) : null}
         <ComposerLinkInput
@@ -383,7 +379,7 @@ export function Composer({
           onChange={(value) => { setPaletteDismissed(false); setInput(value); }}
           className={cn(
             "w-full min-w-0 text-sm",
-            questionPromptVisible && "col-start-2 row-start-1",
+            questionPromptVisible && `col-start-2 ${questionInputRow}`,
           )}
           rows={1}
           placeholder={disabledReason || t(planMode ? "composerAction.planPlaceholder" : "chat.inputPlaceholder")}
@@ -437,11 +433,6 @@ export function Composer({
             }
           }}
         />
-        {regularAttachments.length ? (
-          <div className={questionPromptVisible ? "col-span-full order-last min-w-0" : "mt-3"}>
-            <AttachmentStrip attachments={regularAttachments} onRemove={onRemoveAttachment} />
-          </div>
-        ) : null}
         <div className={cn(
           "min-w-0 items-center",
           questionPromptVisible ? "contents" : "mt-1.5 grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 xl:grid-cols-[auto_minmax(0,1fr)_auto]",
@@ -464,7 +455,7 @@ export function Composer({
               type="button"
               className={cn(
                 "flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50",
-                questionPromptVisible && "col-start-1 row-start-1",
+                questionPromptVisible && `col-start-1 ${questionInputRow}`,
               )}
               onClick={() => setActionMenuOpen((open) => !open)}
               aria-label={t("composerAction.addContext")}
@@ -482,7 +473,7 @@ export function Composer({
                 data-app-tooltip={t("composerAction.planDisable")}
                 className={cn(
                   "flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary/10 px-2 text-sm text-primary",
-                  questionPromptVisible && "col-start-3 row-start-1",
+                  questionPromptVisible && `col-start-3 ${questionInputRow}`,
                 )}
                 onClick={() => onPlanModeChange?.(false)}
               >
@@ -491,7 +482,7 @@ export function Composer({
                 <X className="h-3.5 w-3.5" />
               </button>
             ) : null}
-            <div className={questionPromptVisible ? "static col-start-5 row-start-1" : "relative"}>
+            <div className={questionPromptVisible ? `static col-start-5 ${questionInputRow}` : "relative"}>
               <button
                 type="button"
                 className={cn(
@@ -561,7 +552,7 @@ export function Composer({
             questionPromptVisible ? "contents" : "col-start-2 row-start-1 xl:col-start-3",
           )}>
             {contextUsage && contextUsage.source !== "unavailable" ? (
-              <ContextUsageMeter usage={contextUsage} className={questionPromptVisible ? "col-start-6 row-start-1" : ""} />
+              <ContextUsageMeter usage={contextUsage} className={questionPromptVisible ? `col-start-6 ${questionInputRow}` : ""} />
             ) : null}
             {editing && !sending ? (
               <>
@@ -574,7 +565,7 @@ export function Composer({
               </>
             ) : (
               <Button
-                className={cn("h-10 w-10 rounded-full p-0", questionPromptVisible && "col-start-7 row-start-1")}
+                className={cn("h-10 w-10 rounded-full p-0", questionPromptVisible && `col-start-7 ${questionInputRow}`)}
                 disabled={primaryAction === "stop" ? stopDisabled : !canSubmit}
                 type={primaryAction === "stop" ? "button" : "submit"}
                 onClick={primaryAction === "stop" ? onStop : undefined}
@@ -592,7 +583,7 @@ export function Composer({
           {providerModelLabel ? (
             <div className={cn(
               "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-1",
-              questionPromptVisible ? "col-start-4 row-start-1 max-w-[min(28vw,16rem)] flex-nowrap whitespace-nowrap" : "col-span-2 col-start-1 row-start-2 xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:flex-nowrap xl:whitespace-nowrap",
+              questionPromptVisible ? `col-start-4 ${questionInputRow} max-w-[min(28vw,16rem)] flex-nowrap whitespace-nowrap` : "col-span-2 col-start-1 row-start-2 xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:flex-nowrap xl:whitespace-nowrap",
             )}>
               {onOpenModelSettings ? (
                 <button type="button" onClick={onOpenModelSettings} aria-label={t("provider.changeModel", { model: providerModelLabel })}
@@ -692,7 +683,7 @@ function SelectedTextQuoteChip({
   };
   return (
     <div
-      className="relative mb-3 inline-flex min-w-0 max-w-full items-center"
+      className="relative inline-flex min-w-0 max-w-full items-center"
       data-composer-selected-text-chip
     >
       <SelectedTextHoverPreview text={selectedPreview}>
@@ -767,10 +758,12 @@ export function AttachmentStrip({
   attachments,
   onRemove,
   compact = false,
+  inComposer = false,
 }: {
   attachments: ChatAttachment[];
   onRemove?: (id: string) => void;
   compact?: boolean;
+  inComposer?: boolean;
 }) {
   const { t } = useTranslation();
   if (!attachments.length) {
@@ -778,9 +771,16 @@ export function AttachmentStrip({
   }
   if (!compact) {
     return (
-      <div className="flex min-w-0 flex-wrap gap-2">
-        {attachments.map((attachment) => {
+      <div className={cn("flex min-w-0 flex-wrap gap-2", inComposer && "items-start")}>
+        {attachments.map((attachment, index) => {
           const isSelectedText = isSelectedTextAttachment(attachment);
+          if (inComposer && isSelectedText) {
+            const previous = attachments[index - 1];
+            if (previous && isSelectedTextAttachment(previous)) return null;
+            let end = index + 1;
+            while (end < attachments.length && isSelectedTextAttachment(attachments[end])) end++;
+            return <SelectedTextQuoteChip key={attachment.id} attachments={attachments.slice(index, end)} onRemove={onRemove} />;
+          }
           const isImage = Boolean(attachment.dataUrl && attachment.type.startsWith("image/"));
           const isVaultFile = attachment.payloadKind === "vault_file" || Boolean(attachment.vaultPayloadHash);
           const metadataOnly = attachment.payloadKind === "metadata"

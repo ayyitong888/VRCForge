@@ -29,6 +29,7 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
   const conversationScope = chatId && chatStarted ? chatScope(chatId) : `new:${normalizeProjectPathKey(projectPath)}`;
   const scope = questionId ? `question:${chatId}:${questionId}` : conversationScope;
   const drafts = useRef(new Map<string, ComposerDraft>());
+  const attachmentOrder = useRef({ next: 0, byAttachment: new WeakMap<ChatAttachment, number>() });
   const submissions = useRef(new Map<string, symbol>());
   const retainedSubmissions = useRef(new WeakSet<ComposerDraft>());
   const lastScope = useRef({ chatId, scope });
@@ -76,6 +77,21 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
     const draft = read(scope);
     const attachments = typeof value === "function" ? value(draft.attachments) : value;
     update(scope, { ...draft, attachments });
+  }
+
+  function reserveAttachmentAppend() {
+    const { byAttachment } = attachmentOrder.current;
+    const order = ++attachmentOrder.current.next;
+    return (selectAdditions: (current: ChatAttachment[]) => ChatAttachment[]) => {
+      const current = read(scope).attachments;
+      const additions = selectAdditions(current);
+      if (!additions.length) return;
+      for (const attachment of additions) byAttachment.set(attachment, order);
+      // Earlier file picks may finish reading after a later file or quote.
+      const next = current.findIndex((attachment) => (byAttachment.get(attachment) ?? 0) > order);
+      const index = next < 0 ? current.length : next;
+      setAttachments([...current.slice(0, index), ...additions, ...current.slice(index)]);
+    };
   }
 
   function beginSubmission() {
@@ -127,5 +143,5 @@ export function useComposerDraft(chatId: string, projectPath: string, chatStarte
     };
   }
 
-  return { ...draft, setInput, setAttachments, beginSubmission, beginRetainedSubmission };
+  return { ...draft, setInput, setAttachments, reserveAttachmentAppend, beginSubmission, beginRetainedSubmission };
 }
