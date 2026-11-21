@@ -1,4 +1,4 @@
-import type { AgentApproval, AgentQuestion, AgentRuntimeRun } from "./api";
+import type { AgentApproval, AgentProgress, AgentQuestion, AgentRuntimeRun } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
 import { normalizeProjectPathKey } from "./project-path";
 import { approvalIdFromResponse } from "./runtime-parsing";
@@ -40,6 +40,22 @@ export function pendingApprovalOwner(approval: AgentApproval, chats: ChatThread[
     item.type === "agent" && approvalIdFromResponse(item.response) === approval.id
   )));
   return receiptOwners.length === 1 ? receiptOwners[0] : undefined;
+}
+
+export function pendingApprovalReviewTarget(approvals: AgentApproval[], chats: ChatThread[], activeChatId: string): AgentApproval | undefined {
+  const owners = approvals.flatMap((approval) => {
+    const owner = pendingApprovalOwner(approval, chats);
+    return owner ? [{ approval, owner }] : [];
+  });
+  return (owners.find(({ owner }) => owner.id === activeChatId) ?? owners[0])?.approval;
+}
+
+export function runtimeProgressOwner(progress: AgentProgress, chats: ChatThread[]): ChatThread | undefined {
+  const sessionId = progress.sessionId?.trim();
+  if (!sessionId) return undefined;
+  const matches = chats.filter((chat) => !chat.archived && chat.sessionId === sessionId
+    && (!progress.projectRoot || sameProject(progress.projectRoot, chat.projectPath)));
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function questionBelongsToRuntimeScope(

@@ -37,6 +37,7 @@ export function RightRuntimeSidebar({
   authorizationStatus,
   agentProgress,
   activeTodoIds,
+  onOpenTodo,
   projectWorkspace,
   subAgentPanel,
   userAttachmentSources,
@@ -45,7 +46,6 @@ export function RightRuntimeSidebar({
   approvalsLoaded,
   pendingApprovals,
   approvalPanel,
-  onQuestionPanelTarget,
   pendingQuestions,
   runtimeReview,
   dismissedQuestion,
@@ -73,6 +73,7 @@ export function RightRuntimeSidebar({
   authorizationStatus: RuntimeAuthorizationStatus;
   agentProgress: AgentProgress[];
   activeTodoIds?: ReadonlySet<string>;
+  onOpenTodo?: (progress: AgentProgress) => void;
   projectWorkspace: boolean;
   subAgentPanel?: ReactNode;
   userAttachmentSources: UserAttachmentSource[];
@@ -82,7 +83,6 @@ export function RightRuntimeSidebar({
   pendingApprovals: number;
   hasExternalPendingApprovals?: boolean;
   approvalPanel?: ReactNode;
-  onQuestionPanelTarget?: (target: HTMLDivElement | null) => void;
   dismissedQuestion?: { label: string; onReopen: () => void };
   workspaceSummary: WorkspaceDiffSummary | null;
   activeDesktopActions: AgentDesktopAction[];
@@ -154,7 +154,6 @@ export function RightRuntimeSidebar({
           </button>
         ) : null}
         {approvalPanel}
-        {onQuestionPanelTarget ? <div ref={onQuestionPanelTarget} data-runtime-question-panel /> : null}
         {workspaceProjectType === "unity" ? (
           <CoreVersionNotice
             detail={unityToolsComponent?.detail}
@@ -178,6 +177,7 @@ export function RightRuntimeSidebar({
             localizeHealthMessage={localizeHealthMessage}
             agentProgress={agentProgress}
             activeTodoIds={activeTodoIds}
+            onOpenTodo={onOpenTodo}
             subAgentPanel={subAgentPanel}
             userAttachmentSources={userAttachmentSources}
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
@@ -194,7 +194,7 @@ export function RightRuntimeSidebar({
         ) : (
           <>
             {subAgentPanel ? <div className="mb-3" data-vrcforge-chat-sub-agents>{subAgentPanel}</div> : null}
-            <AgentTodoPanel progress={agentProgress} activeTodoIds={activeTodoIds} />
+            <AgentTodoPanel progress={agentProgress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
             <div className="rounded-xl border border-border/80 bg-background/65 px-3 py-2 shadow-sm">
               <div data-vrcforge-status="project">
                 <RuntimeInfoRow

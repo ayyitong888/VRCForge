@@ -129,6 +129,7 @@ export function ProjectWorkbenchSections({
   localizeHealthMessage,
   agentProgress,
   activeTodoIds,
+  onOpenTodo,
   subAgentPanel,
   userAttachmentSources,
   onLocateUserAttachmentSource,
@@ -156,6 +157,7 @@ export function ProjectWorkbenchSections({
   localizeHealthMessage: (message?: string) => string;
   agentProgress: AgentProgress[];
   activeTodoIds?: ReadonlySet<string>;
+  onOpenTodo?: (progress: AgentProgress) => void;
   subAgentPanel?: ReactNode;
   userAttachmentSources: UserAttachmentSource[];
   onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
@@ -264,12 +266,15 @@ export function ProjectWorkbenchSections({
       <RuntimeSection
         title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}
         collapsed={Boolean(collapsedSections.todo)}
-        onToggle={() => toggleSection("todo")}
+        onToggle={() => {
+          toggleSection("todo");
+          if (agentProgress[0]) onOpenTodo?.(agentProgress[0]);
+        }}
         count={<span className="text-xs tabular-nums text-muted-foreground">{formatCount(agentProgress.length)}</span>}
       >
         <div data-vrcforge-project-workbench-activity>
           {agentProgress.length ? (
-            <AgentTodoPanelEmbedded progress={agentProgress} activeTodoIds={activeTodoIds} />
+            <AgentTodoPanelEmbedded progress={agentProgress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
           ) : (
             <div className="px-2 py-2 text-xs text-muted-foreground">
               {t("workspace.noProgress")}

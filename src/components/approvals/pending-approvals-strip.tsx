@@ -15,11 +15,12 @@ type PendingApprovalsStripProps = {
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
   onClose?: () => void;
+  onOpenConversation?: (approval: AgentApproval) => boolean;
   onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
   reveal?: { approvalId: string } | null;
 };
 
-export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, onReject, onClose, onModifyApproval, reveal }: PendingApprovalsStripProps) {
+export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, onReject, onClose, onModifyApproval, onOpenConversation, reveal }: PendingApprovalsStripProps) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [editingApprovalId, setEditingApprovalId] = useState("");
@@ -63,6 +64,7 @@ export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, 
           editing={editingApprovalId === approval.id}
           onEditingChange={(editing) => setEditingApprovalId(editing ? approval.id : "")}
           onModifyApproval={onModifyApproval}
+          onOpenConversation={onOpenConversation}
         />
       ))}
     </div>
@@ -77,6 +79,7 @@ function ApprovalCard({
   editing,
   onEditingChange,
   onModifyApproval,
+  onOpenConversation,
 }: {
   approval: AgentApproval;
   loading: boolean;
@@ -85,6 +88,7 @@ function ApprovalCard({
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
   onModifyApproval?: PendingApprovalsStripProps["onModifyApproval"];
+  onOpenConversation?: PendingApprovalsStripProps["onOpenConversation"];
 }) {
   const { t } = useTranslation();
   const presentation = presentApproval(approval, t);
@@ -95,7 +99,10 @@ function ApprovalCard({
     <section data-approval-id={approval.id} className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 shadow-panel">
       <div className="flex min-w-0 items-center gap-2">
         <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-        <div className="truncate text-sm font-semibold">{presentation.title}</div>
+        {onOpenConversation && approval.approvalChannel !== "external_mcp_confirmation" ? (
+          <button type="button" className="truncate rounded-sm text-left text-sm font-semibold hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            data-app-tooltip={t("chat.openConversation")} onClick={() => onOpenConversation(approval)}>{presentation.title}</button>
+        ) : <div className="truncate text-sm font-semibold">{presentation.title}</div>}
       </div>
       {approval.approvalChannel === "external_mcp_confirmation" ? (
         <div className="mt-1 text-xs text-muted-foreground">{t("workspace.externalAgent")}</div>

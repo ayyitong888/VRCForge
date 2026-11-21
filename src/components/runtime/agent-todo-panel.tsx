@@ -11,9 +11,13 @@ const todoMarkers = new Map([
   ["cancelled", { icon: Minus, label: "workspace.progressCancelled" }],
 ]);
 
-type TodoPanelProps = { progress: AgentProgress[]; activeTodoIds?: ReadonlySet<string> };
+type TodoPanelProps = {
+  progress: AgentProgress[];
+  activeTodoIds?: ReadonlySet<string>;
+  onOpenTodo?: (progress: AgentProgress) => void;
+};
 
-function TodoItems({ progress, activeTodoIds }: TodoPanelProps) {
+function TodoItems({ progress, activeTodoIds, onOpenTodo }: TodoPanelProps) {
   const { t } = useTranslation();
   return (
     <ol className="m-0 grid list-none gap-2 p-0">
@@ -23,6 +27,12 @@ function TodoItems({ progress, activeTodoIds }: TodoPanelProps) {
         const marker = todoMarkers.get(status);
         const Icon = marker?.icon;
         const label = t(marker?.label ?? (active ? "workspace.progressInProgress" : "workspace.progressPending"));
+        const title = item.title || item.progressId;
+        const titleClassName = cn("min-w-0 break-words text-sm leading-6",
+          active ? "font-medium text-foreground" : "text-muted-foreground",
+          status === "completed" && "line-through",
+          (status === "blocked" || status === "failed") && "text-foreground",
+        );
         return (
           <li
             key={item.progressId}
@@ -49,13 +59,12 @@ function TodoItems({ progress, activeTodoIds }: TodoPanelProps) {
                 />
               ) : <span className="[text-box:trim-both_cap_alphabetic]">{index + 1}</span>}
             </span>
-            <span className={cn("min-w-0 break-words text-sm leading-6",
-              active ? "font-medium text-foreground" : "text-muted-foreground",
-              status === "completed" && "line-through",
-              (status === "blocked" || status === "failed") && "text-foreground",
-            )} data-app-tooltip={item.title || item.progressId}>
-              {item.title || item.progressId}
-            </span>
+            {onOpenTodo && item.sessionId ? (
+              <button type="button" className={cn(titleClassName, "rounded-sm text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring")}
+                data-app-tooltip={title} onClick={() => onOpenTodo(item)}>
+                {title}
+              </button>
+            ) : <span className={titleClassName} data-app-tooltip={title}>{title}</span>}
           </li>
         );
       })}
@@ -63,7 +72,7 @@ function TodoItems({ progress, activeTodoIds }: TodoPanelProps) {
   );
 }
 
-export function AgentTodoPanel({ progress, activeTodoIds }: TodoPanelProps) {
+export function AgentTodoPanel({ progress, activeTodoIds, onOpenTodo }: TodoPanelProps) {
   const { t } = useTranslation();
   if (!progress.length) return null;
 
@@ -74,17 +83,22 @@ export function AgentTodoPanel({ progress, activeTodoIds }: TodoPanelProps) {
     >
       <div className="flex min-w-0 items-center gap-2 border-b border-border/70 px-3 py-2.5">
         <ListTodo className="h-4 w-4 shrink-0 text-primary" />
-        <h2 className="min-w-0 flex-1 truncate text-xs font-semibold">{t("workspace.todo")}</h2>
+        <h2 className="min-w-0 flex-1 truncate text-xs font-semibold">
+          {onOpenTodo && progress[0].sessionId ? (
+            <button type="button" className="truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => onOpenTodo(progress[0])}>{t("workspace.todo")}</button>
+          ) : t("workspace.todo")}
+        </h2>
         <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{progress.length}</span>
       </div>
       <div className="app-scrollbar max-h-72 space-y-0.5 overflow-y-auto px-2 py-2">
-        <TodoItems progress={progress} activeTodoIds={activeTodoIds} />
+        <TodoItems progress={progress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
       </div>
     </section>
   );
 }
 
-export function AgentTodoPanelEmbedded({ progress, activeTodoIds }: TodoPanelProps) {
+export function AgentTodoPanelEmbedded({ progress, activeTodoIds, onOpenTodo }: TodoPanelProps) {
   if (!progress.length) return null;
 
   return (
@@ -92,7 +106,7 @@ export function AgentTodoPanelEmbedded({ progress, activeTodoIds }: TodoPanelPro
       className="space-y-0.5"
       data-vrcforge-agent-todo
     >
-      <TodoItems progress={progress} activeTodoIds={activeTodoIds} />
+      <TodoItems progress={progress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
     </div>
   );
 }

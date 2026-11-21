@@ -29,6 +29,7 @@ const bundle = await build({
     import { PendingApprovalsStrip } from "./src/components/approvals/pending-approvals-strip";
     import { RightRuntimeSidebar } from "./src/components/runtime/runtime-sidebar";
     import { useApprovalExecution } from "./src/hooks/use-approval-execution";
+    import { pendingApprovalOwner, pendingApprovalReviewTarget, pendingQuestionReviewTargets, runtimeProgressOwner } from "./src/lib/runtime-scope";
     import { initializeI18n, setLocale } from "./src/i18n";
     const chat = ${JSON.stringify(chat)};
     const approval = ${JSON.stringify(approval)};
@@ -36,7 +37,7 @@ const bundle = await build({
     async function mount() {
       await initializeI18n();
       await setLocale("en-US");
-      createRoot(document.getElementById("root")).render(<Fixture />);
+      createRoot(document.getElementById("root")).render(location.search ? <NavigationFixture /> : <Fixture />);
     }
     window.composerSubmitted = 0;
     function Fixture() {
@@ -45,10 +46,10 @@ const bundle = await build({
       const [approvalOpen, setApprovalOpen] = useState(false);
       const [history, setHistory] = useState([]);
       const [questions, setQuestions] = useState([]);
-      const [questionPanelTarget, setQuestionPanelTarget] = useState(null);
       const [reviewQuestionReveal, setReviewQuestionReveal] = useState(null);
       const [pendingReplyQuestionId, setPendingReplyQuestionId] = useState("");
       window.showTestQuestion = (live) => {
+        setReviewQuestionReveal(null);
         setQuestions([{ questionId: "question", status: "pending", sessionId: chat.sessionId,
           originClientTurnId: "question-turn", question: "Which side should we check?", options: [{ id: "front", label: "Front" }] }]);
         setHistory(live ? [{ id: "question-live", type: "streaming", clientTurnId: "question-turn", sessionId: chat.sessionId, text: "" }]
@@ -73,7 +74,8 @@ const bundle = await build({
         onSwitchMode={noop} commands={[]} actions={[]} attachments={[]} projects={[]}
         activeGoal={null} disabledReason="" conversation={history} queued={[]} runtimeRuns={[]}
         agentQuestions={questions} backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]}
-        runtimeSessionId={chat.sessionId} questionPanelTarget={questionPanelTarget} reviewQuestionReveal={reviewQuestionReveal}
+        runtimeSessionId={chat.sessionId} reviewQuestionReveal={reviewQuestionReveal}
+        onReopenQuestion={(questionId) => setReviewQuestionReveal({questionId})}
         pendingReplyQuestionId={pendingReplyQuestionId} onReplyInChat={setPendingReplyQuestionId}
         onCancelReply={() => setPendingReplyQuestionId("")} onDismissQuestion={() => setReviewQuestionReveal(null)}
         onAnswerQuestion={(id, option) => { window.answeredOption = option; setQuestions([]); }}
@@ -86,7 +88,6 @@ const bundle = await build({
         <div style={{width:320,flexShrink:0}}><RightRuntimeSidebar runtimeConnected loadingUnityStatus={false} workspaceProjectLabel="Fixture"
           workspaceProjectType="general" projectWorkspace authorizationStatus={{source:"none",status:"unknown"}}
           agentProgress={[]} userAttachmentSources={[]} approvalsLoaded pendingApprovals={approvals.length}
-          onQuestionPanelTarget={setQuestionPanelTarget}
           pendingQuestions={questions.length ? {count:questions.length,
             onOpen:() => setReviewQuestionReveal({questionId:questions[0].questionId})} : undefined}
           approvalPanel={approvalOpen ? <PendingApprovalsStrip approvals={approvals} actions={execution.approvalActions}
@@ -94,6 +95,61 @@ const bundle = await build({
           workspaceSummary={null} activeDesktopActions={[]} refreshUnityStatus={noop} providerTestAttempted={false}
           onHideSidebar={noop} onOpenPendingApprovals={() => setApprovalOpen((value) => !value)}
           localizeHealthMessage={() => ""} /></div>
+      </div>;
+    }
+    function NavigationFixture() {
+      const chats = ["different", "todo", "approval", "otherApproval", "question"].map((id) => ({
+        id, sessionId: id + "-session", projectPath: "D:/NavigationFixture", items: [],
+      }));
+      const [active, setActive] = useState(chats[0].id);
+      const [approvalOpen, setApprovalOpen] = useState(false);
+      const [approvalReveal, setApprovalReveal] = useState(null);
+      const [reviewQuestionReveal, setReviewQuestionReveal] = useState(null);
+      const approvals = chats.slice(2, 4).map(({ id, sessionId, projectPath }) => ({
+        id, status: "pending", projectRoot: projectPath, targetTool: "vrcforge_restore_checkpoint", taskContext: { sessionId },
+      }));
+      const {sessionId, projectPath} = chats[4];
+      const questions = [{ questionId: "pending", status: "pending", sessionId, projectRoot: projectPath,
+        question: "Question in a different conversation?", options: [{ id: "continue", label: "Continue" }] }];
+      const questionReview = pendingQuestionReviewTargets(chats, questions, active);
+      const openApproval = (approval) => {
+        const owner = pendingApprovalOwner(approval, chats);
+        if (!owner) return false;
+        setActive(owner.id);
+        setApprovalReveal({ approvalId: approval.id });
+        setApprovalOpen(true);
+        return true;
+      };
+      return <div className="flex min-h-0 flex-1">
+        <output data-fixture-active-chat>{active}</output>
+        <ChatWorkspace input="" setInput={noop} sending={false} queueAllowed={false} onSubmit={noop}
+          onSwitchMode={noop} commands={[]} actions={[]} attachments={[]} projects={[]}
+          activeGoal={null} disabledReason="" conversation={[]} queued={[]} runtimeRuns={[]}
+          agentQuestions={questions.filter((question) => question.sessionId === active + "-session")}
+          backgroundGoalDeliveries={[]} backgroundGoalProviderWarnings={[]} scopedPendingApprovals={[]}
+          reviewQuestionReveal={reviewQuestionReveal?.chatId === active ? reviewQuestionReveal : null}
+          approvalActions={{}} pendingApprovalForResponse={() => null}
+          onAnswerQuestion={noop} onDismissQuestion={() => setReviewQuestionReveal(null)}
+          sessionHandoffSourceChatId={active} onConversationScroll={noop} onConversationMouseUp={noop}
+        />
+        <div style={{ width: 320, flexShrink: 0 }}><RightRuntimeSidebar runtimeConnected loadingUnityStatus={false}
+          workspaceProjectLabel="Fixture" workspaceProjectType="unity" projectWorkspace authorizationStatus={{ source:"none", status:"unknown" }}
+          agentProgress={[{ progressId: "step", title: "Inspect the fixture", sessionId: chats[1].sessionId, projectRoot: chats[1].projectPath }]}
+          onOpenTodo={(progress) => {
+            const owner = runtimeProgressOwner(progress, chats);
+            if (owner) setActive(owner.id);
+          }}
+          userAttachmentSources={[]} approvalsLoaded pendingApprovals={approvals.length}
+          onOpenPendingApprovals={() => openApproval(pendingApprovalReviewTarget(approvals, chats, active))}
+          approvalPanel={approvalOpen ? <PendingApprovalsStrip approvals={approvals} actions={{}} loading={false}
+            onApprove={noop} onReject={noop} onOpenConversation={openApproval} reveal={approvalReveal} /> : undefined}
+          pendingQuestions={questionReview.target ? {count: questionReview.questionIds.size, onOpen: () => {
+            const {chat, question} = questionReview.target;
+            setActive(chat.id);
+            setReviewQuestionReveal({ chatId: chat.id, questionId: question.questionId });
+          }} : undefined}
+          workspaceSummary={null} activeDesktopActions={[]} refreshUnityStatus={noop} providerTestAttempted={false}
+          onHideSidebar={noop} localizeHealthMessage={() => ""} /></div>
       </div>;
     }
     void mount();
@@ -182,15 +238,22 @@ try {
     assert.equal(await page.evaluate(() => window.approvalError), "");
     if (hasHistory) {
       await page.evaluate(() => window.showTestQuestion(true));
-      await page.locator("[data-chat-composer-dock] [data-chat-question-dock]").waitFor();
+      const questionCard = page.locator("[data-chat-composer-dock] [data-chat-question-dock]");
+      await questionCard.waitFor();
+      await page.locator("[data-chat-answer-question]").click();
+      await questionCard.waitFor({ timeout: 1500 });
+      assert.equal(await page.locator("aside [data-chat-question-dock]").count(), 0);
       await page.evaluate(() => window.showTestQuestion(false));
       await page.locator('[data-conversation-item-id="question-settled"]').waitFor({ state: "attached" });
       assert.equal(await page.locator("[data-chat-question-dock]").count(), 0);
       assert.equal(await page.locator("[data-chat-answer-question]").count(), 0);
       await page.locator('[data-vrcforge-status="runtime-question"]').click();
-      const questionCard = page.locator("[data-runtime-question-panel] [data-chat-question-dock]");
-      await questionCard.waitFor();
-      assert.equal(await page.locator("[data-chat-composer-dock] [data-chat-question-dock]").count(), 0);
+      await questionCard.waitFor({ timeout: 1500 });
+      assert.equal(await page.locator("aside [data-chat-question-dock]").count(), 0);
+      assert.ok(await questionCard.evaluate((card) => {
+        const input = card.closest("[data-chat-composer-dock]").querySelector("textarea");
+        return Boolean(card.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }), "the answer card belongs above the existing input");
       await questionCard.locator("[data-question-reply-in-chat]").click();
       await page.locator("[data-question-reply-mode]").waitFor();
       await page.locator("[data-question-reply-mode] button").click();
@@ -201,7 +264,33 @@ try {
     assert.deepEqual(errors, []);
     await page.close();
   }
+  const navigation = await browser.newPage();
+  await navigation.route("http://approval-composer.test/**", (route) => route.fulfill({
+    contentType: "text/html", body: '<main id="root" class="flex h-screen flex-col"></main>',
+  }));
+  await navigation.goto("http://approval-composer.test/?navigation");
+  await navigation.addStyleTag({ content: css });
+  await navigation.addScriptTag({ content: bundle.outputFiles[0].text });
+  const activeChat = navigation.locator("[data-fixture-active-chat]");
+  const waitForChat = async (chatId) => {
+    await activeChat.filter({ hasText: new RegExp("^" + chatId + "$") }).waitFor();
+  };
+  await waitForChat("different");
+  await navigation.getByRole("button", { name: "Inspect the fixture", exact: true }).click();
+  await waitForChat("todo");
+  await navigation.locator('[data-vrcforge-status="approval"]').click();
+  await waitForChat("approval");
+  await navigation.locator('[data-approval-id="otherApproval"] [data-app-tooltip="Open conversation"]').click();
+  await waitForChat("otherApproval");
+  await navigation.locator('[data-vrcforge-status="runtime-question"]').click();
+  await waitForChat("question");
+  await navigation.locator("[data-chat-composer-dock] [data-chat-question-dock]").waitFor();
+  assert.equal(await navigation.locator("aside [data-chat-question-dock]").count(), 0);
+  assert.equal(await navigation.locator("[data-chat-composer-dock] [data-scoped-pending-approval]").count(), 0);
+  await navigation.getByRole("button", { name: /^Todo$/i }).click();
+  await waitForChat("todo");
+  await navigation.close();
 } finally {
   await browser.close();
 }
-console.log("settled decisions reopen in the sidebar; approval preserves the composer draft and question can be answered");
+console.log("settled approvals reopen in the sidebar; question entries reveal the answer immediately above the composer");

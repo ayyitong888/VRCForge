@@ -1,7 +1,6 @@
 import { AlertTriangle, ArrowDown, ArrowUp, HelpCircle, ListEnd, Loader2, MoreHorizontal, Paperclip, Pause, Pencil, Play, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
-import { createPortal } from "react-dom";
 import { updateAgentGoal } from "../../lib/api";
 import type { AgentApproval, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
 import type { RunningEnterAction } from "../../lib/app-preferences";
@@ -201,7 +200,6 @@ export function ChatWorkspace({
   onDismissQuestion,
   onReopenQuestion,
   reviewQuestionReveal,
-  questionPanelTarget,
   onReplyInChat,
   onOpenChatById,
   lookupChatTitle,
@@ -317,7 +315,6 @@ export function ChatWorkspace({
   onDismissQuestion: (questionId: string) => void;
   onReopenQuestion?: (questionId: string) => void;
   reviewQuestionReveal?: { questionId: string } | null;
-  questionPanelTarget?: HTMLElement | null;
   onReplyInChat?: (questionId: string) => void;
   /** Opens another conversation in this project scope by chat id. */
   onOpenChatById?: (chatId: string) => void;
@@ -395,10 +392,7 @@ export function ChatWorkspace({
   const pendingReplyQuestion = pendingQuestionPrompts.find((question) => question.questionId === pendingReplyQuestionId);
   const approvalBlocksSubmission = !pendingReplyQuestion && scopedPendingApprovals.some((approval) => approval.status === "pending");
   const dockQuestions = pendingQuestionPrompts.filter((question) => !dismissedQuestionIds?.has(question.questionId));
-  const [questionReveal, setQuestionReveal] = useState<{ questionId: string }>();
-  useEffect(() => {
-    setQuestionReveal(reviewQuestionReveal ?? undefined);
-  }, [reviewQuestionReveal]);
+  const questionReveal = reviewQuestionReveal ?? undefined;
   const [questionCardVisible, setQuestionCardVisible] = useState(false);
   const replyBanner = pendingReplyQuestion ? (
     <div className="mb-2 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-2.5 py-2 text-xs" data-question-reply-mode>
@@ -471,10 +465,7 @@ export function ChatWorkspace({
         <div data-chat-quote-content><ChatMarkdown text={question.question} /></div>
       ) : null}
       <button type="button" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-sm hover:bg-muted"
-        onClick={() => {
-          onReopenQuestion?.(question.questionId);
-          setQuestionReveal({ questionId: question.questionId });
-        }} data-chat-answer-question={question.questionId}>
+        onClick={() => onReopenQuestion?.(question.questionId)} data-chat-answer-question={question.questionId}>
         <HelpCircle className="h-4 w-4" aria-hidden="true" />
         {t("questionCard.answerQuestion")}
       </button>
@@ -561,19 +552,14 @@ export function ChatWorkspace({
       clientTurnId: ownerTurn,
     };
   };
-  const questionDockInSidebar = Boolean(questionPanelTarget && questionReveal
-    && dockQuestions.some((question) => question.questionId === questionReveal.questionId));
-  const questionDockQuestions = questionDockInSidebar
+  const questionDockQuestions = dockQuestions.some((question) => question.questionId === questionReveal?.questionId)
     ? dockQuestions : liveQuestions.filter((question) => !dismissedQuestionIds?.has(question.questionId));
   const questionDock = questionDockQuestions.length > 0 && !pendingReplyQuestion ? (
     <AgentQuestionCard
       questions={questionDockQuestions}
       reveal={questionReveal}
       onAnswerQuestion={onAnswerQuestion}
-      onDismissQuestion={(questionId) => {
-        setQuestionReveal(undefined);
-        onDismissQuestion(questionId);
-      }}
+      onDismissQuestion={onDismissQuestion}
       onVisibilityChange={setQuestionCardVisible}
       onReplyInChat={onReplyInChat}
       capturePreviewsForQuestion={questionCapturePreviews}
@@ -642,7 +628,7 @@ export function ChatWorkspace({
       actions={actions}
       onAction={onAction}
       compact={compact}
-      questionPromptVisible={Boolean(questionDock && !questionDockInSidebar && questionCardVisible)}
+      questionPromptVisible={Boolean(questionDock && questionCardVisible)}
       disabledReason={disabledReason}
       submissionBlocked={approvalBlocksSubmission}
       attachments={attachments}
@@ -1019,7 +1005,7 @@ export function ChatWorkspace({
             </div>
           ) : null}
           {activeGoalBar}
-          {questionDockInSidebar && questionPanelTarget ? createPortal(questionDock, questionPanelTarget) : questionDock}
+          {questionDock}
           {pendingQueue}
           {approvalCard}
           {composer(hasHistory)}
