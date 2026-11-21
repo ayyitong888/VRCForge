@@ -6,7 +6,7 @@ import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "..
 import type { ProjectType } from "../../lib/chat-types";
 import { runtimeAuthorizationLabelKey, runtimeAuthorizationMessageKey, type RuntimeAuthorizationStatus } from "../../lib/runtime-authorization-status";
 import { cn } from "../../lib/utils";
-import { AgentTodoPanel } from "./agent-todo-panel";
+import { AgentTodoPanel, type TodoReveal } from "./agent-todo-panel";
 import { CoreVersionNotice } from "./core-version-notice";
 import { RuntimeAttentionRows, RuntimeInfoRow, StatusDot, type RuntimeAttentionRowsProps } from "./runtime-sidebar-ui";
 import { RuntimePendingItems, type RuntimePendingItem } from "./runtime-pending-items";
@@ -39,6 +39,7 @@ export function RightRuntimeSidebar({
   agentProgress,
   activeTodoIds,
   onOpenTodo,
+  todoReveal,
   projectWorkspace,
   subAgentPanel,
   userAttachmentSources,
@@ -74,6 +75,7 @@ export function RightRuntimeSidebar({
   agentProgress: AgentProgress[];
   activeTodoIds?: ReadonlySet<string>;
   onOpenTodo?: (progress: AgentProgress) => void;
+  todoReveal?: TodoReveal;
   projectWorkspace: boolean;
   subAgentPanel?: ReactNode;
   userAttachmentSources: UserAttachmentSource[];
@@ -168,6 +170,7 @@ export function RightRuntimeSidebar({
             agentProgress={agentProgress}
             activeTodoIds={activeTodoIds}
             onOpenTodo={onOpenTodo}
+            todoReveal={todoReveal}
             subAgentPanel={subAgentPanel}
             userAttachmentSources={userAttachmentSources}
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
@@ -183,7 +186,7 @@ export function RightRuntimeSidebar({
         ) : (
           <>
             {subAgentPanel ? <div className="mb-3" data-vrcforge-chat-sub-agents>{subAgentPanel}</div> : null}
-            <AgentTodoPanel progress={agentProgress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
+            <AgentTodoPanel progress={agentProgress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} todoReveal={todoReveal} />
             <div className="rounded-xl border border-border/80 bg-background/65 px-3 py-2 shadow-sm">
               <div data-vrcforge-status="project">
                 <RuntimeInfoRow

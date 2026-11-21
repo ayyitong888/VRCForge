@@ -206,6 +206,23 @@ try {
   const effortPayload = (await effortRequest).postDataJSON();
   assert.equal(effortPayload.reasoning_effort, "high");
   assert.equal(effortPayload.model, "model-after-answer");
+  const failed = { id: "tool-failed-history", nextStep: "tool_failed", reason: "tool_failed",
+    reply: "The editor tool failed. I checked the result and found the patch was not applied." };
+  await expectHistorySuggestion(failed, failed.reply, "model-after-answer");
+  const beforeLiveFailure = requests.length;
+  await start();
+  await restoreHistory(undefined);
+  const deliveredFailure = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"), { timeout: 3000 });
+  await finishDelivered({ turnId: "tool-failed-live", continuationSource: "question_answered",
+    status: "failed", nextStep: "tool_failed", reply: failed.reply });
+  await change({ busy: false });
+  assert.equal((await deliveredFailure).postDataJSON().assistant_tail, failed.reply);
+  assert.equal(requests.length, beforeLiveFailure + 1);
+  await start();
+  await restoreHistory({ ...failed, id: "tool-failed-still-running", status: "running" });
+  await change({ busy: false });
+  assert.equal(await page.locator("output").textContent(), "");
+  assert.equal(requests.length, beforeLiveFailure + 1, "an unfinished tool run cannot trigger prediction");
   console.log("PASS: completed and restored replies, cached suggestions, user decisions, model changes, deduplication, typing and cancellation");
 } finally {
   finishSlow?.();

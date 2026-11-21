@@ -54,6 +54,7 @@ import {
 } from "../lib/api";
 import { DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS, type AgentRuntimeFollowup } from "../lib/api/agent-runtime";
 import { createSteerDeliveryTrace, type SteerDeliveryTraceEvent } from "../lib/chat-steer-delivery";
+import { isPredictableReply } from "./use-chat-input-prediction";
 import {
   applyGeneratedChatTitle,
   canRequestChatTitleAfterTurn,
@@ -161,11 +162,6 @@ type InternalRunSingleTurnOptions = RunSingleTurnOptions & {
   abortController?: AbortController;
   onPendingChild?: (sessionId: string) => void;
 };
-
-function isCompletedPublicReply(response: AgentRuntimeResponse): boolean {
-  // Completed turns can retain the ID of an already applied approval.
-  return response.ok && (response.turnStatus?.status || response.status) === "completed";
-}
 
 export type PrepareTurnContextInput = {
   endpoint: string;
@@ -1787,7 +1783,7 @@ export function useChatRunController({
       await refresh(targetEndpoint);
       await refreshRuntimeRuns(false, targetEndpoint);
       if (!sessionReadOnly && turn.onCompletedReply && !lane?.stopping && !abortController.signal.aborted
-        && !owner.stopAcknowledgement && isCompletedPublicReply(response)) {
+        && !owner.stopAcknowledgement && isPredictableReply(response)) {
         completedPublicReply = durableResponse;
       }
       return true;
