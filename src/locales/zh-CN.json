@@ -2145,7 +2145,9 @@
   "questionCard": {
     "recordedResponse": "提问回复",
     "skippedConfirmation": "已跳过确认",
+    "userAction": "待用户操作",
     "visualCheckpoint": {
+      "label": "待验收",
       "options": {
         "pass": "通过",
         "fail": "不通过",

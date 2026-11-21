@@ -1,8 +1,11 @@
-import { HelpCircle, ShieldCheck } from "lucide-react";
+import { ChevronDown, ChevronRight, ClipboardCheck, Hand, HelpCircle, ShieldCheck } from "lucide-react";
+import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 const pendingKinds = {
   question: { icon: HelpCircle, label: "questionCard.label" },
+  userAction: { icon: Hand, label: "questionCard.userAction" },
+  acceptance: { icon: ClipboardCheck, label: "questionCard.visualCheckpoint.label" },
   approval: { icon: ShieldCheck, label: "workspace.pendingConfirmation" },
 } as const;
 
@@ -16,20 +19,28 @@ export type RuntimePendingItem = {
 
 export function RuntimePendingItems({ items }: { items: RuntimePendingItem[] }) {
   const { t } = useTranslation();
+  const titleId = useId();
+  const listId = useId();
+  const [open, setOpen] = useState(true);
+  const Chevron = open ? ChevronDown : ChevronRight;
   if (!items.length) return null;
   return (
-    <section className="mb-3 overflow-hidden rounded-xl border border-border bg-card" aria-labelledby="runtime-pending-title">
-      <header className="flex items-center justify-between border-b border-border px-3 py-2 text-xs">
-        <h2 id="runtime-pending-title" className="font-semibold">{t("workspace.runtimePendingItems")}</h2>
-        <span className="tabular-nums text-muted-foreground">{items.length}</span>
-      </header>
-      <ul className="app-scrollbar m-0 max-h-36 list-none overflow-y-auto overscroll-contain p-0" data-runtime-pending-list>
+    <section className="mb-3 overflow-hidden rounded-xl border border-border bg-card" aria-labelledby={titleId}>
+      <h2 className={open ? "border-b border-border" : undefined}>
+        <button type="button" aria-expanded={open} aria-controls={listId} onClick={() => setOpen((current) => !current)}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+          <Chevron className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <span id={titleId} className="flex-1 font-semibold">{t("workspace.runtimePendingItems")}</span>
+          <span className="tabular-nums text-muted-foreground">{items.length}</span>
+        </button>
+      </h2>
+      <ul id={listId} hidden={!open} className="app-scrollbar m-0 max-h-36 list-none overflow-y-auto overscroll-contain p-0" data-runtime-pending-list>
         {items.map((item) => {
           const { icon: Icon, label } = pendingKinds[item.kind];
           return (
             <li key={item.id}>
               <button type="button" onClick={item.onOpen}
-                data-vrcforge-status={item.kind === "question" ? "runtime-question" : undefined}
+                data-vrcforge-status={item.kind !== "approval" ? "runtime-question" : undefined}
                 data-runtime-pending-kind={item.kind}
                 className="flex h-12 w-full items-center gap-2 px-3 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                 data-app-tooltip={item.title}>

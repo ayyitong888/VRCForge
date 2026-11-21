@@ -1,5 +1,5 @@
-import { Bot, Box, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
-import type { ReactNode } from "react";
+import { Bot, Box, ChevronDown, ChevronRight, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
+import { useId, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "../../lib/api";
@@ -94,6 +94,9 @@ export function RightRuntimeSidebar({
   localizeHealthMessage: (message?: string) => string;
 } & RuntimeAttentionRowsProps) {
   const { t } = useTranslation();
+  const environmentDetailsId = useId();
+  const [environmentOpen, setEnvironmentOpen] = useState(true);
+  const EnvironmentChevron = environmentOpen ? ChevronDown : ChevronRight;
   const backendStatus = backendComponent?.status || "unknown";
   const backendValue = componentValueFromMessage(
     backendComponent,
@@ -184,88 +187,97 @@ export function RightRuntimeSidebar({
           <>
             {subAgentPanel ? <div className="mb-3" data-vrcforge-chat-sub-agents>{subAgentPanel}</div> : null}
             <AgentTodoPanel progress={agentProgress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
-            <div className="rounded-xl border border-border/80 bg-background/65 px-3 py-2 shadow-sm">
-              <div data-vrcforge-status="project">
-                <RuntimeInfoRow
-                  icon={<Folder className="h-4 w-4" />}
-                  label={t("workspace.project")}
-                  value={workspaceProjectLabel}
-                  suffix={<StatusDot status={normalizedStatus(selectedProjectComponent)} />}
-                />
-              </div>
-              <div data-vrcforge-status="core">
-                <RuntimeInfoRow
-                  icon={<Server className="h-4 w-4" />}
-                  label={t("workspace.core")}
-                  value={backendValue}
-                  suffix={<StatusDot status={backendStatus} />}
-                />
-              </div>
-              <div data-vrcforge-status="external-agent">
-                {authorizationStatus.internalConfigured && !providerTestAttempted && authorizationStatus.source !== "external" && authorizationStatus.status === "warning" && onTestAgentConnection ? (
-                  <button type="button" className="w-full text-left" data-app-tooltip={t("workspace.testInternalAgentConnection")} onClick={() => void onTestAgentConnection()}>
+            <section className="overflow-hidden rounded-xl border border-border/80 bg-background/65 shadow-sm">
+              <h2 className={environmentOpen ? "border-b border-border/70" : undefined}>
+                <button type="button" aria-expanded={environmentOpen} aria-controls={environmentDetailsId} onClick={() => setEnvironmentOpen((current) => !current)}
+                  className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+                  <EnvironmentChevron className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="min-w-0 truncate">{t("workspace.environmentDetails")}</span>
+                </button>
+              </h2>
+              <div id={environmentDetailsId} hidden={!environmentOpen} className="px-3 py-2">
+                <div data-vrcforge-status="project">
+                  <RuntimeInfoRow
+                    icon={<Folder className="h-4 w-4" />}
+                    label={t("workspace.project")}
+                    value={workspaceProjectLabel}
+                    suffix={<StatusDot status={normalizedStatus(selectedProjectComponent)} />}
+                  />
+                </div>
+                <div data-vrcforge-status="core">
+                  <RuntimeInfoRow
+                    icon={<Server className="h-4 w-4" />}
+                    label={t("workspace.core")}
+                    value={backendValue}
+                    suffix={<StatusDot status={backendStatus} />}
+                  />
+                </div>
+                <div data-vrcforge-status="external-agent">
+                  {authorizationStatus.internalConfigured && !providerTestAttempted && authorizationStatus.source !== "external" && authorizationStatus.status === "warning" && onTestAgentConnection ? (
+                    <button type="button" className="w-full text-left" data-app-tooltip={t("workspace.testInternalAgentConnection")} onClick={() => void onTestAgentConnection()}>
+                      <RuntimeInfoRow
+                        icon={<Bot className="h-4 w-4" />}
+                        label={t(runtimeAuthorizationLabelKey(authorizationStatus))}
+                        value={t("workspace.internalAgentNotTested")}
+                        suffix={<StatusDot status={authorizationStatus.status} />}
+                      />
+                    </button>
+                  ) : (
                     <RuntimeInfoRow
                       icon={<Bot className="h-4 w-4" />}
                       label={t(runtimeAuthorizationLabelKey(authorizationStatus))}
-                      value={t("workspace.internalAgentNotTested")}
+                      value={t(runtimeAuthorizationMessageKey(authorizationStatus, providerTestAttempted))}
                       suffix={<StatusDot status={authorizationStatus.status} />}
                     />
-                  </button>
-                ) : (
+                  )}
+                </div>
+                {workspaceProjectType === "unity" ? (
+                  <>
+                    <div data-vrcforge-status="mcp-core">
+                      <RuntimeInfoRow
+                        icon={<Box className="h-4 w-4" />}
+                        label={t("workspace.mcpCore")}
+                        value={componentValueFromMessage(mcpPackageComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
+                        suffix={<StatusDot status={normalizedStatus(mcpPackageComponent)} />}
+                      />
+                    </div>
+                    <div data-vrcforge-status="mcp-bridge">
+                      <RuntimeInfoRow
+                        icon={<PlugZap className="h-4 w-4" />}
+                        label={t("workspace.mcpBridge")}
+                        value={componentValueFromMessage(unityBridgeComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
+                        suffix={<StatusDot status={normalizedStatus(unityBridgeComponent)} />}
+                      />
+                    </div>
+                    <div data-vrcforge-status="unity">
+                      <RuntimeInfoRow
+                        icon={<Monitor className="h-4 w-4" />}
+                        label={t("workspace.unityEditor")}
+                        value={componentValueFromMessage(unityInstanceComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
+                        suffix={<StatusDot status={normalizedStatus(unityInstanceComponent)} />}
+                      />
+                    </div>
+                    <div data-vrcforge-status="tools">
+                      <RuntimeInfoRow
+                        icon={<Wrench className="h-4 w-4" />}
+                        label={t("workspace.vrcForgeTools")}
+                        value={componentValueFromMessage(unityToolsComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
+                        suffix={<StatusDot status={normalizedStatus(unityToolsComponent)} />}
+                      />
+                    </div>
+                  </>
+                ) : null}
+                <RuntimeAttentionRows runtimeReview={runtimeReview} />
+                <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
                   <RuntimeInfoRow
-                    icon={<Bot className="h-4 w-4" />}
-                    label={t(runtimeAuthorizationLabelKey(authorizationStatus))}
-                    value={t(runtimeAuthorizationMessageKey(authorizationStatus, providerTestAttempted))}
-                    suffix={<StatusDot status={authorizationStatus.status} />}
+                    icon={<ListChecks className="h-4 w-4" />}
+                    label={t("workspace.pendingConfirmation")}
+                    value={approvalValue}
+                    suffix={<StatusDot status={approvalStatus} />}
                   />
-                )}
+                </button>
               </div>
-              {workspaceProjectType === "unity" ? (
-                <>
-                  <div data-vrcforge-status="mcp-core">
-                    <RuntimeInfoRow
-                      icon={<Box className="h-4 w-4" />}
-                      label={t("workspace.mcpCore")}
-                      value={componentValueFromMessage(mcpPackageComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
-                      suffix={<StatusDot status={normalizedStatus(mcpPackageComponent)} />}
-                    />
-                  </div>
-                  <div data-vrcforge-status="mcp-bridge">
-                    <RuntimeInfoRow
-                      icon={<PlugZap className="h-4 w-4" />}
-                      label={t("workspace.mcpBridge")}
-                      value={componentValueFromMessage(unityBridgeComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
-                      suffix={<StatusDot status={normalizedStatus(unityBridgeComponent)} />}
-                    />
-                  </div>
-                  <div data-vrcforge-status="unity">
-                    <RuntimeInfoRow
-                      icon={<Monitor className="h-4 w-4" />}
-                      label={t("workspace.unityEditor")}
-                      value={componentValueFromMessage(unityInstanceComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
-                      suffix={<StatusDot status={normalizedStatus(unityInstanceComponent)} />}
-                    />
-                  </div>
-                  <div data-vrcforge-status="tools">
-                    <RuntimeInfoRow
-                      icon={<Wrench className="h-4 w-4" />}
-                      label={t("workspace.vrcForgeTools")}
-                      value={componentValueFromMessage(unityToolsComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
-                      suffix={<StatusDot status={normalizedStatus(unityToolsComponent)} />}
-                    />
-                  </div>
-                </>
-              ) : null}
-              <RuntimeAttentionRows runtimeReview={runtimeReview} />
-              <button type="button" className="w-full text-left" data-vrcforge-status="approval" onClick={pendingApprovals > 0 ? onOpenPendingApprovals : undefined} disabled={pendingApprovals === 0}>
-                <RuntimeInfoRow
-                  icon={<ListChecks className="h-4 w-4" />}
-                  label={t("workspace.pendingConfirmation")}
-                  value={approvalValue}
-                  suffix={<StatusDot status={approvalStatus} />}
-                />
-              </button>
-            </div>
+            </section>
           </>
         )}
       </div>

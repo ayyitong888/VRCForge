@@ -2147,7 +2147,9 @@
   "questionCard": {
     "recordedResponse": "Question response",
     "skippedConfirmation": "Skipped confirmation",
+    "userAction": "User action required",
     "visualCheckpoint": {
+      "label": "Visual review",
       "options": {
         "pass": "Pass",
         "fail": "Fail",

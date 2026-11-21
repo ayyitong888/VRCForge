@@ -1238,8 +1238,9 @@ export default function App() {
     pendingItemsByChat.set(chat.id, items);
   };
   for (const { chat, question } of questionReview.targets) {
+    const kind = question.kind === "visual_checkpoint" ? "acceptance" : question.sourceTool === "call_user" ? "userAction" : "question";
     addPendingItem(chat, {
-      id: `question:${question.questionId}`, kind: "question", title: question.question || question.header || t("questionCard.label"),
+      id: `question:${question.questionId}`, kind, title: question.question || question.header || t("questionCard.label"),
       onOpen: () => openQuestionReview(chat, question.questionId),
     });
   }

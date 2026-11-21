@@ -2140,7 +2140,9 @@
   "questionCard": {
     "recordedResponse": "提問回覆",
     "skippedConfirmation": "已跳過確認",
+    "userAction": "待使用者操作",
     "visualCheckpoint": {
+      "label": "待驗收",
       "options": {
         "pass": "通過",
         "fail": "不通過",

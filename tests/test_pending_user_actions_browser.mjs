@@ -29,13 +29,17 @@ const bundle = await build({
     const agentProgress = ${JSON.stringify(todos)}.map(todo => ({ ...todo, sessionId: "a-session", projectRoot }));
     const approval = { id: "approve", status: "pending", title: "Approve the change", projectRoot, taskContext: { sessionId: "a-session" } };
     const question = { questionId: "answer", status: "pending", question: "Which option?", projectRoot, sessionId: "b-session" };
+    const questions = [question,
+      { ...question, questionId: "act", sourceTool: "call_user", question: "Please close Unity" },
+      { ...question, questionId: "review", sourceTool: "call_user", kind: "visual_checkpoint", question: "Inspect the preview" },
+    ];
     function Fixture() {
       const { t } = useTranslation();
       const [active, setActive] = useState("a");
       const [opened, setOpened] = useState("");
       const [handled, setHandled] = useState(false);
       const [projectWorkspace, setProjectWorkspace] = useState(false);
-      const questionReview = pendingQuestionReviewTargets(activityOwners, handled ? [{ ...question, status: "answered" }] : [question], active);
+      const questionReview = pendingQuestionReviewTargets(activityOwners, handled ? questions.map(entry => ({ ...entry, status: "answered" })) : questions, active);
       const agentApprovals = handled ? [{ ...approval, status: "applied" }] : [approval, { ...approval, id: "auto", status: "applied" }];
       const openRuntimeChat = owner => setActive(owner.id);
       const openQuestionReview = (chat, id) => { openRuntimeChat(chat); setOpened(id); };
@@ -70,9 +74,43 @@ try {
   const inbox = page.locator("[data-runtime-pending-list]");
   const actions = inbox.locator("[data-runtime-pending-kind]");
   await actions.first().waitFor();
-  assert.deepEqual(await actions.evaluateAll(rows => rows.map(row => row.dataset.runtimePendingKind)), ["question", "approval"]);
+  const inboxToggle = page.getByRole("button", { name: /^Needs attention/ });
+  const pendingCount = await actions.count();
+  assert.equal(await inboxToggle.getAttribute("aria-expanded", { timeout: 4000 }), "true");
+  assert.match(await inboxToggle.textContent(), new RegExp(String(pendingCount) + "$"));
+  const inboxScroll = await inbox.evaluate(node => ({ maxHeight: getComputedStyle(node).maxHeight, overflowY: getComputedStyle(node).overflowY }));
+  assert.deepEqual(inboxScroll, { maxHeight: "144px", overflowY: "auto" });
+  const beforeCollapseScroll = await inbox.evaluate(node => {
+    node.scrollTop = node.scrollHeight;
+    return node.scrollTop;
+  });
+  assert.ok(beforeCollapseScroll > 0, "the fourth entry is still in the scrollable list");
+  await inboxToggle.click();
+  assert.equal(await inboxToggle.getAttribute("aria-expanded"), "false");
+  assert.match(await inboxToggle.textContent(), new RegExp(String(pendingCount) + "$"));
+  assert.equal(await inbox.isVisible(), false);
+  await inboxToggle.press("Enter");
+  assert.equal(await inboxToggle.getAttribute("aria-expanded"), "true");
+  assert.equal(await actions.count(), pendingCount);
+  assert.equal(await inbox.evaluate(node => node.scrollTop), beforeCollapseScroll);
+
+  const statusToggle = page.getByRole("button", { name: "Environment details", exact: true });
+  const statusRow = page.locator('[data-vrcforge-environment-status] [data-vrcforge-status="project"]');
+  assert.equal(await statusToggle.getAttribute("aria-expanded"), "true");
+  await statusToggle.click();
+  assert.equal(await statusToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(await statusRow.isVisible(), false);
+  assert.equal(await inbox.isVisible(), true, "the two cards fold independently");
+  await statusToggle.press("Space");
+  assert.equal(await statusToggle.getAttribute("aria-expanded"), "true");
+  assert.equal(await statusRow.isVisible(), true);
+  assert.deepEqual(await actions.evaluateAll(rows => rows.map(row => row.dataset.runtimePendingKind)), ["question", "userAction", "acceptance", "approval"]);
   await inbox.locator('[data-runtime-pending-kind="question"]').click();
   assert.equal(await page.locator("#opened").textContent(), "b:answer");
+  await inbox.getByRole("button", { name: /Please close Unity.*User action required/ }).click();
+  assert.equal(await page.locator("#opened").textContent(), "b:act");
+  await inbox.getByRole("button", { name: /Inspect the preview.*Visual review/ }).click();
+  assert.equal(await page.locator("#opened").textContent(), "b:review");
   await inbox.locator('[data-runtime-pending-kind="approval"]').click();
   assert.equal(await page.locator("#opened").textContent(), "a:approve");
   await page.evaluate(() => window.finishDecisions());
@@ -94,7 +132,7 @@ try {
     await header.click();
     assert.equal(await rows.count(), todos.length);
   }
-  console.log(`PASS: ${replay ? "captured" : "synthetic"} todos remain separate from questions and approvals`);
+  console.log(`PASS: ${replay ? "captured" : "synthetic"} todos stay separate from pending questions, approvals and user requests`);
 } finally {
   await browser.close();
 }

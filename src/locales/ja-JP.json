@@ -2140,7 +2140,9 @@
   "questionCard": {
     "recordedResponse": "質問への回答",
     "skippedConfirmation": "確認をスキップしました",
+    "userAction": "ユーザー操作待ち",
     "visualCheckpoint": {
+      "label": "目視確認待ち",
       "options": {
         "pass": "合格",
         "fail": "不合格",
