@@ -160,6 +160,7 @@
     "notificationReadFailed": "讀取通知狀態失敗：",
     "notificationSendFailed": "傳送 Windows 通知失敗：",
     "runtimePendingItems": "待處理",
+    "noRuntimePendingItems": "目前沒有待處理項目",
     "runtimeQuestionTitle": "有問題待回答",
     "runtimeQuestionCount": "{{count}} 個問題等你回答",
     "runtimeReviewTitle": "工作需要查看",

@@ -160,6 +160,7 @@
     "notificationReadFailed": "Unable to read notification state: ",
     "notificationSendFailed": "Unable to send Windows notification: ",
     "runtimePendingItems": "Needs attention",
+    "noRuntimePendingItems": "No pending actions",
     "runtimeQuestionTitle": "Question awaiting your answer",
     "runtimeQuestionCount_one": "{{count}} question to answer",
     "runtimeQuestionCount_other": "{{count}} questions to answer",

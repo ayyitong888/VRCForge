@@ -114,7 +114,14 @@ try {
   await inbox.locator('[data-runtime-pending-kind="approval"]').click();
   assert.equal(await page.locator("#opened").textContent(), "a:approve");
   await page.evaluate(() => window.finishDecisions());
-  await inbox.waitFor({ state: "detached" });
+  await inbox.getByText("No pending actions", { exact: true }).waitFor({ timeout: 3000 });
+  assert.equal(await actions.count(), 0);
+  assert.match(await inboxToggle.textContent(), /0$/);
+  await inboxToggle.click();
+  assert.equal(await inboxToggle.getAttribute("aria-expanded"), "false");
+  assert.equal(await inbox.isVisible(), false);
+  await inboxToggle.click();
+  assert.equal(await inbox.getByText("No pending actions", { exact: true }).isVisible(), true);
   const rows = page.locator("[data-vrcforge-agent-todo-item]");
   assert.equal(await rows.count(), todos.length);
   const button = rows.last().locator("button");

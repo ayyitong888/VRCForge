@@ -160,6 +160,7 @@
     "notificationReadFailed": "通知状態を取得できません: ",
     "notificationSendFailed": "Windows 通知を送信できません: ",
     "runtimePendingItems": "対応待ち",
+    "noRuntimePendingItems": "対応待ちの項目はありません",
     "runtimeQuestionTitle": "回答待ちの質問",
     "runtimeQuestionCount": "{{count}} 件の質問が回答を待っています",
     "runtimeReviewTitle": "タスクの確認が必要",

@@ -23,7 +23,6 @@ export function RuntimePendingItems({ items }: { items: RuntimePendingItem[] }) 
   const listId = useId();
   const [open, setOpen] = useState(true);
   const Chevron = open ? ChevronDown : ChevronRight;
-  if (!items.length) return null;
   return (
     <section className="mb-3 overflow-hidden rounded-xl border border-border bg-card" aria-labelledby={titleId}>
       <h2 className={open ? "border-b border-border" : undefined}>
@@ -35,6 +34,7 @@ export function RuntimePendingItems({ items }: { items: RuntimePendingItem[] }) 
         </button>
       </h2>
       <ul id={listId} hidden={!open} className="app-scrollbar m-0 max-h-36 list-none overflow-y-auto overscroll-contain p-0" data-runtime-pending-list>
+        {!items.length ? <li className="px-3 py-2.5 text-xs text-muted-foreground">{t("workspace.noRuntimePendingItems")}</li> : null}
         {items.map((item) => {
           const { icon: Icon, label } = pendingKinds[item.kind];
           return (
