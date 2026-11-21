@@ -1,4 +1,5 @@
 import { Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type RefObject } from "react";
+import { hasTauriInternals } from "../../lib/api/http";
 import { chatLinksInText, ChatLinkTitlesContext } from "../../lib/chat-deep-link";
 import { ChatDeepLink } from "./chat-deep-link";
 
@@ -56,6 +57,74 @@ export function ComposerLinkInput({ inputRef, value, className, suggestion, onDi
     : "";
   const pendingCaret = useRef<number | null>(null);
   const editSelection = useRef<{ start: number; end: number } | null>(null);
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input || !hasTauriInternals() || !navigator.userAgent.includes("Windows NT")) return;
+
+    let sizing = false;
+    let needsRefresh = false;
+    let blurredAt: number | undefined;
+    let restoreTimer: number | undefined;
+
+    function refreshImeAnchor() {
+      if (!input || !needsRefresh || composingRef.current || !document.hasFocus()) return;
+      // STOPGAP: WebView2 loses the TSF caret position on a native resize (#5675).
+      // Start the blur during the drag and restore focus as soon as it ends.
+      // Remove once the WebView2 runtime fixes caret positioning after native resizing.
+      if (blurredAt === undefined) {
+        if (document.activeElement !== input) return;
+        input.blur();
+        blurredAt = performance.now();
+      }
+      if (sizing) return;
+      const restoreFocus = () => {
+        cancelRefresh();
+        if (input.isConnected && document.activeElement === document.body && document.hasFocus()) {
+          input.focus({ preventScroll: true });
+        }
+      };
+      const remaining = 60 - (performance.now() - blurredAt);
+      if (remaining > 0) restoreTimer = window.setTimeout(restoreFocus, remaining);
+      else restoreFocus();
+    }
+
+    function handleResizeStart() {
+      if (document.activeElement !== input) return;
+      sizing = true;
+      needsRefresh = true;
+      refreshImeAnchor();
+    }
+
+    function handleResizeEnd() {
+      sizing = false;
+      refreshImeAnchor();
+    }
+
+    function handleCompositionEnd(event: CompositionEvent) {
+      if (event.target === input) refreshImeAnchor();
+    }
+
+    function cancelRefresh() {
+      window.clearTimeout(restoreTimer);
+      sizing = false;
+      needsRefresh = false;
+      blurredAt = undefined;
+    }
+
+    window.addEventListener("vrcforge-native-resize-start", handleResizeStart);
+    window.addEventListener("vrcforge-native-resize-end", handleResizeEnd);
+    window.addEventListener("compositionend", handleCompositionEnd);
+    window.addEventListener("blur", cancelRefresh);
+    window.addEventListener("pointerdown", cancelRefresh, true);
+    return () => {
+      cancelRefresh();
+      window.removeEventListener("vrcforge-native-resize-start", handleResizeStart);
+      window.removeEventListener("vrcforge-native-resize-end", handleResizeEnd);
+      window.removeEventListener("compositionend", handleCompositionEnd);
+      window.removeEventListener("blur", cancelRefresh);
+      window.removeEventListener("pointerdown", cancelRefresh, true);
+    };
+  }, [inputRef]);
   useEffect(() => {
     if (!projected) return;
     const input = inputRef.current;
