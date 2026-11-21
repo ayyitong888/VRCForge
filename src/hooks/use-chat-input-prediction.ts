@@ -63,14 +63,14 @@ export function predictionTurnForChat(
     || item.taskContext?.turnId === turnId
     || (item.taskContext?.clientTurnId && item.taskContext.clientTurnId === response.clientTurnId)));
   if (!isPredictableReply(response, Boolean(question || approval))) return undefined;
-  const reply = (visibleAgentDialogueText(response) || question?.question || approval?.reason || response.plan.summary).trim();
-  if (!reply) return undefined;
+  const reply = visibleAgentDialogueText(response) || (question?.question || approval?.reason || response.plan.summary).trim();
+  if (!reply.trim()) return undefined;
   return {
     owner: chatInputPredictionOwner(endpoint, chat.id, chat.sessionId),
     turnId,
     context: {
       recent_user_messages: recentPredictionInputs(chat.items),
-      assistant_tail: Array.from(reply).slice(-2000).join(""),
+      assistant_tail: reply,
     },
   };
 }
@@ -97,10 +97,25 @@ type PredictionOptions = {
   latestReply?: CompletedPredictionTurn;
 };
 
+type CachedPrediction = { turnId: string; text: string };
+
+function loadCompletedPrediction(key: string): CachedPrediction | null {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(key) || "null");
+    return typeof saved?.turnId === "string" && typeof saved.text === "string" ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
 export function useChatInputPrediction({ endpoint, owner, provider, model, reasoningEffort, eligible, busy, hasDraft, latestReply }: PredictionOptions) {
   const route = JSON.stringify([owner, provider, model, reasoningEffort]);
+  const [, chatId] = JSON.parse(owner) as [string, string, string];
+  // The backend can listen on a different port after an app restart.
+  const cacheKey = "vrcforge_input_prediction_result:" + chatId;
   const [candidate, setCandidate] = useState<(CompletedPredictionTurn & { route: string }) | null>(null);
   const [display, setDisplay] = useState<{ owner: string; text: string } | null>(null);
+  const completedPredictions = useRef(new Map<string, CachedPrediction>());
   const attempted = useRef<CompletedPredictionTurn | null>(null);
   const pending = useRef<AbortController | null>(null);
   const generation = useRef(0);
@@ -149,18 +164,38 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, reaso
     }
     if (busy) return;
     attempted.current = candidate;
+    const cached = completedPredictions.current.get(cacheKey) ?? loadCompletedPrediction(cacheKey);
+    if (cached?.turnId === candidate.turnId) {
+      setDisplay({ owner, text: cached.text });
+      return;
+    }
+    if (cached) {
+      completedPredictions.current.delete(cacheKey);
+      try {
+        window.localStorage.removeItem(cacheKey);
+      } catch {
+        // The turn check still prevents displaying the old result.
+      }
+    }
     setDisplay(null);
     const controller = new AbortController();
     pending.current = controller;
     void requestInputPrediction(endpoint, { ...candidate.context, provider, model, reasoning_effort: reasoningEffort || undefined }, controller.signal).then((result) => {
       if (result?.suggestion && !controller.signal.aborted) {
+        const completed = { turnId: candidate.turnId, text: result.suggestion };
+        completedPredictions.current.set(cacheKey, completed);
+        try {
+          window.localStorage.setItem(cacheKey, JSON.stringify(completed));
+        } catch {
+          // Keep the successful result available in this window.
+        }
         setDisplay({ owner, text: result.suggestion });
       }
     }).catch(() => undefined).finally(() => {
       if (pending.current === controller) pending.current = null;
     });
     return () => controller.abort();
-  }, [candidate, endpoint, eligible, busy, hasDraft, owner, provider, model, reasoningEffort, route]);
+  }, [candidate, endpoint, eligible, busy, hasDraft, owner, provider, model, reasoningEffort, route, cacheKey]);
 
   function offer(turn: CompletedPredictionTurn, submittedGeneration: number) {
     const identity = JSON.stringify([turn.owner, turn.turnId]);
@@ -182,8 +217,8 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, reaso
     if (!(ownerObserved.current.owner === turnOwner && completed >= ownerObserved.current.at
       && started > lastComposerActivity.current)) return;
     const submittedGeneration = generation.current;
-    const publicReply = visibleAgentDialogueText(responseFromRuntimeTurnEvent(event)).trim();
-    if (!publicReply) return;
+    const publicReply = visibleAgentDialogueText(responseFromRuntimeTurnEvent(event));
+    if (!publicReply.trim()) return;
     // The terminal receipt can arrive ahead of the settled question or approval.
     await refreshRuntime();
     const chat = getChatById(chatId);
@@ -196,7 +231,7 @@ export function useChatInputPrediction({ endpoint, owner, provider, model, reaso
       turnId: event.turnId,
       context: {
         recent_user_messages: recentPredictionInputs(chat.items),
-        assistant_tail: Array.from(publicReply).slice(-2000).join(""),
+        assistant_tail: publicReply,
       },
     }, submittedGeneration);
   }

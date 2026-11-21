@@ -9,30 +9,31 @@ const bundle = await build({
     import { createRoot } from "react-dom/client";
     import { chatInputPredictionOwner, predictionTurnForChat, useChatInputPrediction } from "./src/hooks/use-chat-input-prediction";
     function Chat() {
-      const [state, setState] = useState({ busy: true, eligible: true, hasDraft: false, provider: "chatgpt", model: "first" });
-      const owner = chatInputPredictionOwner(location.origin, "chat", "session");
+      const [state, setState] = useState({ busy: true, eligible: true, enabled: true, hasDraft: false, provider: "chatgpt", model: "first", chatId: "chat" });
+      const owner = chatInputPredictionOwner(location.origin, state.chatId, "session");
       const [history, setHistory] = useState();
       const latestReply = history && predictionTurnForChat(location.origin, {
-        id: "chat", sessionId: "session", items: [{ id: "input", type: "user", text: "Check this" }, {
+        id: state.chatId, sessionId: "session", items: [{ id: "input", type: "user", text: "Check this" }, {
           id: history.id, type: "agent", response: { ok: true, turnId: history.id, turnStatus: { status: history.status },
             approvalId: history.approvalId, plan: { nextStep: history.nextStep, reply: history.reply,
               summary: "", completionGate: { reason: history.reason } },
           },
         }, ...(history.trailing || [])],
       }, history.questions || [], history.approvals || []);
-      const prediction = useChatInputPrediction({ ...state, endpoint: location.origin, owner, latestReply });
+      const prediction = useChatInputPrediction({ ...state, eligible: state.eligible && state.enabled, endpoint: location.origin, owner, latestReply });
       window.openHistory = setHistory;
       window.change = (patch) => setState(prev => ({ ...prev, ...patch }));
+      window.openChat = ({ chatId, history }) => { window.change({ chatId }); setHistory(history); };
       window.start = () => { window.submission = prediction.dismiss(); window.change({ busy: true }); };
       window.type = prediction.onInputActivity;
       window.finish = (turnId) => prediction.offer({
         owner, turnId, context: {recent_user_messages: ["继续"], assistant_tail: turnId}
       }, window.submission);
-      window.finishDelivered = ({ turnId, continuationSource, status, nextStep }) => {
+      window.finishDelivered = ({ turnId, continuationSource, status, nextStep, reply = turnId }) => {
         const now = new Date().toISOString();
         return prediction.offerAfterResume({
           sessionId: "session", turnId, continuationSource, status, startedAt: now, completedAt: now,
-          plan: { nextStep, reply: turnId },
+          plan: { nextStep, reply },
         }, {
           chatId: "chat", refreshRuntime: async () => {},
           getChatById: () => ({ sessionId: "session", items: [{ id: turnId, type: "agent", response: { turnId } }] }),
@@ -59,7 +60,7 @@ const server = createServer(async (req, res) => {
     } else {
       requests.push(payload);
       if (payload.assistant_tail === "slow") await new Promise(resolve => { finishSlow = resolve; });
-      res.end(JSON.stringify({ suggestion: "继续" }));
+      res.end(JSON.stringify({ suggestion: payload.assistant_tail === "Other chat reply." ? "另一个对话" : "继续" }));
     }
     return;
   }
@@ -118,17 +119,18 @@ try {
   assert.equal(requests.length, 2);
   assert.equal(await page.locator("output").textContent(), "");
   const finishDelivered = (receipt) => render(value => window.finishDelivered(value), receipt);
+  const continuationReply = "Beginning of public reply. " + "Continuation details. ".repeat(100) + "End of public reply.";
   for (const continuationSource of ["foreground_completed", "approval_finished", "shell_process_finished", "sub_agent_finished"]) {
     await start();
     const observed = page.waitForRequest(request => request.url().endsWith("/chat/input-prediction"));
-    await finishDelivered({ turnId: continuationSource, continuationSource, nextStep: "done" });
+    await finishDelivered({ turnId: continuationSource, continuationSource, nextStep: "done", reply: continuationReply });
     await change({ busy: false });
-    assert.equal((await observed).postDataJSON().assistant_tail, continuationSource);
+    assert.equal((await observed).postDataJSON().assistant_tail, continuationReply);
     await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
     await finish(continuationSource);
   }
   assert.deepEqual(requests.slice(2).map(request => request.assistant_tail),
-    ["foreground_completed", "approval_finished", "shell_process_finished", "sub_agent_finished"]);
+    Array(4).fill(continuationReply));
   await start();
   await finishDelivered({ turnId: "blocked", continuationSource: "approval_finished", nextStep: "pending_approval", status: "blocked" });
   await finishDelivered({ turnId: "interrupted", continuationSource: "foreground_interrupted", nextStep: "done" });
@@ -145,8 +147,34 @@ try {
     assert.equal(payload.model, expectedModel);
     await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
   };
-  const restored = { id: "saved", status: "completed", nextStep: "done", reply: "Saved final reply" };
+  const restored = { id: "saved", status: "completed", nextStep: "done", reply: "Saved final reply. " + continuationReply };
   await expectHistorySuggestion(restored, restored.reply);
+  const completedRequestCount = requests.length;
+  await change({ eligible: false });
+  assert.equal(await page.locator("output").textContent(), "");
+  await change({ eligible: true });
+  await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
+  assert.equal(requests.length, completedRequestCount, "returning from settings restores the completed prediction without asking the model again");
+  await page.reload();
+  await page.waitForFunction(() => typeof window.openHistory === "function");
+  await restoreHistory(restored);
+  await change({ busy: false, model: "third" });
+  await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
+  assert.equal(requests.length, completedRequestCount, "reopening the app restores the cached suggestion without a new prediction");
+  const openChat = (chatId, history) => render(value => window.openChat(value), { chatId, history });
+  await openChat("other-chat", { ...restored, reply: "Other chat reply." });
+  await page.waitForFunction(() => document.querySelector("output").textContent === "另一个对话");
+  assert.equal(requests.length, completedRequestCount + 1, "another chat makes its own prediction even if its turn ID is the same");
+  await openChat("chat", restored);
+  await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
+  assert.equal(requests.length, completedRequestCount + 1, "switching back restores the original chat's result");
+  await change({ eligible: false, enabled: false });
+  await change({ eligible: true });
+  assert.equal(await page.locator("output").textContent(), "", "a disabled setting hides a stored prediction");
+  assert.equal(requests.length, completedRequestCount + 1);
+  await change({ enabled: true });
+  await page.waitForFunction(() => document.querySelector("output").textContent === "继续");
+  assert.equal(requests.length, completedRequestCount + 1);
   const pendingApproval = { id: "pending-approval", status: "blocked", nextStep: "pending_approval", approvalId: "approval",
     approvals: [{ id: "approval", status: "pending", reason: "Approve the proposed operation?" }] };
   await expectHistorySuggestion(pendingApproval, "Approve the proposed operation?");
@@ -157,24 +185,28 @@ try {
     reply: "Close the editor and reply when it is ready.",
     trailing: [{ id: "skip-record", type: "question_answer", selectedOptionId: "skip", text: "Skipped confirmation" }] };
   await expectHistorySuggestion(skippedQuestion, skippedQuestion.reply);
-  const modelSwitch = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"));
+  const beforeModelSwitch = requests.length;
   await change({ model: "dedicated-completion-model" });
-  assert.equal((await modelSwitch).postDataJSON().model, "dedicated-completion-model");
-  assert.equal(requests.length, 11);
+  assert.equal(requests.length, beforeModelSwitch, "the completed turn keeps its cached prediction when the model changes");
+  await expectHistorySuggestion({ ...restored, id: "new-reply", reply: "New reply." }, "New reply.", "dedicated-completion-model");
+  assert.equal(requests.length, beforeModelSwitch + 1, "a new reply invalidates the old result and uses the selected model");
   await change({ busy: true });
   await restoreHistory({ ...skippedQuestion, id: "answered-question", trailing: [
     { id: "answer-record", type: "question_answer", selectedOptionId: "custom", text: "Already closed" },
   ] });
   await change({ busy: false, model: "model-after-answer" });
   await page.waitForFunction(() => document.querySelector("output").textContent === "");
-  assert.equal(requests.length, 11, "a newer user answer suppresses the previous model reply");
+  assert.equal(requests.length, beforeModelSwitch + 1, "a newer user answer suppresses the previous model reply");
   await expectHistorySuggestion(restored, restored.reply, "model-after-answer");
-  const effortChange = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"), { timeout: 3000 });
+  const beforeEffortSwitch = requests.length;
   await change({ reasoningEffort: "high" });
-  const effortPayload = (await effortChange).postDataJSON();
+  assert.equal(requests.length, beforeEffortSwitch);
+  const effortRequest = page.waitForRequest(entry => entry.url().endsWith("/chat/input-prediction"), { timeout: 3000 });
+  await restoreHistory({ ...restored, id: "new-reasoning-reply" });
+  const effortPayload = (await effortRequest).postDataJSON();
   assert.equal(effortPayload.reasoning_effort, "high");
   assert.equal(effortPayload.model, "model-after-answer");
-  console.log("PASS: completed and restored replies, user decisions, model changes, deduplication, typing and cancellation");
+  console.log("PASS: completed and restored replies, cached suggestions, user decisions, model changes, deduplication, typing and cancellation");
 } finally {
   finishSlow?.();
   await browser?.close();

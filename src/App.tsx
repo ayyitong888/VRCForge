@@ -3582,7 +3582,7 @@ export default function App() {
               turnId: agentItemId,
               context: {
                 recent_user_messages: recentPredictionInputs(chat.items, `user-${turn.id}`, composerMessage),
-                assistant_tail: Array.from(reply).slice(-2000).join(""),
+                assistant_tail: reply,
               },
             }, predictionGeneration);
           }

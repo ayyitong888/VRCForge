@@ -2104,8 +2104,8 @@ export function useChatRunController({
         const onCompletedReply = turn.onCompletedReply;
         // Let the owning lane settle before running the independent suggestion.
         void Promise.resolve().then(() => {
-          const publicReply = visibleAgentDialogueText(response).trim();
-          if (publicReply) onCompletedReply(publicReply, chatSessionId, response.turnId || response.turn_id);
+          const publicReply = visibleAgentDialogueText(response);
+          if (publicReply.trim()) onCompletedReply(publicReply, chatSessionId, response.turnId || response.turn_id);
         }).catch(() => undefined);
       }
     }
