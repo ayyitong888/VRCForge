@@ -11835,7 +11835,7 @@ def _unity_core_status_retry(project_path: str, status_args: dict[str, Any]) -> 
 
 
 def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
-    """Return one pre-handshake runtime identity and Console compilation snapshot."""
+    """Read live Core readiness or verify a known installation's compilation."""
 
     project_value = str((params or {}).get("projectPath") or "").strip()
     if not project_value:
@@ -11901,9 +11901,22 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         max_errors=int((params or {}).get("maxErrors") or 30),
     )
     core_info = diagnostics.get("coreInfo") if isinstance(diagnostics.get("coreInfo"), dict) else None
+    installed_at_value = str((params or {}).get("installedAt") or "").strip()
+    compile_result = diagnostics.get("compileResult")
+    live_read = _compile_snapshot_payload(compile_result)
+    process_id = (core_info or {}).get("processId")
+    # Diagnostics may copy a compileResult from Core info before the actual tool call.
+    live_tool_answered = (
+        isinstance(compile_result, dict)
+        and compile_result.get("isError") is False
+        and live_read is not None
+        and live_read.get("ok") is True
+        and type(process_id) is int and process_id > 0
+        and live_read.get("unityProcessId") == process_id
+    )
     compile_snapshot = (core_info or {}).get("compileSnapshot")
-    if not isinstance(compile_snapshot, dict):
-        compile_snapshot = _compile_snapshot_payload(diagnostics.get("compileResult"))
+    if (not installed_at_value and live_tool_answered) or not isinstance(compile_snapshot, dict):
+        compile_snapshot = live_read
     identity_matches = bool(
         core_info
         and core_info.get("coreIdentity") == expected["coreIdentity"]
@@ -11915,7 +11928,6 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     error_count = int((compile_snapshot or {}).get("errorCount") or 0)
     is_compiling = (compile_snapshot or {}).get("isCompiling") is True
     capture_complete = (compile_snapshot or {}).get("captureComplete") is True
-    installed_at_value = str((params or {}).get("installedAt") or "").strip()
     from core_upgrade_readiness import compile_snapshot_is_fresh
     snapshot_fresh = compile_snapshot_is_fresh(compile_snapshot, installed_at_value)
     captured_at_value = str((compile_snapshot or {}).get("capturedAt") or "").strip()
@@ -11932,12 +11944,18 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         status = "compile_failed_old_assembly_retained" if not identity_matches else "compile_failed"
     elif is_compiling:
         status = "compiling"
+    elif diagnostics.get("transportError"):
+        status = "core_unreachable"
     elif not identity_matches:
-        status = "waiting_for_domain_reload" if not diagnostics.get("transportError") else "core_unreachable"
+        status = "waiting_for_domain_reload"
+    elif diagnostics.get("handshakeError"):
+        status = "core_unreachable"
+    elif not installed_at_value:
+        status = "ready" if live_tool_answered and live_read.get("isCompiling") is False else "waiting_for_core_read"
     elif not capture_complete:
         status = "waiting_for_console_snapshot"
     elif not snapshot_fresh:
-        status = "waiting_for_post_install_compile" if installed_at_value else "waiting_for_console_snapshot"
+        status = "waiting_for_post_install_compile"
     else:
         status = "ready"
     startup_route = {}
@@ -11945,6 +11963,8 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     connection_refused = any(text in transport_error for text in ("winerror 10061", "connection refused", "actively refused"))
     if status == "waiting_for_domain_reload" or (status == "core_unreachable" and connection_refused):
         startup_route = _unity_core_startup_route(project_path, expected, params)
+    elif status == "waiting_for_core_read":
+        startup_route = _unity_core_status_retry(project_path, params)
     elif status in {"compiling", "waiting_for_console_snapshot", "waiting_for_post_install_compile"}:
         startup_route = {
             "recommendedAction": "recheck_core_after_compilation",
@@ -11964,7 +11984,11 @@ def core_upgrade_status_sync(params: dict[str, Any]) -> dict[str, Any]:
         "runtimeCoreInfo": core_info,
         "runtimeIdentityMatchesTarget": identity_matches,
         "console": compile_snapshot,
-        "consoleErrorCount": error_count if capture_matches_install and compile_snapshot else None,
+        "consoleErrorCount": (
+            error_count
+            if capture_matches_install and compile_snapshot and (installed_at_value or capture_complete or error_count)
+            else None
+        ),
         "consoleCaptureComplete": capture_complete,
         "compileSnapshotFresh": snapshot_fresh,
         "installedAt": installed_at_value,
@@ -26543,6 +26567,14 @@ def runtime_observation_start_sync(arguments):
         result.update({"ok": True, "verified": False, "mutationStarted": True,
                        "commitState": "pending", "readbackState": "pending",
                        "retryable": False})
+        project_path = str(getattr(settings, "unity_project_path", "") or "").strip()
+        if project_path:
+            result["nextAction"] = {
+                "tool": "vrcforge_get_runtime_observation",
+                "arguments": {"projectPath": project_path, "jobId": result["jobId"],
+                              "avatarPath": result["avatarPath"],
+                              **({"executionTarget": arguments["executionTarget"]} if "executionTarget" in arguments else {})},
+            }
     return result
 
 
@@ -29345,11 +29377,14 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         read_agent_ndmf_errors,
     )
+    from core_upgrade_readiness import await_core_upgrade_snapshot
+
     AGENT_GATEWAY.register_tool(
         "vrcforge_core_upgrade_status",
-        "When to use: check the compiled Unity Core identity and compilation evidence after installation. Use the projectPath and installedAt from the installation receipt. The built-in runtime waits for a running Editor to finish reloading or compiling. Only ready=true confirms readiness. Previous Console snapshots do not establish the outcome of this installation. When NOT to use: do not reinstall or restart the Editor solely because a reload is pending. Do not call this for ordinary edits after Core is ready.",
+        "When to use: check Core connectivity after opening the matching Editor, or verify compilation after a Core installation. For an existing installation, omit installedAt and use the live Core read in the ready receipt. After installing or updating Core, use projectPath and installedAt from the install receipt and wait for ready=true with fresh compilation evidence. When NOT to use: do not reinstall or restart the Editor solely because a reload is pending. Negative example: do not check Core startup again before ordinary scene edits when the current connection already works.",
         "read/debug",
         core_upgrade_status_sync,
+        await_observation=await_core_upgrade_snapshot,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_get_refresh_asset_database_status",

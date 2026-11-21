@@ -4,30 +4,23 @@ from datetime import datetime
 from os.path import normcase, normpath
 from time import monotonic
 
+from agent_tool_wait import await_tool_observation
+
 
 def await_core_upgrade_snapshot(read, wait, *, timeout=180.0, clock=monotonic):
     """Keep the owned runtime call open while its read receipt requests this same observation."""
-    deadline = clock() + timeout
-    payload = read()
-    while True:
+    def is_pending(payload):
         receipt = payload.get("result") or {}
-        if not (
+        return (
             isinstance(receipt, dict)
             and receipt.get("schema") == "vrcforge.core_upgrade_status.v1"
             and receipt.get("ok") is True
             and receipt.get("ready") is False
-            and (receipt.get("nextAction") or {}).get("tool") == "unity_core_upgrade_status"
-        ):
-            return payload, False
-        remaining = deadline - clock()
-        if remaining <= 0:
-            return payload, True
-        if not wait(min(3.0, remaining)):
-            return payload, False  # The runtime owns cancellation and records the last observation.
-        if clock() >= deadline:
-            return payload, True
-        # Reuse the original validated read and its bound scope, never a write or a suggested argument.
-        payload = read()
+            and isinstance(receipt.get("nextAction"), Mapping)
+            and receipt["nextAction"].get("tool") == "unity_core_upgrade_status"
+        )
+
+    return await_tool_observation(read, wait, is_pending=is_pending, timeout=timeout, interval=3.0, clock=clock)
 
 
 def compile_snapshot_is_fresh(snapshot, installed_at):
@@ -82,9 +75,12 @@ def core_action_binding(tool, views):
 
 def ready_process_binding(receipt):
     core = receipt.get("runtimeCoreInfo")
+    installed_at = receipt.get("installedAt")
     if not (receipt.get("ready") is True and receipt.get("runtimeIdentityMatchesTarget") is True
-            and receipt.get("compileSnapshotFresh") is True and receipt.get("consoleErrorCount") == 0
-            and isinstance(core, Mapping) and type(core.get("processId")) is int and core["processId"] > 0):
+            and isinstance(installed_at, str) and isinstance(core, Mapping)
+            and type(core.get("processId")) is int and core["processId"] > 0):
         return None
-    return {"projectPath": normcase(normpath(receipt["projectPath"])), "installedAt": receipt["installedAt"],
+    if installed_at and (receipt.get("compileSnapshotFresh") is not True or receipt.get("consoleErrorCount") != 0):
+        return None
+    return {"projectPath": normcase(normpath(receipt["projectPath"])), "installedAt": installed_at,
             "processId": core["processId"]}

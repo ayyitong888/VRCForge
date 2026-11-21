@@ -14,8 +14,11 @@ def status(monkeypatch, tmp_path):
                 "protocolRange": {"minimum": "2026-07-28", "maximum": "2026-07-28"}, "versionSource": "compiled_constant"}
     snapshot = {"source": "compilation_pipeline", "capturedAt": "2026-09-06T09:41:00+09:00", "captureComplete": True,
                 "isCompiling": False, "errorCount": 0, "warningCount": 0}
-    diagnostic = {"coreInfo": {**expected, "instanceId": "same-instance", "compileSnapshot": deepcopy(snapshot)},
-                  "compileResult": {"structuredContent": {"data": deepcopy(snapshot)}}, "transportError": ""}
+    diagnostic = {"coreInfo": {**expected, "instanceId": "same-instance", "processId": 25008,
+                              "compileSnapshot": deepcopy(snapshot)},
+                  "compileResult": {"isError": False, "structuredContent": {"success": True,
+                                    "data": {**snapshot, "unityProcessId": 25008, "ok": True}}},
+                  "transportError": "", "handshakeError": None}
     monkeypatch.setattr(ds, "resolve_target_project", lambda _: str(project))
     monkeypatch.setattr(ds, "_resolve_install_source_assets", lambda: tmp_path / "source")
     monkeypatch.setattr(ds, "_unity_core_compiled_identity", lambda _: expected)
@@ -71,6 +74,42 @@ def test_fresh_compilation_in_progress_still_waits(status):
 def test_health_query_without_install_boundary_preserves_existing_ready(status):
     _, call = status
     assert call("")["ready"] is True
+
+
+@pytest.mark.parametrize("console_readable", [True, False])
+def test_existing_core_with_live_read_is_ready_without_a_new_compile(status, console_readable):
+    from core_upgrade_readiness import ready_process_binding
+
+    diagnostics, call = status
+    incomplete = {"captureComplete": False, "capturedAt": ""}
+    diagnostics["coreInfo"]["compileSnapshot"].update(incomplete)
+    diagnostics["compileResult"]["structuredContent"]["data"].update(
+        capturedAt="", captureComplete=console_readable,
+        source="console_log" if console_readable else "unavailable",
+    )
+
+    receipt = call("")
+    assert receipt["status"] == "ready" and receipt["ready"] is True
+    assert receipt["compileSnapshotFresh"] is False
+    assert receipt["consoleErrorCount"] == (0 if console_readable else None)
+    assert ready_process_binding(receipt)["processId"] == 25008
+    assert call()["ready"] is False
+
+
+@pytest.mark.parametrize("unavailable", ["transport", "handshake", "tool", "other_process", "editor_compiling"])
+def test_health_query_requires_a_usable_live_core_read(status, unavailable):
+    diagnostics, call = status
+    if unavailable == "transport":
+        diagnostics["transportError"] = "connection closed during diagnostics"
+    elif unavailable == "handshake":
+        diagnostics["handshakeError"] = {"message": "project binding rejected"}
+    elif unavailable == "tool":
+        diagnostics["compileResult"]["isError"] = True
+    elif unavailable == "other_process":
+        diagnostics["compileResult"]["structuredContent"]["data"]["unityProcessId"] = 28000
+    else:
+        diagnostics["compileResult"]["structuredContent"]["data"]["isCompiling"] = True
+    assert call("")["ready"] is False
 
 
 def test_stale_console_counts_are_only_historical(status):
@@ -136,7 +175,6 @@ def test_native_core_read_waits_without_replaying_installer(tmp_path, monkeypatc
     gateway, model, _ = setup_gateway(tmp_path, [
         call("status", name, args), {"role": "assistant", "content": "Checked."},
     ])
-    gateway.register_tool(name, "Check Core.", "read/debug", read)
     gateway.register_tool("vrcforge_install_unity_core", "Install Core.", "write",
                           lambda _: pytest.fail("installer replayed"), write=True)
 
@@ -150,6 +188,7 @@ def test_native_core_read_waits_without_replaying_installer(tmp_path, monkeypatc
     bounded_wait = cr.await_core_upgrade_snapshot
     monkeypatch.setattr(cr, "await_core_upgrade_snapshot",
                         lambda read, wait: bounded_wait(read, wait, timeout=8, clock=lambda: clock[0]))
+    gateway.register_tool(name, "Check Core.", "read/debug", read, await_observation=cr.await_core_upgrade_snapshot)
     monkeypatch.setattr(gateway, "_wait_for_provider_retry", wait)
     result = run(gateway, tmp_path)
     assert len(set(reads)) == 1 and reads[0][1] == args["installedAt"]
@@ -157,7 +196,11 @@ def test_native_core_read_waits_without_replaying_installer(tmp_path, monkeypatc
     if ending in {"timeout", "cancel"}:
         assert len(model.requests) == 1
         assert len(reads) == (3 if ending == "timeout" else 1)
-        assert result["plan"]["nextStep"] == ("paused" if ending == "timeout" else "cancelled")
+        assert result["plan"]["nextStep"] == ("waiting_for_tool" if ending == "timeout" else "cancelled")
+        if ending == "timeout":
+            assert result["plan"]["reason"] == "tool_poll_timeout"
+            gate = result["plan"]["completionGate"]
+            assert gate["status"] == "pending" and gate["pollTarget"] == pending["nextAction"]
     else:
         assert len(model.requests) == 2 and len(reads) == 2
         assert result["steps"][0]["result"]["status"] == ending

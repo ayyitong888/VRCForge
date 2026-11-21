@@ -151,7 +151,11 @@ from checkpoint_user_policy import (
     checkpoint_skip_authority_for_context,
     checkpoint_skip_authority_from_policy,
 )
-from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
+from agent_tool_result_contract import (
+    TERMINAL_JOB_STATUSES, completion_gate_plan, job_receipt,
+    normalize_agent_tool_result, pending_execution_receipt,
+)
+from agent_tool_wait import await_tool_observation
 from chat_attachment_limits import MAX_MESSAGE_ATTACHMENT_ITEMS, MAX_MESSAGE_FILE_ATTACHMENTS
 from context_compaction import normalize_compaction_recovery
 from stage1_atomic_writes import (
@@ -453,6 +457,7 @@ class AgentTool:
     requires_user_activation: bool = False
     polling: bool = False
     progress_diagnostic_fields: tuple[str, ...] = ()
+    await_observation: Callable[[Callable, Callable], tuple[dict[str, Any], bool]] | None = None
 
 
 @dataclass
@@ -497,6 +502,7 @@ class UserConstraintsSnapshot:
 # Runtime observation status is a bounded, read-only tool in its own category;
 # its start operation remains a supervised write handler.
 RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview", "runtime/observation"}
+RUNTIME_JOB_OBSERVATION_TIMEOUT_SECONDS = 180.0
 # Interactive work stops on the model's final assistant response. Automation
 # may explicitly set maxAgenticTurns; tool calls remain telemetry only and
 # completion remains Runtime-verified.
@@ -2617,6 +2623,7 @@ class AgentGateway:
         requires_user_activation: bool = False,
         polling: bool = False,
         progress_diagnostic_fields: tuple[str, ...] = (),
+        await_observation: Callable[[Callable, Callable], tuple[dict[str, Any], bool]] | None = None,
     ) -> None:
         self._tools[name] = AgentTool(
             name=name,
@@ -2628,6 +2635,7 @@ class AgentGateway:
             requires_user_activation=requires_user_activation,
             polling=polling,
             progress_diagnostic_fields=progress_diagnostic_fields,
+            await_observation=await_observation,
         )
 
     def register_external_mcp_unity_tool(self, name: str, block: str) -> None:
@@ -6815,6 +6823,46 @@ class AgentGateway:
             return bool(tool and not tool.write and not tool.advanced and not tool.requires_user_activation
                         and tool_name not in self._write_handlers)
 
+        def owned_poll_route(target: Any) -> tuple[str, dict[str, Any], bool] | None:
+            request = ensure_dict(target)
+            tool = str(request.get("tool") or "")
+            arguments = ensure_dict(request.get("arguments"))
+            if not tool or not self.runtime_planner.role_tool_allowed(tool) or task_loop.skill_policy_block_reason(tool):
+                return None
+            if (is_shell_process_observation(tool, arguments) and tool in self._tools
+                    and arguments.get("action") == "poll" and arguments.get("sessionId")):
+                return tool, arguments, True
+            definition = self._tools.get(tool)
+            if not (definition and definition.polling and read_continuation_allowed(tool)):
+                return None
+            path = arguments.get("projectPath")
+            if not (arguments.get("jobId", arguments.get("job_id")) and project_root and isinstance(path, str)
+                    and command_safety.normalize_filesystem_path(path)
+                    == command_safety.normalize_filesystem_path(project_root)):
+                return None
+            return tool, arguments, False
+
+        def wait_for_tool_read(delay: float) -> bool:
+            return self._wait_for_provider_retry(
+                delay, session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+            )
+
+        def job_poll_state(payload: Mapping[str, Any], job_id: str) -> str:
+            receipt = job_receipt(payload)
+            if not receipt or receipt.get("jobId", receipt.get("job_id")) != job_id:
+                return ""
+            if str(receipt.get("status") or "").casefold() in TERMINAL_JOB_STATUSES:
+                return "terminal"
+            return "pending" if pending_execution_receipt(payload) is not None else ""
+
+        def observation_unconfirmed(plan, reason, target=None):
+            return {
+                **plan, "summary": "", "reply": "该操作仍待核验，已保留原操作的状态和查询入口。",
+                "nextStep": "waiting_for_tool", "continueLoop": False, "reason": reason,
+                "completionGate": {"status": "pending", "reason": reason,
+                                   **({"pollTarget": target} if target else {})},
+            }
+
         def assess_task_terminal(plan: Mapping[str, Any]) -> dict[str, Any]:
             gated = task_loop.gate_terminal(plan, read_continuation_allowed=read_continuation_allowed, require_completion_claim=bool(
                 prior_question_answers and any(
@@ -8193,6 +8241,71 @@ class AgentGateway:
             )
             completion_gate = ensure_dict(assess_task_terminal(plan).get("completionGate")) if final_candidate else {}
             poll_target = completion_gate.get("pollTarget") if completion_gate.get("reason") == "tool_poll_required" else None
+            if poll_route := owned_poll_route(poll_target):
+                poll_tool, poll_arguments, shell_poll = poll_route
+                owner = self._runtime_shell_owner(turn_id, client_turn_id, session_id)
+                self._emit_runtime_status(
+                    "running_tool", session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
+                )
+
+                def read_owned_poll():
+                    return self._runtime_skill_executor.execute(poll_tool, poll_arguments, agent_name, owner_id=owner)
+
+                def own_poll_state(payload):
+                    if shell_poll:
+                        process = ensure_dict(ensure_dict(payload.get("result")).get("session"))
+                        if process.get("sessionId") != poll_arguments["sessionId"]:
+                            return ""
+                        if process.get("status") == "running":
+                            return "input" if process.get("waitingForInput") else "pending"
+                        return "terminal" if process.get("status") in {
+                            "finished", "timed_out", "killed", "termination_failed",
+                        } else ""
+                    return job_poll_state(payload, poll_arguments.get("jobId", poll_arguments.get("job_id")))
+
+                observed, expired = await_tool_observation(
+                    read_owned_poll, wait_for_tool_read, is_pending=lambda payload: own_poll_state(payload) == "pending",
+                    timeout=None if shell_poll else RUNTIME_JOB_OBSERVATION_TIMEOUT_SECONDS, interval=1.0,
+                )
+                if take_runtime_cancellation():
+                    last_plan = cancelled_runtime_plan()
+                    break
+                poll_state = own_poll_state(observed)
+                if poll_state != "input":
+                    if poll_state != "terminal":
+                        if poll_state == "pending":
+                            steps.append({"index": len(steps), "kind": "skill", "tool": poll_tool,
+                                          "status": "pending", "result": observed.get("result"),
+                                          "outcome": observed.get("outcome")})
+                        last_plan = observation_unconfirmed(
+                            plan, "tool_poll_timeout" if expired else "tool_observation_unavailable", poll_target,
+                        )
+                        break
+                    action = task_loop.record_action(
+                        kind="skill", tool=poll_tool, arguments=poll_arguments, raw_result=observed,
+                        outcome=ensure_dict(observed.get("outcome")),
+                    )
+                    result = observed.get("result")
+                    row = {"tool": poll_tool, "kind": "skill", "status": observed.get("status"),
+                           "result": result, "outcome": action["outcome"], "actionId": action["actionId"]}
+                    steps.append({**row, "index": len(steps)})
+                    loop_state.append(row)
+                    append_timeline_event(
+                        "tool_result", label=poll_tool, tool=poll_tool, action_id=action["actionId"],
+                        status=action["outcome"]["status"], summary=action["outcome"].get("summary") or "",
+                        capture_result=result,
+                    )
+                    tool_calls_used += 1
+                    remaining_gate = ensure_dict(task_loop.gate_terminal(plan).get("completionGate"))
+                    if remaining_gate.get("reason") == "tool_poll_required" and remaining_gate.get("pollTarget") == poll_target:
+                        last_plan = observation_unconfirmed(plan, "tool_observation_unavailable", poll_target)
+                        break
+                    if native_binding:
+                        native_turn.append_hidden(
+                            "Runtime status observation (data): "
+                            + self.runtime_planner.complete_model_information(row, native_contract=True)
+                        )
+                    continue
             continuation_request = completion_gate.get("nextRequest") if completion_gate.get("reason") == "tool_continuation_required" else None
             continuation_key = json.dumps(continuation_request, sort_keys=True) if continuation_request else ""
             uncovered_requirements = completion_gate.get("uncoveredRequirementIds")
@@ -8543,7 +8656,7 @@ class AgentGateway:
                 now = time.monotonic()
                 started, previous = poll_times.get(poll_key, (now, now - 1.0))
                 delay = max(0.0, previous + 1.0 - now)
-                if now + delay - started >= 180.0:
+                if now + delay - started >= RUNTIME_JOB_OBSERVATION_TIMEOUT_SECONDS:
                     last_plan = {**plan, "nextStep": "waiting_for_tool", "continueLoop": False,
                                  "reason": "tool_poll_timeout", "reply": "等待工具状态超时，任务结果仍待确认。"}
                     break
@@ -8666,7 +8779,8 @@ class AgentGateway:
                 )
 
             step_tool = ""
-            core_wait_timed_out = False
+            tool_wait_timed_out = False
+            tool_wait_target = None
             action_arguments: Any = {}
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
@@ -9043,15 +9157,24 @@ class AgentGateway:
                                 restored_absent_paths=restored_absent_paths, read_scope=read_scope,
                             )
 
-                        if step_tool == "vrcforge_core_upgrade_status":
-                            from core_upgrade_readiness import await_core_upgrade_snapshot
-
-                            step_payload, core_wait_timed_out = await_core_upgrade_snapshot(
-                                execute_scoped_skill,
-                                lambda delay: self._wait_for_provider_retry(
-                                    delay, session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id,
-                                ),
+                        if (planned_definition and planned_definition.await_observation
+                                and read_continuation_allowed(step_tool)):
+                            step_payload, tool_wait_timed_out = planned_definition.await_observation(
+                                execute_scoped_skill, wait_for_tool_read,
                             )
+                            tool_wait_target = ensure_dict(step_payload.get("result")).get("nextAction")
+                        elif (planned_definition and planned_definition.polling
+                              and (job_id := step_params.get("jobId", step_params.get("job_id")))
+                              and read_continuation_allowed(step_tool)):
+                            step_payload, tool_wait_timed_out = await_tool_observation(
+                                execute_scoped_skill, wait_for_tool_read,
+                                is_pending=lambda payload: job_poll_state(payload, job_id) == "pending",
+                                timeout=RUNTIME_JOB_OBSERVATION_TIMEOUT_SECONDS, interval=1.0,
+                            )
+                            tool_wait_target = {"tool": step_tool, "arguments": action_arguments}
+                            if job_receipt(step_payload) and not job_poll_state(step_payload, job_id):
+                                last_plan = observation_unconfirmed(plan, "tool_observation_unavailable", tool_wait_target)
+                                break
                         else:
                             step_payload = execute_scoped_skill()
                 finally:
@@ -9661,11 +9784,10 @@ class AgentGateway:
                 last_plan = cancelled_runtime_plan()
                 break
 
-            if core_wait_timed_out:
-                last_plan = {
-                    **plan, "nextStep": "paused", "reason": "tool_poll_timeout", "continueLoop": False,
-                    "reply": "等待 Unity Core 就绪超时，本轮已暂停。已保留最后一次状态，可继续检查同一项目。",
-                }
+            if tool_wait_timed_out:
+                last_plan = observation_unconfirmed(
+                    plan, "tool_poll_timeout", tool_wait_target,
+                )
                 break
 
             if step_waits_for_approval:
@@ -9804,7 +9926,7 @@ class AgentGateway:
             handoff_terminal is not None
             or last_plan.get("scopeDenied") is True
             or last_plan.get("restoreFailureTurnStop") is True
-            or last_plan.get("reason") == "tool_poll_timeout"
+            or last_plan.get("reason") in {"tool_poll_timeout", "tool_observation_unavailable"}
             or str(last_plan.get("nextStep") or "") in {
                 "plan_mode_blocked",
                 "cancelled",

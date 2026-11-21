@@ -135,38 +135,18 @@ def test_running_process_reads_settle_without_reusing_a_write_receipt(tmp_path, 
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
-@pytest.mark.parametrize("correct_poll_envelope", [False, True])
-def test_yielded_foreground_shell_can_do_independent_work_and_poll_in_one_turn(
-    tmp_path, exit_code, correct_poll_envelope,
+def test_harness_finishes_yielded_foreground_shell_after_independent_work(
+    tmp_path, exit_code,
 ):
     from tests.test_native_permission_modes import _set_mode
     from tests.test_native_runtime_gateway import call, finish, setup_gateway
-
-    def poll(request):
-        feedback = request["messages"][-2]["content"]
-        handle = re.search(r"shell-[a-f0-9]{32}", feedback)
-        assert handle, feedback
-        if correct_poll_envelope:
-            return call("malformed-poll", "vrcforge_runtime_action", {
-                "action": "shell", "summary": "检查 Unity 编译等待命令是否已完成。",
-                "shell_params": {"action": "poll", "sessionId": handle[0]},
-            })
-        return call("poll", "vrcforge_shell_process", {"action": "poll", "sessionId": handle[0], "timeoutMs": 4000})
-
-    def corrected_poll(request):
-        feedback = next(message["content"] for message in request["messages"]
-                        if message.get("tool_call_id") == "malformed-poll")
-        handle = re.search(r"shell-[a-f0-9]{32}", feedback)
-        assert "call_tool" in feedback and "vrcforge_shell_process" in feedback and handle, feedback
-        return call("poll", "vrcforge_shell_process", {"action": "poll", "sessionId": handle[0], "timeoutMs": 4000})
 
     gateway, model, reads = setup_gateway(tmp_path, [
         call("shell", "vrcforge_runtime_action", {"action": "shell",
                                                   "shell_command": f"Start-Sleep -Milliseconds 400; exit {exit_code}",
                                                   "shell_params": {"yieldMs": 10}}),
         call("read", "vrcforge_read_text_file", {"path": "fixture.txt"}),
-        {"role": "assistant", "content": "The work is complete."}, poll,
-        *([corrected_poll] if correct_poll_envelope else []), finish,
+        {"role": "assistant", "content": "The work is complete."}, finish,
     ])
     _set_mode(gateway, "roslyn_full_auto")
     tool = "vrcforge_shell_process"
@@ -177,20 +157,22 @@ def test_yielded_foreground_shell_can_do_independent_work_and_poll_in_one_turn(
             "sessionId": "shell-inline", "clientTurnId": "single-turn", "projectRoot": str(tmp_path),
             "projectType": "general", "_projectContextActive": False, "maxAgenticTurns": 7})
         assert response["plan"]["nextStep"] == ("tool_failed" if exit_code else "done"), response["plan"]
-        assert len(model.requests) == (6 if correct_poll_envelope else 5) and len(reads) == 1
+        assert len(model.requests) == 4 and len(reads) == 1
         launched = next(message["content"] for message in model.requests[1]["messages"]
                         if message.get("tool_call_id") == "shell")
         assert "vrcforge_shell_process" in launched and re.search(r"shell-[a-f0-9]{32}", launched)
-        assert "The shell process was still running when this result was recorded." in launched
+        assert "no final result has been observed" in launched
         launch_receipt = next(event["payload"] for event in response["timeline"]
                             if event["kind"] == "tool_result" and event["payload"].get("tool") == "shell")
         assert launch_receipt["status"] == "pending"
-        assert launch_receipt["summary"] == "The shell process was still running when this result was recorded."
         actions = response["task"]["actions"]
         assert sum(action["kind"] == "shell" for action in actions) == 1
         launch = next(action for action in actions if action["kind"] == "shell")
         assert launch["status"] == ("failed" if exit_code else "completed")
         assert launch["completionReadActionId"] == next(a["actionId"] for a in actions if a["tool"] == tool)
+        result = next(step["result"] for step in response["steps"] if step["tool"] == tool)
+        assert result["session"]["sessionId"] == re.search(r"shell-[a-f0-9]{32}", launched)[0]
+        assert result["session"]["exitCode"] == exit_code
         assert not gateway.runtime_runs.shell_continuation_states()
     finally:
         assert gateway.shell.shutdown().pending_count == 0

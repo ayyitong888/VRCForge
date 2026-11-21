@@ -482,7 +482,11 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
         "safeToRetry",
     ):
         if key in value:
-            result[key] = copy.deepcopy(value[key]) if key == "nextRequest" else _bounded_contract_fact(value[key])
+            executable_route = key == "nextRequest" or (
+                key == "nextAction" and isinstance(value[key], Mapping)
+                and isinstance(value[key].get("arguments"), Mapping)
+            )
+            result[key] = copy.deepcopy(value[key]) if executable_route else _bounded_contract_fact(value[key])
     diagnostics = value.get("diagnostics")
     source_error = (
         diagnostics.get("sourceError")
@@ -1055,9 +1059,10 @@ def approval_completion(
     if status == "ok" and verified.get("targetEffectVerified") is True:
         if binding := core_action_binding(tool, _mapping_views(raw_result)):
             verified["coreActionBinding"] = binding
+    observation = runtime_observation_receipt(raw_result) if status == "pending" else None
     if status == "ok":
         task_status = "completed"
-    elif status == "pending" and (runtime_observation_receipt(raw_result) or pending_execution_receipt(raw_result)):
+    elif status == "pending" and (observation or pending_execution_receipt(raw_result)):
         task_status = "running"
     elif status == "pending":
         task_status = status
@@ -1075,6 +1080,8 @@ def approval_completion(
         "actionId": _bounded_text(context.get("actionId"), 80),
         "tool": tool,
         "outcome": verified,
+        **({"_runtimeObservation": {key: observation[key] for key in ("jobId", "avatarPath", "coreIdentity")}}
+           if observation else {}),
     }
 
 
@@ -1672,6 +1679,11 @@ class AgentTaskLoop:
             ),
             **({"target": current_target} if current_target else {}),
         }
+        if (completion.get("status") == "running" and isinstance(completion_outcome, Mapping)
+                and completion_outcome.get("jobId")):
+            current_seed["runtimeStatus"] = "polling"
+            if isinstance(completion.get("_runtimeObservation"), Mapping):
+                current_seed["_runtimeObservation"] = completion["_runtimeObservation"]
         transaction = _write_transaction_from_execution(
             execution,
             task_id=self.task_id,
@@ -2017,6 +2029,7 @@ class AgentTaskLoop:
                             and prior["outcome"].get("jobId") == job_id and prior.get("status") == "running"):
                         prior["status"] = lifecycle
                         prior["outcome"] = effective
+                        prior["completionReadActionId"] = action_id
                         prior.pop("runtimeStatus", None)
         if observation and tool in {"vrcforge_start_runtime_observation", "vrcforge_get_runtime_observation"}:
             identity = {key: observation[key] for key in ("jobId", "avatarPath", "coreIdentity")}
@@ -2039,9 +2052,9 @@ class AgentTaskLoop:
         if kind == "skill" and tool == "vrcforge_core_upgrade_status" and isinstance(arguments, Mapping):
             receipt = next((r for r in _mapping_views(raw_result)
                             if r.get("schema") == "vrcforge.core_upgrade_status.v1"), None)
-            if (receipt and receipt.get("projectPath") and receipt.get("installedAt")
+            if (receipt and receipt.get("projectPath")
                     and normcase(normpath(receipt["projectPath"])) == normcase(normpath(str(arguments.get("projectPath") or "")))
-                    and receipt["installedAt"] == arguments.get("installedAt")):
+                    and (receipt.get("installedAt") or "") == (arguments.get("installedAt") or "")):
                 self._record_core_readiness(record, receipt)
         self._actions[action_id] = record
         self._latest_action_id = action_id
@@ -2153,6 +2166,8 @@ class AgentTaskLoop:
             expected = dict(install["outcome"]["coreActionBinding"])
         elif inherited:
             expected = dict(inherited[-1]["target"])
+        elif process:
+            expected = {"projectPath": project, "installedAt": ""}
         else:
             return  # An independent health query does not introduce an installation obligation.
         if process:
@@ -2296,7 +2311,7 @@ class AgentTaskLoop:
         required_action_id = str(requirement.get("actionId") or "")
         if requirement.get("verificationProfile") == "core_upgrade_ready":
             expected = requirement.get("target") or {}
-            if not expected.get("installedAt") or not expected.get("projectPath"):
+            if not expected.get("projectPath") or not (expected.get("installedAt") or expected.get("processId")):
                 return False
             return any(action["tool"] == requirement["tool"] and self._action_completion_confirmed(action)
                        and all((action["outcome"].get("coreReadyBinding") or {}).get(k) == v
@@ -2544,10 +2559,17 @@ class AgentTaskLoop:
         if running:
             if all(action.get("runtimeStatus") == "polling" for action in running):
                 action = running[0]
-                target = action["outcome"].get("jobId") or action.get("_conversationFollowup") or action["outcome"].get("nextAction")
+                next_action = action["outcome"].get("nextAction")
+                job_id = action["outcome"].get("jobId")
+                target = job_id or action.get("_conversationFollowup")
+                if isinstance(next_action, Mapping) and isinstance(arguments := next_action.get("arguments"), Mapping):
+                    read_job_ids = [arguments[key] for key in ("jobId", "job_id") if key in arguments]
+                    if not job_id or (read_job_ids and all(value == job_id for value in read_job_ids)):
+                        target = next_action
+                elif not target and isinstance(next_action, str):
+                    target = next_action
                 if target:
-                    # No completion callback owns these jobs. Give the planner its
-                    # handle back before accepting a final answer or yielding.
+                    # Leave the Harness the exact observation route or existing job handle.
                     return {
                         **gated, "summary": "", "reply": "尚未取得已启动任务的最终结果。",
                         "continueLoop": False, "nextStep": "paused", "reason": "tool_poll_required",

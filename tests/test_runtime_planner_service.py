@@ -440,12 +440,12 @@ def test_core_setup_guidance_uses_bound_project_and_existing_approval(native):
     assert "project_environment/assets_packages" in instructions
     assert "unity_core_upgrade_status" in instructions
     assert "Start with the Unity tool that answers the task" in instructions
-    assert "reuse the status tool's Console evidence" in instructions
+    assert "Reuse the status tool's Console evidence" in instructions
     assert "unity_install_unity_core" in instructions
     assert "current approval policy" in instructions
     assert "installedAt" in instructions and "ready=true" in instructions
     assert "before resuming the original task" in instructions
-    assert "waiting_for_console_snapshot" in instructions and "unity_get_compile_errors" in instructions
+    assert "without installedAt" in instructions and "unity_get_compile_errors" in instructions
     assert "unity_install_unity_core" not in prompt(False, project)[0]
     assert "unity_install_unity_core" not in prompt(True, "")[0]
 

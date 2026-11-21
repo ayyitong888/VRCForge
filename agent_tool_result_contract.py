@@ -51,6 +51,7 @@ TERMINAL_JOB_STATUSES = _FAILED_STATUSES | _SUCCESSFUL_EXECUTION_STATUSES | {
     "done", "cancelled", "canceled", "expired", "interrupted", "not_found", "no_change", "not_started",
     "partial", "incomplete", "rolled_back",
 }
+_UNSUCCESSFUL_JOB_STATUSES = {"expired", "not_found", "not_started"}
 _CARRIER_KEYS = (
     "structuredContent",
     "result",
@@ -487,6 +488,7 @@ def normalize_agent_tool_result(
         for view in views
     )
     pending_execution = pending_execution_receipt(value)
+    job = job_receipt(value)
     receipt = views[0] if views else {}
     if not views and not write and value is not None:
         receipt = {"ok": True}
@@ -523,6 +525,9 @@ def normalize_agent_tool_result(
     )
     for view in views:
         if view.get("isError") is True:
+            failed_view = view
+            break
+        if view is job and _status(view.get("status")) in _UNSUCCESSFUL_JOB_STATUSES:
             failed_view = view
             break
         if (
@@ -580,9 +585,9 @@ def normalize_agent_tool_result(
                         break
         summary = summary or projected_error["summary"]
         summary = summary or str(fallback_summary or "Tool execution failed.").strip()
-        code = projected_error["code"] or _first_text(
-            failure_views, ("code", "errorCode", "reason")
-        )
+        code = projected_error["code"] or _first_text(failure_views, ("code", "errorCode", "reason"))
+        if not code and failed_view is job and (job_status := _status(job.get("status"))) in _UNSUCCESSFUL_JOB_STATUSES:
+            code = f"job_{job_status}"
         error: dict[str, Any] | None = {
             "type": projected_error["type"] or "tool",
             "code": code or "tool_failed",
@@ -774,7 +779,7 @@ def normalize_agent_tool_result(
     request_owner = page if page is not None and "nextRequest" in page else owner
     if "nextRequest" in request_owner:
         result["nextRequest"] = deepcopy(request_owner["nextRequest"])
-    if job := job_receipt(value):
+    if job:
         result["jobId"] = job.get("jobId") or job.get("job_id")
         result["jobStatus"] = job.get("lastKnownStatus") or job.get("status")
     if write:

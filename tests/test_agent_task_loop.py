@@ -71,6 +71,108 @@ def ok_outcome(summary: str = "done") -> dict:
     }
 
 
+def test_core_health_after_open_requires_the_launched_process_without_compile_snapshot():
+    from agent_tool_result_contract import normalize_agent_tool_result
+    from core_upgrade_readiness import editor_process_receipt
+
+    project = {"projectPath": "Example"}
+    loop = AgentTaskLoop("Open and connect to the project")
+    launch = editor_process_receipt({**project, "ok": True, "status": "launched", "processId": 91})
+    loop.record_action(kind="write", tool="vrcforge_open_unity_project", arguments=project, raw_result=launch,
+                       outcome=normalize_agent_tool_result(launch, fallback_summary="Opened", write=True),
+                       action_id="opened")
+
+    def observe(process_id, action_id):
+        receipt = {**project, "ok": True, "schema": "vrcforge.core_upgrade_status.v1", "installedAt": "",
+                   "runtimeCoreInfo": {"processId": process_id}, "ready": True, "compileSnapshotFresh": False,
+                   "runtimeIdentityMatchesTarget": True, "consoleErrorCount": 0}
+        loop.record_action(kind="skill", tool="vrcforge_core_upgrade_status", arguments=project, raw_result=receipt,
+                           outcome=ok_outcome(), action_id=action_id)
+
+    observe(92, "wrong")
+    assert [obligation["target"]["processId"] for obligation in loop.pending_obligations()] == [91]
+    observe(91, "ready")
+    assert not loop.pending_obligations()
+    assert loop.planner_projection()["actions"][0]["completionReadActionId"] == "ready"
+
+
+@pytest.mark.parametrize("after_approval", [False, True])
+@pytest.mark.parametrize("read_job", ["job-1", "different-job"])
+def test_running_job_keeps_the_bound_observation_route(after_approval, read_job):
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    tool = "start_fixture_job"
+    arguments = {"projectPath": "Example"}
+    route = {"tool": "read_fixture_job", "arguments": {"jobId": read_job, "scope": {"folder": "Example"}}}
+    receipt = {"ok": True, "status": "queued", "jobId": "job-1", "nextAction": route}
+    outcome = normalize_agent_tool_result(receipt, fallback_summary="Started", write=True)
+    loop = AgentTaskLoop("Start a job and read its outcome")
+    if after_approval:
+        seed = loop.approval_seed(requested_kind="write", requested_tool=tool, requested_arguments=arguments)
+        context = approval_task_context(seed, tool=tool, arguments=arguments)
+        completed = approval_completion(context, raw_result=receipt, outcome=outcome)
+        loop = AgentTaskLoop.from_approval_context(context, completed)
+    else:
+        loop.record_action(kind="write", tool=tool, arguments=arguments, raw_result=receipt, outcome=outcome)
+
+    gate = loop.gate_terminal({"nextStep": "done"})["completionGate"]
+    assert gate["reason"] == "tool_poll_required"
+    assert gate["pollTarget"] == (route if read_job == "job-1" else "job-1")
+
+
+def test_runtime_observation_restores_approved_job_identity_for_terminal_read():
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    start = "vrcforge_start_runtime_observation"
+    poll = "vrcforge_get_runtime_observation"
+    scope = {"avatarPath": "Avatar", "projectPath": "Example"}
+    identity = {"jobId": "a" * 32, "coreIdentity": "Example|91", "avatarPath": scope["avatarPath"]}
+    job = {"schema": "vrcforge.runtime_observation.v1", "status": "pending", "ok": True, **identity}
+    loop = AgentTaskLoop("Observe the approved Avatar once")
+    seed = loop.approval_seed(requested_kind="write", requested_tool=start, requested_arguments=scope)
+    context = approval_task_context(seed, tool=start, arguments=scope)
+    completion = approval_completion(context, raw_result=job,
+                                     outcome=normalize_agent_tool_result(job, fallback_summary="Started", write=True))
+    loop = AgentTaskLoop.from_approval_context(context, completion)
+
+    def read(core_identity):
+        receipt = {**job, "status": "completed", "verified": True, "readback": identity,
+                   "coreIdentity": core_identity}
+        return loop.record_action(kind="skill", tool=poll, arguments={**scope, "jobId": job["jobId"]},
+                                  raw_result=receipt, outcome=ok_outcome())
+
+    read("Example|92")
+    assert completion["actionId"] not in loop.completed_action_ids()
+    observed = read(identity["coreIdentity"])
+    assert completion["actionId"] in loop.completed_action_ids()
+    assert loop.planner_projection()["actions"][0]["completionReadActionId"] == observed["actionId"]
+
+
+def test_expired_job_read_preserves_expiry_as_an_unsuccessful_job():
+    from agent_tool_result_contract import normalize_agent_tool_result
+
+    loop = AgentTaskLoop("Start a finite job and verify its result")
+    job_id = "a" * 32
+    start, poll = "start_fixture_job", "read_fixture_job"
+    running = {"ok": True, "status": "queued", "job_id": job_id}
+    initial = loop.record_action(kind="write", tool=start, arguments={}, raw_result=running,
+                                 outcome=normalize_agent_tool_result(running, fallback_summary="Started", write=True))
+    # Mirrors a successful vrc_poll_job transport response whose job expired
+    # and produced no result, as returned by UnityAsyncJobRegistry.
+    expired = {"ok": True, "status": "ok", "result": {
+        "status": "expired", "job_id": job_id, "after": None,
+        "error": {"code": "job_expired", "message": "Async job exceeded its bounded execution window."},
+    }}
+    observed = loop.record_action(kind="skill", tool=poll, arguments={"job_id": job_id}, raw_result=expired,
+                                  outcome=normalize_agent_tool_result(expired, fallback_summary="Read the job", write=False))
+    completed = next(action for action in loop.planner_projection()["actions"] if action["actionId"] == initial["actionId"])
+    assert completed["status"] == "failed"
+    assert completed["outcome"]["jobStatus"] == "expired"
+    assert completed["outcome"]["error"]["code"] == "job_expired"
+    assert completed["completionReadActionId"] == observed["actionId"]
+    assert loop.gate_terminal({"nextStep": "done"})["nextStep"] == "tool_failed"
+
+
 @pytest.mark.parametrize("tool,code,status", [
     ("vrcforge_write_asset", "internal_tool_selection_invalid", "failed"),
     ("vrcforge_load_internal_tool_block", "connection_failed", "failed"),

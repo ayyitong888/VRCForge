@@ -180,12 +180,12 @@ RUNTIME_SCOPE_UNITY_INSTRUCTION = (
 RUNTIME_UNITY_CORE_SETUP_INSTRUCTION = (
     "Start with the Unity tool that answers the task. On a bridge or Core mismatch, use unity_core_upgrade_status "
     "for the bound project from project_environment/assets_packages. "
+    "If the project is already set up, recheck without installedAt after opening its matching Editor. "
+    "A ready=true live read for the opened process lets you resume the original task. "
     "If confirmed missing or outdated, use unity_install_unity_core from the same leaf under the current approval policy. "
     "User-selected Plan may diagnose and describe the required action. "
     "Pass its installedAt back to unity_core_upgrade_status for ready=true, the expected identity and fresh zero-error compilation "
-    "before resuming the original task. A matching live Core can already be connected during waiting_for_console_snapshot. "
-    "For first install, reuse the status tool's Console evidence; use unity_get_compile_errors only if missing or incomplete. "
-    "Resume on a complete zero-error, non-compiling Console read. Upgrades require a fresh compile. "
+    "before resuming the original task. Reuse the status tool's Console evidence; use unity_get_compile_errors only for additional diagnostics. "
     "Wait for reload, diagnose compile errors, or request a human step only when tools cannot proceed."
 )
 RUNTIME_SCOPE_GENERAL_INSTRUCTION = (
