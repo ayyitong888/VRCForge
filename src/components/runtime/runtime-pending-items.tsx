@@ -1,10 +1,9 @@
-import { HelpCircle, ListTodo, ShieldCheck } from "lucide-react";
+import { HelpCircle, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 const pendingKinds = {
   question: { icon: HelpCircle, label: "questionCard.label" },
   approval: { icon: ShieldCheck, label: "workspace.pendingConfirmation" },
-  todo: { icon: ListTodo, label: "workspace.todo" },
 } as const;
 
 export type RuntimePendingItem = {

@@ -1,5 +1,5 @@
 import { Check, ChevronDown, ChevronRight, CircleAlert, ListTodo, Minus, Pause } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AgentProgress } from "../../lib/api";
@@ -12,32 +12,14 @@ const todoMarkers = new Map([
   ["cancelled", { icon: Minus, label: "workspace.progressCancelled" }],
 ]);
 
-export type TodoReveal = {
-  progressId: string;
-  sessionId: string;
-  onRevealed: () => void;
-};
-
 type TodoPanelProps = {
   progress: AgentProgress[];
   activeTodoIds?: ReadonlySet<string>;
   onOpenTodo?: (progress: AgentProgress) => void;
-  todoReveal?: TodoReveal;
 };
 
-function TodoItems({ progress, activeTodoIds, onOpenTodo, todoReveal }: TodoPanelProps) {
+function TodoItems({ progress, activeTodoIds, onOpenTodo }: TodoPanelProps) {
   const { t } = useTranslation();
-  const targetRow = useRef<HTMLLIElement>(null);
-  const targetIndex = todoReveal ? progress.findIndex((item) =>
-    item.progressId === todoReveal.progressId && item.sessionId?.trim() === todoReveal.sessionId,
-  ) : -1;
-  useLayoutEffect(() => {
-    const row = targetRow.current;
-    if (!todoReveal || !row) return;
-    row.scrollIntoView({ block: "nearest", inline: "nearest" });
-    (row.querySelector("button") ?? row).focus({ preventScroll: true });
-    todoReveal.onRevealed();
-  }, [todoReveal, targetIndex]);
 
   return (
     <ol className="m-0 grid list-none gap-2 p-0">
@@ -56,8 +38,6 @@ function TodoItems({ progress, activeTodoIds, onOpenTodo, todoReveal }: TodoPane
         return (
           <li
             key={item.progressId}
-            ref={index === targetIndex ? targetRow : undefined}
-            tabIndex={onOpenTodo && item.sessionId ? undefined : -1}
             className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-3 px-1 py-0.5"
             data-vrcforge-agent-todo-item={item.progressId}
             data-vrcforge-agent-todo-status={status}
@@ -82,7 +62,7 @@ function TodoItems({ progress, activeTodoIds, onOpenTodo, todoReveal }: TodoPane
               ) : <span className="[text-box:trim-both_cap_alphabetic]">{index + 1}</span>}
             </span>
             {onOpenTodo && item.sessionId ? (
-              <button type="button" className={cn(titleClassName, "rounded-sm text-left focus:outline-none focus:ring-2 focus:ring-ring")}
+              <button type="button" className={cn(titleClassName, "rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring")}
                 onClick={() => onOpenTodo(item)}>
                 {title}
               </button>
@@ -94,12 +74,9 @@ function TodoItems({ progress, activeTodoIds, onOpenTodo, todoReveal }: TodoPane
   );
 }
 
-export function AgentTodoPanel({ progress, activeTodoIds, onOpenTodo, todoReveal }: TodoPanelProps) {
+export function AgentTodoPanel({ progress, activeTodoIds, onOpenTodo }: TodoPanelProps) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
-  useEffect(() => {
-    if (todoReveal) setCollapsed(false);
-  }, [todoReveal]);
   if (!progress.length) return null;
 
   return (
@@ -120,14 +97,14 @@ export function AgentTodoPanel({ progress, activeTodoIds, onOpenTodo, todoReveal
       </h2>
       {!collapsed ? (
         <div className="app-scrollbar max-h-72 space-y-0.5 overflow-y-auto px-2 py-2">
-          <TodoItems progress={progress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} todoReveal={todoReveal} />
+          <TodoItems progress={progress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
         </div>
       ) : null}
     </section>
   );
 }
 
-export function AgentTodoPanelEmbedded({ progress, activeTodoIds, onOpenTodo, todoReveal }: TodoPanelProps) {
+export function AgentTodoPanelEmbedded({ progress, activeTodoIds, onOpenTodo }: TodoPanelProps) {
   if (!progress.length) return null;
 
   return (
@@ -135,7 +112,7 @@ export function AgentTodoPanelEmbedded({ progress, activeTodoIds, onOpenTodo, to
       className="space-y-0.5"
       data-vrcforge-agent-todo
     >
-      <TodoItems progress={progress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} todoReveal={todoReveal} />
+      <TodoItems progress={progress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
     </div>
   );
 }

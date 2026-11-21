@@ -7,7 +7,7 @@ import { formatCount } from "../../lib/utils";
 import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "../../lib/api";
 import type { ChatAttachment, ProjectType } from "../../lib/chat-types";
 import { runtimeAuthorizationLabelKey, runtimeAuthorizationMessageKey, type RuntimeAuthorizationStatus } from "../../lib/runtime-authorization-status";
-import { AgentTodoPanelEmbedded, type TodoReveal } from "./agent-todo-panel";
+import { AgentTodoPanelEmbedded } from "./agent-todo-panel";
 import { RuntimeAttentionRows, RuntimeDiffFileRow, RuntimeInfoRow, RuntimeSection, StatusDot, type RuntimeAttentionRowsProps } from "./runtime-sidebar-ui";
 import {
   Box,
@@ -130,7 +130,6 @@ export function ProjectWorkbenchSections({
   agentProgress,
   activeTodoIds,
   onOpenTodo,
-  todoReveal,
   subAgentPanel,
   userAttachmentSources,
   onLocateUserAttachmentSource,
@@ -158,7 +157,6 @@ export function ProjectWorkbenchSections({
   agentProgress: AgentProgress[];
   activeTodoIds?: ReadonlySet<string>;
   onOpenTodo?: (progress: AgentProgress) => void;
-  todoReveal?: TodoReveal;
   subAgentPanel?: ReactNode;
   userAttachmentSources: UserAttachmentSource[];
   onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
@@ -243,10 +241,6 @@ export function ProjectWorkbenchSections({
   }, [isUnityProject]);
 
   useEffect(() => {
-    if (todoReveal) setCollapsedSections((current) => current.todo ? { ...current, todo: false } : current);
-  }, [todoReveal, isUnityProject]);
-
-  useEffect(() => {
     window.localStorage.setItem(sectionsStorageKey, JSON.stringify(collapsedSections));
   }, [collapsedSections, sectionsStorageKey]);
 
@@ -279,7 +273,7 @@ export function ProjectWorkbenchSections({
       >
         <div data-vrcforge-project-workbench-activity>
           {agentProgress.length ? (
-            <AgentTodoPanelEmbedded progress={agentProgress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} todoReveal={todoReveal} />
+            <AgentTodoPanelEmbedded progress={agentProgress} activeTodoIds={activeTodoIds} onOpenTodo={onOpenTodo} />
           ) : (
             <div className="px-2 py-2 text-xs text-muted-foreground">
               {t("workspace.noProgress")}

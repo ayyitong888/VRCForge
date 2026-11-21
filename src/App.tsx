@@ -98,7 +98,6 @@ import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
 import type { RuntimePendingItem } from "./components/runtime/runtime-pending-items";
-import type { TodoReveal } from "./components/runtime/agent-todo-panel";
 import { approvalBelongsToRuntimeScope, filterQuestionsForRuntimeScope, pendingApprovalOwner, pendingApprovalReviewTarget, pendingQuestionReviewTargets, questionBelongsToRuntimeScope, questionContinuationOwner, runtimeProgressOwner, runtimeReviewItemForChat, runtimeReviewKind } from "./lib/runtime-scope";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import { flushChatsBeforeQuit } from "./lib/app-quit";
@@ -360,7 +359,6 @@ export default function App() {
   const revealedExternalApprovalIds = useRef(new Set<string>());
   const [approvalReveal, setApprovalReveal] = useState<{ chatId: string; approvalId: string } | null>(null);
   const [reviewQuestionReveal, setReviewQuestionReveal] = useState<{ chatId: string; questionId: string } | null>(null);
-  const [todoReveal, setTodoReveal] = useState<(TodoReveal & { chatId: string }) | null>(null);
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [settingsSearchSelection, setSettingsSearchSelection] = useState<SettingsSearchSelection | null>(null);
   const [runningEnterAction, setRunningEnterAction] = useState(loadRunningEnterAction);
@@ -1250,22 +1248,6 @@ export default function App() {
     if (owner && !owner.archived && !owner.sessionReadOnly) addPendingItem(owner, {
       id: `approval:${approval.id}`, kind: "approval", title: presentApproval(approval, t).title,
       onOpen: () => openPendingApprovalOwner(approval),
-    });
-  }
-  for (const todo of agentProgress) {
-    const owner = runtimeProgressOwner(todo, activityOwners);
-    if (owner && !["completed", "cancelled", "deleted"].includes(todo.status || "")) addPendingItem(owner, {
-      id: `todo:${owner.id}:${todo.progressId}`, kind: "todo", title: todo.title || todo.progressId,
-      onOpen: () => {
-        openRuntimeChat(owner);
-        const reveal = {
-          chatId: owner.id,
-          sessionId: owner.sessionId,
-          progressId: todo.progressId,
-          onRevealed: () => setTodoReveal((current) => current === reveal ? null : current),
-        };
-        setTodoReveal(reveal);
-      },
     });
   }
   const pendingRuntimeItems = [...pendingItemsByChat.values()].flat();
@@ -4841,7 +4823,6 @@ export default function App() {
               agentProgress={agentProgress}
               activeTodoIds={activeTodoIds}
               onOpenTodo={openTodoOwner}
-              todoReveal={todoReveal?.chatId === activeChatId && activeChatId === displayChat?.id ? todoReveal : undefined}
               projectWorkspace={projectChatWorkspace}
               subAgentPanel={activeView === "chat" ? subAgentActivityPanel : undefined}
               userAttachmentSources={userAttachmentSources}
